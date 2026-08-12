@@ -9,10 +9,15 @@
 
 // ============================================================
 // 引脚定义（MSM3526 / INMP441，I2S 数字 MEMS 麦克风）
+// 选择理由：三线相邻（左排针 GPIO15/16/17）、避开 USB(19/20)、
+// 八线PSRAM(26-37)、strapping(0/3/45/46)，且非 ADC，把 ADC1 留给植物传感器
+// 模块物理排布：一排是 [SD][VDD][GND]，另一排是 [SCK][WS][L/R]
+// MIC_VDD：GPIO13 软件输出 3.3V 给麦克风供电（电流仅 ~1.4mA，安全）
 // ============================================================
-#define I2S_SCK  5
-#define I2S_WS   4
-#define I2S_SD   41
+#define I2S_SCK  15
+#define I2S_WS   16
+#define I2S_SD   17
+#define MIC_VDD  13   // 输出高电平 ≈3.3V，给麦克风 VDD 供电
 #define I2S_PORT I2S_NUM_0
 
 // 采样率（ESP-SR 固定要求 16kHz）
@@ -158,6 +163,12 @@ static void handle_command(const char *cmd) {
 void setup() {
   Serial.begin(115200);
   delay(200);
+
+  // 用 GPIO14 输出 3.3V 给麦克风 VDD 供电（需先上电再初始化 I2S）
+  pinMode(MIC_VDD, OUTPUT);
+  digitalWrite(MIC_VDD, HIGH);
+  delay(50);
+
   Serial.printf("[SYS] PSRAM: %s, %u bytes | 堆内存可用: %u | CPU: %u MHz\n",
                 psramFound() ? "OK" : "FAIL",
                 (unsigned)ESP.getPsramSize(),
