@@ -9,15 +9,16 @@
 
 // ============================================================
 // 引脚定义（MSM3526 / INMP441，I2S 数字 MEMS 麦克风）
-// 选择理由：引脚集中（左排针 GPIO12/13/15/16）、避开 USB(19/20)、
-// 八线PSRAM(26-37)、strapping(0/3/45/46)，且非 ADC，把 ADC1 留给植物传感器
-// 模块物理排布：一排是 [SD][VDD][GND]，另一排是 [SCK][WS][L/R]
-// MIC_VDD：GPIO13 软件输出 3.3V 给麦克风供电（电流仅 ~1.4mA，安全）
+// 模块两排对接 ESP32 左排针连续引脚：
+//   一排 [SD][VDD][GND] → GPIO12 / GPIO13(软件3.3V) / 真实GND
+//   另一排 [L/R][WS][SCK] → GPIO17(拉低=左声道) / GPIO16 / GPIO15
+// 均避开 USB(19/20)、八线PSRAM(26-37)、strapping(0/3/45/46)，且非 ADC1
 // ============================================================
 #define I2S_SCK  15
 #define I2S_WS   16
 #define I2S_SD   12
-#define MIC_VDD  13   // 输出高电平 ≈3.3V，给麦克风 VDD 供电
+#define MIC_VDD  13   // 输出高电平 ≈3.3V，给麦克风 VDD 供电（~1.4mA，安全）
+#define MIC_LR   17   // 输出低电平 → 左声道（模块 L/R 接这里）
 #define I2S_PORT I2S_NUM_0
 
 // 采样率（ESP-SR 固定要求 16kHz）
@@ -42,7 +43,6 @@ static bool s_woken = false;
 
 // 音量指示（调试用）
 static uint32_t s_vol_last_ms = 0;
-static int16_t  s_vol_peak = 0;
 
 // ============================================================
 // I2S 初始化
@@ -52,7 +52,7 @@ static void init_i2s() {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
     .sample_rate = SR_SAMPLE_RATE,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,  // INMP441 是 24bit，装在 32bit 帧里
-    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,
+    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,  // 诊断阶段读双声道，判断麦克风在左还是右
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
     .dma_buf_count = 8,
@@ -168,9 +168,11 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
-  // 用 GPIO13(MIC_VDD) 输出 3.3V 给麦克风 VDD 供电（需先上电再初始化 I2S）
+  // 麦克风供电：GPIO13 输出 3.3V；L/R 接 GPIO17，拉低选左声道
   pinMode(MIC_VDD, OUTPUT);
   digitalWrite(MIC_VDD, HIGH);
+  pinMode(MIC_LR, OUTPUT);
+  digitalWrite(MIC_LR, LOW);
   delay(50);
 
   Serial.printf("[SYS] PSRAM: %s, %u bytes | 堆内存可用: %u | CPU: %u MHz\n",
@@ -190,24 +192,28 @@ void loop() {
     return;
   }
 
-  // 读一帧 I2S（32bit -> 16bit PCM）
-  int32_t raw[512];
+  // 读一帧 I2S（双声道交错 L/R，32bit -> 16bit PCM）
+  int32_t raw[1024];   // 512 帧 × 2 声道
   size_t bytes_read = 0;
   if (i2s_read(I2S_PORT, raw, sizeof(raw), &bytes_read, portMAX_DELAY) != ESP_OK)
     return;
-  int n = bytes_read / 4;
+  int frames = bytes_read / 8;   // 每帧 = L(4B) + R(4B)
   int16_t pcm[512];
-  for (int i = 0; i < n; i++) pcm[i] = (int16_t)(raw[i] >> 14);  // 24bit->16bit
-  pcm_push(pcm, n);
-
-  // ---- 音量指示（调试用：验证麦克风是否在采集声音，可随时删除） ----
-  for (int i = 0; i < n; i++) {
-    int16_t a = pcm[i] < 0 ? -pcm[i] : pcm[i];
-    if (a > s_vol_peak) s_vol_peak = a;
+  int16_t vol_l = 0, vol_r = 0;
+  for (int i = 0; i < frames; i++) {
+    int16_t l = (int16_t)(raw[2 * i] >> 14);      // 左声道
+    int16_t r = (int16_t)(raw[2 * i + 1] >> 14);  // 右声道
+    pcm[i] = l;                                    // 暂先喂左声道给识别
+    int16_t al = l < 0 ? -l : l;
+    int16_t ar = r < 0 ? -r : r;
+    if (al > vol_l) vol_l = al;
+    if (ar > vol_r) vol_r = ar;
   }
+  pcm_push(pcm, frames);
+
+  // ---- 双声道音量指示（诊断：看麦克风数据在 L 还是 R） ----
   if (millis() - s_vol_last_ms >= 1000) {
-    Serial.printf("[VOL] 峰值=%d（安静<500，说话>3000）\n", s_vol_peak);
-    s_vol_peak = 0;
+    Serial.printf("[VOL] L=%d R=%d（安静<500，说话>3000）\n", vol_l, vol_r);
     s_vol_last_ms = millis();
   }
 
