@@ -9,14 +9,14 @@
 
 // ============================================================
 // 引脚定义（MSM3526 / INMP441，I2S 数字 MEMS 麦克风）
-// 选择理由：三线相邻（左排针 GPIO15/16/17）、避开 USB(19/20)、
+// 选择理由：引脚集中（左排针 GPIO12/13/15/16）、避开 USB(19/20)、
 // 八线PSRAM(26-37)、strapping(0/3/45/46)，且非 ADC，把 ADC1 留给植物传感器
 // 模块物理排布：一排是 [SD][VDD][GND]，另一排是 [SCK][WS][L/R]
 // MIC_VDD：GPIO13 软件输出 3.3V 给麦克风供电（电流仅 ~1.4mA，安全）
 // ============================================================
 #define I2S_SCK  15
 #define I2S_WS   16
-#define I2S_SD   17
+#define I2S_SD   12
 #define MIC_VDD  13   // 输出高电平 ≈3.3V，给麦克风 VDD 供电
 #define I2S_PORT I2S_NUM_0
 
@@ -39,6 +39,10 @@ static model_iface_data_t   *s_wn_handle = nullptr;
 static const esp_mn_iface_t *s_mn = nullptr;
 static model_iface_data_t   *s_mn_handle = nullptr;
 static bool s_woken = false;
+
+// 音量指示（调试用）
+static uint32_t s_vol_last_ms = 0;
+static int16_t  s_vol_peak = 0;
 
 // ============================================================
 // I2S 初始化
@@ -164,7 +168,7 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
-  // 用 GPIO14 输出 3.3V 给麦克风 VDD 供电（需先上电再初始化 I2S）
+  // 用 GPIO13(MIC_VDD) 输出 3.3V 给麦克风 VDD 供电（需先上电再初始化 I2S）
   pinMode(MIC_VDD, OUTPUT);
   digitalWrite(MIC_VDD, HIGH);
   delay(50);
@@ -195,6 +199,17 @@ void loop() {
   int16_t pcm[512];
   for (int i = 0; i < n; i++) pcm[i] = (int16_t)(raw[i] >> 14);  // 24bit->16bit
   pcm_push(pcm, n);
+
+  // ---- 音量指示（调试用：验证麦克风是否在采集声音，可随时删除） ----
+  for (int i = 0; i < n; i++) {
+    int16_t a = pcm[i] < 0 ? -pcm[i] : pcm[i];
+    if (a > s_vol_peak) s_vol_peak = a;
+  }
+  if (millis() - s_vol_last_ms >= 1000) {
+    Serial.printf("[VOL] 峰值=%d（安静<500，说话>3000）\n", s_vol_peak);
+    s_vol_peak = 0;
+    s_vol_last_ms = millis();
+  }
 
   // ---- 唤醒词检测（连续喂帧） ----
   int16_t frame[512];
