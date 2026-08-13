@@ -1,6 +1,8 @@
 #include <Arduino.h>
 #include <WiFi.h>
+#include <WebSocketsClient.h>
 #include <driver/i2s.h>
+#include <esp_heap_caps.h>
 
 #include "esp_wn_iface.h"
 #include "esp_wn_models.h"
@@ -31,6 +33,28 @@
 #define WIFI_SSID "CHANGED-WIFI-SSID"
 #define WIFI_PASS "CHANGED-WIFI-PASSWORD"
 
+// ============================================================
+// Mac 服务器（WebSocket）配置
+// ============================================================
+#define SERVER_HOST "CHANGED-SERVER-IP"   // TODO: 改成你 Mac 的局域网 IP
+#define SERVER_PORT 8765
+#define SERVER_PATH "/ws"
+
+// ============================================================
+// 扬声器（MAX98357 I2S 功放，输出 TTS 音频）
+// 避开 USB(19/20)、PSRAM(26-37)、strapping(0/3/45/46)、麦克风(12/13/15/16/17)
+// ============================================================
+#define SPK_BCK      4
+#define SPK_WS       5
+#define SPK_DIN      6
+#define SPK_I2S_PORT I2S_NUM_1
+
+// 录音 VAD 参数（能量断句）
+#define VOICE_THRESHOLD 1500   // 高于此峰值算"有声音"
+#define SILENCE_MS      1500   // 静音这么久就结束录音
+#define MIN_REC_MS      800    // 至少录这么久
+#define MAX_REC_MS      6000   // 最多录这么久
+
 // 唤醒词 / 命令词模型名（必须与烧入 model 分区的模型一致）
 static const char *WAKE_WORD_MODEL = "wn9_nihaoxiaozhi";  // 你好小智
 static const char *COMMAND_MODEL   = "mn5q8_cn";          // 中文命令词
@@ -55,6 +79,26 @@ static uint32_t s_vol_last_ms = 0;
 static uint32_t s_wifi_retry_ms = 0;
 // WiFi 已连接标记（用于在连上时打印一次 IP）
 static bool s_wifi_online = false;
+
+// ============================================================
+// WebSocket / 录音 / 播放 状态
+// ============================================================
+static WebSocketsClient s_ws;
+static bool s_ws_connected = false;
+
+static bool     s_recording     = false;
+static uint32_t s_rec_start_ms  = 0;
+static uint32_t s_last_voice_ms = 0;
+
+static bool s_playing      = false;
+static bool s_tts_end_seen = false;
+
+// 播放环形缓冲（放 PSRAM：TTS 回复最长约 10s × 32KB/s ≈ 320KB）
+#define PLAY_BUFFER_SIZE (512 * 1024)
+static uint8_t *s_play_buf  = nullptr;
+static uint32_t s_play_head = 0;
+static uint32_t s_play_len  = 0;
+static portMUX_TYPE s_play_mux = portMUX_INITIALIZER_UNLOCKED;
 
 // ============================================================
 // I2S 初始化
@@ -83,6 +127,137 @@ static void init_i2s() {
   ESP_ERROR_CHECK(i2s_set_pin(I2S_PORT, &pins));
   Serial.printf("[I2S] 初始化完成, SCK=%d WS=%d SD=%d @%dHz\n",
                 I2S_SCK, I2S_WS, I2S_SD, SR_SAMPLE_RATE);
+}
+
+// ============================================================
+// 扬声器 I2S（输出 TTS 音频到 MAX98357）
+// ============================================================
+static void init_i2s_speaker() {
+  i2s_config_t cfg = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
+    .sample_rate = SR_SAMPLE_RATE,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,   // 单声道
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 8,
+    .dma_buf_len = 256,
+    .use_apll = false,
+    .tx_desc_auto_clear = true,
+    .fixed_mclk = 0,
+  };
+  i2s_pin_config_t pins = {
+    .bck_io_num = SPK_BCK,
+    .ws_io_num = SPK_WS,
+    .data_out_num = SPK_DIN,
+    .data_in_num = I2S_PIN_NO_CHANGE,
+  };
+  ESP_ERROR_CHECK(i2s_driver_install(SPK_I2S_PORT, &cfg, 0, nullptr));
+  ESP_ERROR_CHECK(i2s_set_pin(SPK_I2S_PORT, &pins));
+  Serial.printf("[I2S] 扬声器初始化完成, BCK=%d WS=%d DIN=%d @%dHz\n",
+                SPK_BCK, SPK_WS, SPK_DIN, SR_SAMPLE_RATE);
+}
+
+// ============================================================
+// 播放缓冲（WebSocket 回调线程 → 主循环，临界区保护）
+// ============================================================
+static void play_push(const uint8_t *src, uint32_t n) {
+  if (s_play_buf == nullptr) return;
+  portENTER_CRITICAL(&s_play_mux);
+  if (s_play_len + n > PLAY_BUFFER_SIZE) {
+    // 缓冲区满：丢弃最旧数据，保留最新
+    uint32_t drop = s_play_len + n - PLAY_BUFFER_SIZE;
+    s_play_head = (s_play_head + drop) % PLAY_BUFFER_SIZE;
+    s_play_len -= drop;
+  }
+  for (uint32_t i = 0; i < n; i++) {
+    s_play_buf[(s_play_head + s_play_len) % PLAY_BUFFER_SIZE] = src[i];
+    s_play_len++;
+  }
+  portEXIT_CRITICAL(&s_play_mux);
+}
+
+static void play_drain() {
+  uint32_t n;
+  portENTER_CRITICAL(&s_play_mux);
+  n = s_play_len;
+  portEXIT_CRITICAL(&s_play_mux);
+
+  if (n > 0) {
+    // 每次写 512 样本(1024 字节 = 32ms)，与麦克风 32ms 一帧对齐，保持实时播放
+    uint32_t chunk = n < 1024 ? n : 1024;
+    uint8_t buf[1024];
+    portENTER_CRITICAL(&s_play_mux);
+    for (uint32_t i = 0; i < chunk; i++) buf[i] = s_play_buf[(s_play_head + i) % PLAY_BUFFER_SIZE];
+    s_play_head = (s_play_head + chunk) % PLAY_BUFFER_SIZE;
+    s_play_len -= chunk;
+    portEXIT_CRITICAL(&s_play_mux);
+    size_t written = 0;
+    i2s_write(SPK_I2S_PORT, buf, chunk, &written, portMAX_DELAY);
+  } else if (s_tts_end_seen) {
+    s_playing = false;
+    s_tts_end_seen = false;
+  }
+}
+
+// ============================================================
+// 开始录音并上传
+// ============================================================
+static void start_recording() {
+  if (!s_ws_connected) {
+    Serial.println("[WS] 服务器未连接，无法录音");
+    return;
+  }
+  s_recording = true;
+  s_rec_start_ms = millis();
+  s_last_voice_ms = millis();
+  s_ws.sendTXT("{\"type\":\"audio_start\"}");
+  Serial.println(">>> 开始录音，请说话...");
+}
+
+// ============================================================
+// WebSocket 事件回调
+// ============================================================
+static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
+  switch (type) {
+    case WStype_CONNECTED:
+      s_ws_connected = true;
+      Serial.println("[WS] 已连接 Mac 服务器");
+      break;
+    case WStype_DISCONNECTED:
+      s_ws_connected = false;
+      Serial.println("[WS] 与 Mac 服务器断开");
+      break;
+    case WStype_TEXT: {
+      String msg((const char *)payload, length);
+      Serial.printf("[WS] 收到: %s\n", msg.c_str());
+      if (msg.indexOf("\"tts_start\"") >= 0) {
+        s_playing = true;
+        s_tts_end_seen = false;
+      } else if (msg.indexOf("\"tts_end\"") >= 0) {
+        s_tts_end_seen = true;
+      }
+      break;
+    }
+    case WStype_BIN:
+      play_push(payload, length);
+      break;
+    default:
+      break;
+  }
+}
+
+static void init_websocket() {
+  s_play_buf = (uint8_t *)ps_malloc(PLAY_BUFFER_SIZE);
+  if (s_play_buf) {
+    Serial.printf("[WS] 播放缓冲 %d KB 已分配(PSRAM)\n", PLAY_BUFFER_SIZE / 1024);
+  } else {
+    Serial.println("[WS] 警告：播放缓冲分配失败");
+  }
+  s_ws.begin(SERVER_HOST, SERVER_PORT, SERVER_PATH);
+  s_ws.onEvent(on_ws_event);
+  s_ws.setReconnectInterval(3000);
+  Serial.printf("[WS] 目标服务器: ws://%s:%d%s\n", SERVER_HOST, SERVER_PORT, SERVER_PATH);
 }
 
 // ============================================================
@@ -205,6 +380,8 @@ void setup() {
                 (unsigned)ESP.getFreeHeap(),
                 (unsigned)getCpuFrequencyMhz());
   init_i2s();
+  init_i2s_speaker();
+  init_websocket();
   init_speech_recognition();
 }
 
@@ -223,9 +400,10 @@ void loop() {
     }
   }
 
+  s_ws.loop();   // WebSocket 收发（必须频繁调用）
+
   int wn_chunk = s_wn ? s_wn->get_samp_chunksize(s_wn_handle) : 0;
-  int mn_chunk = s_mn ? s_mn->get_samp_chunksize(s_mn_handle) : 0;
-  if (wn_chunk <= 0 || mn_chunk <= 0) {
+  if (wn_chunk <= 0) {
     delay(100);
     return;
   }
@@ -249,6 +427,22 @@ void loop() {
   }
   pcm_push(pcm, frames);
 
+  // ---- 播放 TTS 音频 ----
+  play_drain();
+
+  // ---- 录音上传（唤醒后，能量 VAD 断句） ----
+  if (s_recording && s_ws_connected) {
+    s_ws.sendBIN((uint8_t *)pcm, frames * 2);
+    uint32_t now = millis();
+    if (vol_l > VOICE_THRESHOLD) s_last_voice_ms = now;
+    if ((now - s_rec_start_ms > MIN_REC_MS && now - s_last_voice_ms > SILENCE_MS) ||
+        now - s_rec_start_ms > MAX_REC_MS) {
+      s_recording = false;
+      s_ws.sendTXT("{\"type\":\"audio_end\"}");
+      Serial.println(">>> 录音结束，已上传");
+    }
+  }
+
   // ---- 双声道音量指示（诊断：看麦克风数据在 L 还是 R） ----
   if (millis() - s_vol_last_ms >= 1000) {
     Serial.printf("[VOL] L=%d R=%d（安静<500，说话>3000）\n", vol_l, vol_r);
@@ -259,28 +453,9 @@ void loop() {
   int16_t frame[512];
   while (pcm_take(frame, wn_chunk)) {
     wakenet_state_t wn_state = s_wn->detect(s_wn_handle, frame);
-    if (wn_state == WAKENET_DETECTED) {
+    if (wn_state == WAKENET_DETECTED && !s_recording && !s_playing) {
       Serial.println(">>> 唤醒词命中：你好小智！");
-      s_woken = true;
-    }
-  }
-
-  // ---- 唤醒后：命令词识别 ----
-  if (s_woken) {
-    while (pcm_take(frame, mn_chunk)) {
-      esp_mn_state_t mn_state = s_mn->detect(s_mn_handle, frame);
-      if (mn_state == ESP_MN_STATE_DETECTED) {
-        esp_mn_results_t *res = s_mn->get_results(s_mn_handle);
-        if (res != nullptr && res->num > 0) {
-          handle_command(res->string);
-        }
-        s_woken = false;
-        s_mn->clean(s_mn_handle);
-      } else if (mn_state == ESP_MN_STATE_TIMEOUT) {
-        Serial.println(">>> 命令识别超时，回到待唤醒状态");
-        s_woken = false;
-        s_mn->clean(s_mn_handle);
-      }
+      start_recording();
     }
   }
 }
