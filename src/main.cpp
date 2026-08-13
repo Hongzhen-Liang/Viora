@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <WebSocketsClient.h>
+#include <ArduinoJson.h>
 #include <driver/i2s.h>
 #include <esp_heap_caps.h>
 
@@ -186,7 +187,7 @@ static void play_drain() {
   if (n > 0) {
     // 每次写 512 样本(1024 字节 = 32ms)，与麦克风 32ms 一帧对齐，保持实时播放
     uint32_t chunk = n < 1024 ? n : 1024;
-    uint8_t buf[1024];
+    static uint8_t buf[1024];
     portENTER_CRITICAL(&s_play_mux);
     for (uint32_t i = 0; i < chunk; i++) buf[i] = s_play_buf[(s_play_head + i) % PLAY_BUFFER_SIZE];
     s_play_head = (s_play_head + chunk) % PLAY_BUFFER_SIZE;
@@ -229,13 +230,30 @@ static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
       Serial.println("[WS] 与 Mac 服务器断开");
       break;
     case WStype_TEXT: {
-      String msg((const char *)payload, length);
-      Serial.printf("[WS] 收到: %s\n", msg.c_str());
-      if (msg.indexOf("\"tts_start\"") >= 0) {
+      JsonDocument doc;
+      DeserializationError err = deserializeJson(doc, (const char *)payload, length);
+      if (err) {
+        Serial.printf("[WS] 收到非JSON: %.*s\n", (int)length, payload);
+        break;
+      }
+      const char *t = doc["type"] | "";
+      if (strcmp(t, "text") == 0) {
+        const char *user  = doc["user"]  | "";
+        const char *reply = doc["reply"] | "";
+        Serial.printf(">>> 你说: %s\n", user);
+        Serial.printf(">>> 小绿: %s\n", reply);
+      } else if (strcmp(t, "tts_start") == 0) {
         s_playing = true;
         s_tts_end_seen = false;
-      } else if (msg.indexOf("\"tts_end\"") >= 0) {
+        Serial.println("[WS] TTS 开始");
+      } else if (strcmp(t, "tts_end") == 0) {
         s_tts_end_seen = true;
+        Serial.println("[WS] TTS 结束");
+      } else if (strcmp(t, "error") == 0) {
+        const char *msg = doc["message"] | "";
+        Serial.printf("[WS] 错误: %s\n", msg);
+      } else {
+        Serial.printf("[WS] 收到: %.*s\n", (int)length, payload);
       }
       break;
     }
@@ -409,12 +427,12 @@ void loop() {
   }
 
   // 读一帧 I2S（双声道交错 L/R，32bit -> 16bit PCM）
-  int32_t raw[1024];   // 512 帧 × 2 声道
+  static int32_t raw[1024];   // 512 帧 × 2 声道（static 避免占 loopTask 栈）
   size_t bytes_read = 0;
   if (i2s_read(I2S_PORT, raw, sizeof(raw), &bytes_read, portMAX_DELAY) != ESP_OK)
     return;
   int frames = bytes_read / 8;   // 每帧 = L(4B) + R(4B)
-  int16_t pcm[512];
+  static int16_t pcm[512];
   int16_t vol_l = 0, vol_r = 0;
   for (int i = 0; i < frames; i++) {
     int16_t l = (int16_t)(raw[2 * i] >> 14);      // 左声道
@@ -450,7 +468,7 @@ void loop() {
   }
 
   // ---- 唤醒词检测（连续喂帧） ----
-  int16_t frame[512];
+  static int16_t frame[512];
   while (pcm_take(frame, wn_chunk)) {
     wakenet_state_t wn_state = s_wn->detect(s_wn_handle, frame);
     if (wn_state == WAKENET_DETECTED && !s_recording && !s_playing) {
