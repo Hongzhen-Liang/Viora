@@ -1,0 +1,24 @@
+#pragma once
+// ============================================================
+// 音频模块：麦克风采集 / 扬声器播放 / PCM 环形缓存 / 播放缓冲
+// ============================================================
+#include <Arduino.h>
+
+// ---- 初始化（麦克风 + 扬声器 I2S + 播放缓冲） ----
+void audio_init();
+
+// ---- 麦克风采集 ----
+// 读一帧双声道 I2S，取左声道转 int16。返回帧数；peak 输出本帧峰值。
+int  audio_capture(int16_t *pcm, int max_frames, int16_t *peak);
+
+// ---- wakenet 环形缓存 ----
+void audio_ring_push(const int16_t *src, int n);
+bool audio_ring_take(int16_t *dst, int n);
+
+// ---- TTS 播放 ----
+void audio_play_push(const uint8_t *src, uint32_t n);  // 线程安全（WS 回调线程调用）
+void audio_play_drain();                               // 主循环调用，保持实时播放
+void audio_play_discard();                             // 断开时清空缓冲
+void audio_mark_tts_start();                           // 收到 tts_start 时调用
+void audio_mark_tts_end();                             // 收到 tts_end 时调用
+bool audio_playback_finished();                        // 播完时返回一次 true
