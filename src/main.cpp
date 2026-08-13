@@ -52,7 +52,9 @@
 #define VOICE_THRESHOLD_DEFAULT 400   // 校准前的兜底阈值
 #define VOICE_THRESHOLD_MIN     500   // 自适应阈值下限（高于环境噪声尖峰~265）
 #define VOICE_THRESHOLD_MAX     2500  // 自适应阈值上限
-#define SILENCE_MS      5000   // 静音这么久才结束录音（聊天场景给足停顿时间）
+// 断句静音时长：基础 3 秒；若检测到用户句内有长停顿，会自动放宽（上限 6 秒）
+#define SILENCE_BASE_MS 3000
+#define SILENCE_MAX_MS  6000
 #define MIN_REC_MS      800    // 至少录这么久
 #define MAX_REC_MS      30000  // 最多录这么久（一次可连说 30 秒）
 
@@ -101,6 +103,10 @@ static ConvState s_state = ST_IDLE;
 static bool      s_speech_started  = false;  // 当前聆听窗口内是否已开始说话
 static int       s_consecutive_voice = 0;    // 连续有声音的帧数（抗短促噪声）
 static uint32_t  s_listen_start_ms = 0;      // 当前聆听窗口开始时间
+// 自适应断句：记录本轮句内停顿
+static bool      s_in_gap      = false;
+static uint32_t  s_gap_start_ms = 0;
+static uint32_t  s_max_gap_ms   = 0;
 
 static bool s_playing      = false;
 static bool s_tts_end_seen = false;
@@ -261,6 +267,9 @@ static void enter_listening() {
   s_state = ST_LISTENING;
   s_speech_started = false;
   s_consecutive_voice = 0;
+  s_in_gap = false;
+  s_gap_start_ms = 0;
+  s_max_gap_ms = 0;
   s_listen_start_ms = millis();
   s_rec_start_ms = millis();
   s_last_voice_ms = millis();
@@ -531,14 +540,32 @@ void loop() {
         }
       } else {
         // 已开始说话：静音端点检测
-        if (vol_l > s_voice_threshold) {
+        bool is_voice = vol_l > s_voice_threshold;
+        if (is_voice) {
           s_last_voice_ms = now;
           s_voice_frames++;
           s_consecutive_voice++;
+          if (s_in_gap) {
+            // 停顿结束：记录停顿时长，用于自适应放宽断句阈值
+            uint32_t gap = now - s_gap_start_ms;
+            if (gap > s_max_gap_ms) s_max_gap_ms = gap;
+            s_in_gap = false;
+          }
         } else {
           s_consecutive_voice = 0;
+          if (!s_in_gap) {
+            s_in_gap = true;
+            s_gap_start_ms = now;
+          }
         }
-        if ((now - s_rec_start_ms > MIN_REC_MS && now - s_last_voice_ms > SILENCE_MS) ||
+
+        // 断句阈值自适应：基础 3s，随句内最长停顿 ×1.5 放宽，上限 6s
+        uint32_t silence_ms = SILENCE_BASE_MS;
+        uint32_t adapted = s_max_gap_ms + s_max_gap_ms / 2;
+        if (adapted > silence_ms) silence_ms = adapted;
+        if (silence_ms > SILENCE_MAX_MS) silence_ms = SILENCE_MAX_MS;
+
+        if ((now - s_rec_start_ms > MIN_REC_MS && now - s_last_voice_ms > silence_ms) ||
             now - s_rec_start_ms > MAX_REC_MS) {
           if (s_voice_frames < MIN_VOICE_FRAMES) {
             // 太短，当误触发忽略，继续聆听（不重置超时起点，避免噪声拖住会话）
@@ -546,6 +573,8 @@ void loop() {
             s_consecutive_voice = 0;
             s_voice_frames = 0;
             s_last_voice_ms = now;
+            s_in_gap = false;
+            s_max_gap_ms = 0;
             Serial.println(">>> 忽略短促噪声");
           } else {
             s_state = ST_PROCESSING;
