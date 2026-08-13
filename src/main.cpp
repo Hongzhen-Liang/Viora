@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <WiFi.h>
 #include <driver/i2s.h>
 
 #include "esp_wn_iface.h"
@@ -24,6 +25,12 @@
 // 采样率（ESP-SR 固定要求 16kHz）
 #define SR_SAMPLE_RATE 16000
 
+// ============================================================
+// WiFi 配置（连接 Mac 服务器所在局域网）
+// ============================================================
+#define WIFI_SSID "CHANGED-WIFI-SSID"
+#define WIFI_PASS "CHANGED-WIFI-PASSWORD"
+
 // 唤醒词 / 命令词模型名（必须与烧入 model 分区的模型一致）
 static const char *WAKE_WORD_MODEL = "wn9_nihaoxiaozhi";  // 你好小智
 static const char *COMMAND_MODEL   = "mn5q8_cn";          // 中文命令词
@@ -43,6 +50,11 @@ static bool s_woken = false;
 
 // 音量指示（调试用）
 static uint32_t s_vol_last_ms = 0;
+
+// WiFi 重连计时
+static uint32_t s_wifi_retry_ms = 0;
+// WiFi 已连接标记（用于在连上时打印一次 IP）
+static bool s_wifi_online = false;
 
 // ============================================================
 // I2S 初始化
@@ -162,11 +174,23 @@ static void handle_command(const char *cmd) {
 }
 
 // ============================================================
+// WiFi 连接（非阻塞，loop 里定时重连）
+// ============================================================
+static void wifi_connect() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  Serial.printf("[WiFi] 连接中 %s ...\n", WIFI_SSID);
+}
+
+// ============================================================
 // setup / loop
 // ============================================================
 void setup() {
   Serial.begin(115200);
   delay(200);
+
+  wifi_connect();
 
   // 麦克风供电：GPIO13 输出 3.3V；L/R 接 GPIO17，拉低选左声道
   pinMode(MIC_VDD, OUTPUT);
@@ -185,6 +209,20 @@ void setup() {
 }
 
 void loop() {
+  // WiFi 状态显示 + 断线自动重连（5 秒一次，不阻塞主循环）
+  if (WiFi.status() == WL_CONNECTED) {
+    if (!s_wifi_online) {
+      s_wifi_online = true;
+      Serial.printf("[WiFi] 已连接! IP: %s\n", WiFi.localIP().toString().c_str());
+    }
+  } else {
+    s_wifi_online = false;
+    if (millis() - s_wifi_retry_ms > 5000) {
+      s_wifi_retry_ms = millis();
+      wifi_connect();
+    }
+  }
+
   int wn_chunk = s_wn ? s_wn->get_samp_chunksize(s_wn_handle) : 0;
   int mn_chunk = s_mn ? s_mn->get_samp_chunksize(s_mn_handle) : 0;
   if (wn_chunk <= 0 || mn_chunk <= 0) {
