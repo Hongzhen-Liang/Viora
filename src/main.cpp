@@ -50,11 +50,13 @@
 #define SPK_DIN      6
 #define SPK_I2S_PORT I2S_NUM_1
 
-// 录音 VAD 参数（能量断句）
-#define VOICE_THRESHOLD 1500   // 高于此峰值算"有声音"
-#define SILENCE_MS      1500   // 静音这么久就结束录音
+// 录音 VAD 参数（能量断句，语音阈值会在上电时自动校准）
+#define VOICE_THRESHOLD_DEFAULT 400   // 校准前的兜底阈值
+#define VOICE_THRESHOLD_MIN     500   // 自适应阈值下限（高于环境噪声尖峰~265）
+#define VOICE_THRESHOLD_MAX     2500  // 自适应阈值上限
+#define SILENCE_MS      5000   // 静音这么久才结束录音（聊天场景给足停顿时间）
 #define MIN_REC_MS      800    // 至少录这么久
-#define MAX_REC_MS      6000   // 最多录这么久
+#define MAX_REC_MS      30000  // 最多录这么久（一次可连说 30 秒）
 
 // 唤醒词 / 命令词模型名（必须与烧入 model 分区的模型一致）
 static const char *WAKE_WORD_MODEL = "wn9_nihaoxiaozhi";  // 你好小智
@@ -87,6 +89,16 @@ static bool s_ws_connected = false;
 static bool     s_recording     = false;
 static uint32_t s_rec_start_ms  = 0;
 static uint32_t s_last_voice_ms = 0;
+static uint16_t s_voice_threshold = VOICE_THRESHOLD_DEFAULT;  // 运行时语音阈值（持续自适应）
+static uint32_t s_voice_frames = 0;   // 录音期间检测到"有声音"的帧数（诊断用）
+static int32_t  s_rec_max_vol  = 0;   // 录音期间观测到的最大音量（诊断用）
+
+// 持续噪声估计（最小统计法，只在空闲时更新）
+#define NOISE_HIST_LEN 64   // 64 帧 × 32ms ≈ 2 秒
+static int32_t s_noise_hist[NOISE_HIST_LEN];
+static int     s_noise_idx   = 0;
+static int     s_noise_count = 0;
+static bool    s_vad_ready   = false;
 
 static bool s_playing      = false;
 static bool s_tts_end_seen = false;
@@ -157,6 +169,38 @@ static void init_i2s_speaker() {
 }
 
 // ============================================================
+// 持续自适应 VAD：空闲时用最小统计法估计环境噪声，动态更新阈值
+// ============================================================
+static void vad_update(int32_t frame_peak) {
+  s_noise_hist[s_noise_idx] = frame_peak;
+  s_noise_idx = (s_noise_idx + 1) % NOISE_HIST_LEN;
+  if (s_noise_count < NOISE_HIST_LEN) s_noise_count++;
+
+  if (s_noise_count < NOISE_HIST_LEN) return;  // 还没采满 2 秒
+
+  static int tick = 0;
+  if (++tick < 8) return;   // 每 8 帧（约 250ms）重估一次，减少开销
+  tick = 0;
+
+  // 取 2 秒窗口内最小帧峰值作为噪声底（抗突发噪声，也抗开机时说话）
+  int32_t mn = s_noise_hist[0];
+  for (int i = 1; i < NOISE_HIST_LEN; i++) {
+    if (s_noise_hist[i] < mn) mn = s_noise_hist[i];
+  }
+
+  int32_t t = mn * 3;   // 阈值 = 噪声底 × 3
+  if (t < VOICE_THRESHOLD_MIN) t = VOICE_THRESHOLD_MIN;
+  if (t > VOICE_THRESHOLD_MAX) t = VOICE_THRESHOLD_MAX;
+  s_voice_threshold = (uint16_t)t;
+
+  if (!s_vad_ready) {
+    s_vad_ready = true;
+    Serial.printf("[VAD] 就绪：噪声=%d → 阈值=%d（持续自适应中）\n",
+                  (int)mn, (int)s_voice_threshold);
+  }
+}
+
+// ============================================================
 // 播放缓冲（WebSocket 回调线程 → 主循环，临界区保护）
 // ============================================================
 static void play_push(const uint8_t *src, uint32_t n) {
@@ -209,6 +253,8 @@ static void start_recording() {
   s_recording = true;
   s_rec_start_ms = millis();
   s_last_voice_ms = millis();
+  s_voice_frames = 0;
+  s_rec_max_vol = 0;
   s_ws.sendTXT("{\"type\":\"audio_start\"}");
   Serial.println(">>> 开始录音，请说话...");
 }
@@ -439,19 +485,38 @@ void loop() {
   }
   pcm_push(pcm, frames);
 
+  // ---- 空闲时持续估计环境噪声，动态更新语音阈值 ----
+  if (!s_recording && !s_playing) {
+    vad_update(vol_l);
+  }
+
   // ---- 播放 TTS 音频 ----
   play_drain();
 
   // ---- 录音上传（唤醒后，能量 VAD 断句） ----
-  if (s_recording && s_ws_connected) {
-    s_ws.sendBIN((uint8_t *)pcm, frames * 2);
-    uint32_t now = millis();
-    if (vol_l > VOICE_THRESHOLD) s_last_voice_ms = now;
-    if ((now - s_rec_start_ms > MIN_REC_MS && now - s_last_voice_ms > SILENCE_MS) ||
-        now - s_rec_start_ms > MAX_REC_MS) {
+  if (s_recording) {
+    if (!s_ws_connected) {
+      // 服务器断开，放弃本次录音，避免卡住
       s_recording = false;
-      s_ws.sendTXT("{\"type\":\"audio_end\"}");
-      Serial.println(">>> 录音结束，已上传");
+      Serial.println(">>> 录音中断（服务器断开）");
+    } else {
+      s_ws.sendBIN((uint8_t *)pcm, frames * 2);
+      uint32_t now = millis();
+      if (vol_l > s_rec_max_vol) s_rec_max_vol = vol_l;
+      if (vol_l > s_voice_threshold) {
+        s_last_voice_ms = now;
+        s_voice_frames++;
+      }
+      if ((now - s_rec_start_ms > MIN_REC_MS && now - s_last_voice_ms > SILENCE_MS) ||
+          now - s_rec_start_ms > MAX_REC_MS) {
+        s_recording = false;
+        s_ws.sendTXT("{\"type\":\"audio_end\"}");
+        Serial.printf(">>> 录音结束：时长=%lums 语音帧=%lu 峰值音量=%d 阈值=%u\n",
+                      (unsigned long)(now - s_rec_start_ms),
+                      (unsigned long)s_voice_frames,
+                      (int)s_rec_max_vol,
+                      (unsigned)s_voice_threshold);
+      }
     }
   }
 
