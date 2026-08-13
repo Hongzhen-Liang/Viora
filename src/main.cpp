@@ -60,7 +60,9 @@
 
 // 连续对话参数
 #define CONV_TIMEOUT_MS 20000  // 连续对话中，这么久没人说话就退出（回到待唤醒）
-#define GUARD_MS        400    // 播放结束后静置一小段，避免扬声器余音误触发
+#define GUARD_MS        800    // 播放结束后静置一小段，避免扬声器余音/pop 误触发
+#define VOICE_START_FRAMES 4   // 连续 4 帧(约128ms)有声音才算"开始说话"
+#define MIN_VOICE_FRAMES   6   // 总语音帧少于这个视为误触发，不上传
 
 // 唤醒词 / 命令词模型名（必须与烧入 model 分区的模型一致）
 static const char *WAKE_WORD_MODEL = "wn9_nihaoxiaozhi";  // 你好小智
@@ -107,13 +109,15 @@ static bool    s_vad_ready   = false;
 enum ConvState { ST_IDLE, ST_LISTENING, ST_PROCESSING, ST_PLAYING };
 static ConvState s_state = ST_IDLE;
 static bool      s_speech_started  = false;  // 当前聆听窗口内是否已开始说话
+static int       s_consecutive_voice = 0;    // 连续有声音的帧数（抗短促噪声）
 static uint32_t  s_listen_start_ms = 0;      // 当前聆听窗口开始时间
 
 static bool s_playing      = false;
 static bool s_tts_end_seen = false;
+static bool s_rearm_pending = false;   // 服务器返回错误后，主循环重新进入聆听
 
-// 播放环形缓冲（放 PSRAM：TTS 回复最长约 10s × 32KB/s ≈ 320KB）
-#define PLAY_BUFFER_SIZE (512 * 1024)
+// 播放环形缓冲（放 PSRAM：16kHz×16bit=32KB/s，长回复可达 40s ≈ 1.3MB）
+#define PLAY_BUFFER_SIZE (1536 * 1024)   // 1.5MB ≈ 48 秒音频
 static uint8_t *s_play_buf  = nullptr;
 static uint32_t s_play_head = 0;
 static uint32_t s_play_len  = 0;
@@ -266,6 +270,7 @@ static void enter_listening() {
   }
   s_state = ST_LISTENING;
   s_speech_started = false;
+  s_consecutive_voice = 0;
   s_listen_start_ms = millis();
   s_rec_start_ms = millis();
   s_last_voice_ms = millis();
@@ -286,7 +291,16 @@ static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
       break;
     case WStype_DISCONNECTED:
       s_ws_connected = false;
-      Serial.println("[WS] 与 Mac 服务器断开");
+      s_playing = false;
+      s_tts_end_seen = false;
+      s_rearm_pending = false;
+      s_state = ST_IDLE;
+      // 丢弃未播完的音频，避免重连后残留播放
+      portENTER_CRITICAL(&s_play_mux);
+      s_play_head = 0;
+      s_play_len = 0;
+      portEXIT_CRITICAL(&s_play_mux);
+      Serial.println("[WS] 与 Mac 服务器断开，回到待唤醒");
       break;
     case WStype_TEXT: {
       JsonDocument doc;
@@ -301,7 +315,9 @@ static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
         const char *reply = doc["reply"] | "";
         Serial.printf(">>> 你说: %s\n", user);
         Serial.printf(">>> 小绿: %s\n", reply);
-      } else if (strcmp(t, "tts_start") == 0) {        s_state = ST_PLAYING;        s_playing = true;
+      } else if (strcmp(t, "tts_start") == 0) {
+        s_state = ST_PLAYING;
+        s_playing = true;
         s_tts_end_seen = false;
         Serial.println("[WS] TTS 开始");
       } else if (strcmp(t, "tts_end") == 0) {
@@ -309,7 +325,9 @@ static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
         Serial.println("[WS] TTS 结束");
       } else if (strcmp(t, "error") == 0) {
         const char *msg = doc["message"] | "";
-        Serial.printf("[WS] 错误: %s\n", msg);
+        Serial.printf("[WS] 服务器错误: %s\n", msg);
+        // 服务器没给出语音回复（如"没听清"）：重新进入聆听，让用户再说一遍
+        s_rearm_pending = true;
       } else {
         Serial.printf("[WS] 收到: %.*s\n", (int)length, payload);
       }
@@ -478,6 +496,12 @@ void loop() {
 
   s_ws.loop();   // WebSocket 收发（必须频繁调用）
 
+  // 服务器返回错误（如"没听清"）→ 重新进入聆听
+  if (s_rearm_pending) {
+    s_rearm_pending = false;
+    enter_listening();
+  }
+
   int wn_chunk = s_wn ? s_wn->get_samp_chunksize(s_wn_handle) : 0;
   if (wn_chunk <= 0) {
     delay(100);
@@ -517,16 +541,23 @@ void loop() {
     } else {
       s_ws.sendBIN((uint8_t *)pcm, frames * 2);
       uint32_t now = millis();
+      if (vol_l > s_rec_max_vol) s_rec_max_vol = vol_l;
 
       if (!s_speech_started) {
-        // 还没开始说话：等语音；先静置 GUARD_MS 避免扬声器余音误触发
+        // 还没开始说话：需连续多帧有声音才算真说话（抗点击/咳嗽/扬声器杂音）
         if (now - s_listen_start_ms >= GUARD_MS) {
           if (vol_l > s_voice_threshold) {
-            s_speech_started = true;
-            s_last_voice_ms = now;
-            s_voice_frames = 1;
-            if (vol_l > s_rec_max_vol) s_rec_max_vol = vol_l;
-          } else if (now - s_listen_start_ms > CONV_TIMEOUT_MS) {
+            s_consecutive_voice++;
+            if (s_consecutive_voice >= VOICE_START_FRAMES) {
+              s_speech_started = true;
+              s_last_voice_ms = now;
+              s_voice_frames = 1;
+              s_rec_start_ms = now;   // 以真正开始说话的时刻为准
+            }
+          } else {
+            s_consecutive_voice = 0;
+          }
+          if (!s_speech_started && now - s_listen_start_ms > CONV_TIMEOUT_MS) {
             // 连续对话超时，回到待唤醒
             s_state = ST_IDLE;
             Serial.println(">>> 对话结束（超时），回到待唤醒");
@@ -534,20 +565,31 @@ void loop() {
         }
       } else {
         // 已开始说话：静音端点检测
-        if (vol_l > s_rec_max_vol) s_rec_max_vol = vol_l;
         if (vol_l > s_voice_threshold) {
           s_last_voice_ms = now;
           s_voice_frames++;
+          s_consecutive_voice++;
+        } else {
+          s_consecutive_voice = 0;
         }
         if ((now - s_rec_start_ms > MIN_REC_MS && now - s_last_voice_ms > SILENCE_MS) ||
             now - s_rec_start_ms > MAX_REC_MS) {
-          s_state = ST_PROCESSING;
-          s_ws.sendTXT("{\"type\":\"audio_end\"}");
-          Serial.printf(">>> 录音结束：时长=%lums 语音帧=%lu 峰值音量=%d 阈值=%u\n",
-                        (unsigned long)(now - s_rec_start_ms),
-                        (unsigned long)s_voice_frames,
-                        (int)s_rec_max_vol,
-                        (unsigned)s_voice_threshold);
+          if (s_voice_frames < MIN_VOICE_FRAMES) {
+            // 太短，当误触发忽略，继续聆听（不重置超时起点，避免噪声拖住会话）
+            s_speech_started = false;
+            s_consecutive_voice = 0;
+            s_voice_frames = 0;
+            s_last_voice_ms = now;
+            Serial.println(">>> 忽略短促噪声");
+          } else {
+            s_state = ST_PROCESSING;
+            s_ws.sendTXT("{\"type\":\"audio_end\"}");
+            Serial.printf(">>> 录音结束：时长=%lums 语音帧=%lu 峰值音量=%d 阈值=%u\n",
+                          (unsigned long)(now - s_rec_start_ms),
+                          (unsigned long)s_voice_frames,
+                          (int)s_rec_max_vol,
+                          (unsigned)s_voice_threshold);
+          }
         }
       }
     }
