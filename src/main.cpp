@@ -73,9 +73,6 @@ static const esp_mn_iface_t *s_mn = nullptr;
 static model_iface_data_t   *s_mn_handle = nullptr;
 static bool s_woken = false;
 
-// 音量指示（调试用）
-static uint32_t s_vol_last_ms = 0;
-
 // WiFi 重连计时
 static uint32_t s_wifi_retry_ms = 0;
 // WiFi 已连接标记（用于在连上时打印一次 IP）
@@ -433,15 +430,12 @@ void loop() {
     return;
   int frames = bytes_read / 8;   // 每帧 = L(4B) + R(4B)
   static int16_t pcm[512];
-  int16_t vol_l = 0, vol_r = 0;
+  int16_t vol_l = 0;
   for (int i = 0; i < frames; i++) {
-    int16_t l = (int16_t)(raw[2 * i] >> 14);      // 左声道
-    int16_t r = (int16_t)(raw[2 * i + 1] >> 14);  // 右声道
-    pcm[i] = l;                                    // 暂先喂左声道给识别
+    int16_t l = (int16_t)(raw[2 * i] >> 14);      // 左声道（已确认数据在 L）
+    pcm[i] = l;
     int16_t al = l < 0 ? -l : l;
-    int16_t ar = r < 0 ? -r : r;
     if (al > vol_l) vol_l = al;
-    if (ar > vol_r) vol_r = ar;
   }
   pcm_push(pcm, frames);
 
@@ -459,12 +453,6 @@ void loop() {
       s_ws.sendTXT("{\"type\":\"audio_end\"}");
       Serial.println(">>> 录音结束，已上传");
     }
-  }
-
-  // ---- 双声道音量指示（诊断：看麦克风数据在 L 还是 R） ----
-  if (millis() - s_vol_last_ms >= 1000) {
-    Serial.printf("[VOL] L=%d R=%d（安静<500，说话>3000）\n", vol_l, vol_r);
-    s_vol_last_ms = millis();
   }
 
   // ---- 唤醒词检测（连续喂帧） ----
