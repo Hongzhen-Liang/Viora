@@ -7,8 +7,6 @@
 
 #include "esp_wn_iface.h"
 #include "esp_wn_models.h"
-#include "esp_mn_iface.h"
-#include "esp_mn_models.h"
 #include "model_path.h"
 
 // ============================================================
@@ -64,12 +62,7 @@
 #define VOICE_START_FRAMES 4   // 连续 4 帧(约128ms)有声音才算"开始说话"
 #define MIN_VOICE_FRAMES   6   // 总语音帧少于这个视为误触发，不上传
 
-// 唤醒词 / 命令词模型名（必须与烧入 model 分区的模型一致）
-static const char *WAKE_WORD_MODEL = "wn9_nihaoxiaozhi";  // 你好小智
-static const char *COMMAND_MODEL   = "mn5q8_cn";          // 中文命令词
-static const int   MN_COMMAND_WINDOW_MS = 2600;           // 唤醒后识别命令的窗口时长
-
-// 环形缓存（保证喂给 wakenet / multinet 的音频流连续、各自取自己的帧长）
+// 环形缓存（保证喂给 wakenet 的音频流连续）
 #define PCM_BUFFER_SIZE 4096
 static int16_t s_pcm[PCM_BUFFER_SIZE];
 static int     s_pcm_head = 0;
@@ -77,9 +70,6 @@ static int     s_pcm_len  = 0;
 
 static const esp_wn_iface_t *s_wn = nullptr;
 static model_iface_data_t   *s_wn_handle = nullptr;
-static const esp_mn_iface_t *s_mn = nullptr;
-static model_iface_data_t   *s_mn_handle = nullptr;
-static bool s_woken = false;
 
 // WiFi 重连计时
 static uint32_t s_wifi_retry_ms = 0;
@@ -366,39 +356,30 @@ static void init_speech_recognition() {
   Serial.println("[SR] model 分区加载成功");
 
   char *wn_name = esp_srmodel_filter(models, ESP_WN_PREFIX, "nihaoxiaozhi");
-  char *mn_name = esp_srmodel_filter(models, ESP_MN_PREFIX, ESP_MN_CHINESE);
-  if (wn_name == nullptr || mn_name == nullptr) {
-    Serial.printf("[SR] 错误：模型中未找到唤醒词(%s)或命令词(%s)\n",
-                  wn_name ? wn_name : "NULL", mn_name ? mn_name : "NULL");
+  if (wn_name == nullptr) {
+    Serial.println("[SR] 错误：模型中未找到唤醒词");
     return;
   }
-  Serial.printf("[SR] 唤醒词模型: %s | 命令词模型: %s\n", wn_name, mn_name);
+  Serial.printf("[SR] 唤醒词模型: %s\n", wn_name);
 
   Serial.println("[SR] 获取模型句柄...");
   s_wn = esp_wn_handle_from_name(wn_name);
-  s_mn = esp_mn_handle_from_name(mn_name);
-  if (s_wn == nullptr || s_mn == nullptr) {
-    Serial.println("[SR] 错误：获取模型句柄失败");
+  if (s_wn == nullptr) {
+    Serial.println("[SR] 错误：获取唤醒词模型句柄失败");
     return;
   }
   Serial.println("[SR] 句柄获取成功");
 
   Serial.println("[SR] 创建唤醒词识别器...");
   s_wn_handle = s_wn->create(wn_name, DET_MODE_90);
-  Serial.println("[SR] 唤醒词识别器创建成功");
-
-  Serial.println("[SR] 创建命令词识别器...");
-  s_mn_handle = s_mn->create(mn_name, MN_COMMAND_WINDOW_MS);
-  Serial.println("[SR] 命令词识别器创建成功");
-
-  if (s_wn_handle == nullptr || s_mn_handle == nullptr) {
-    Serial.println("[SR] 错误：创建识别器失败");
+  if (s_wn_handle == nullptr) {
+    Serial.println("[SR] 错误：创建唤醒词识别器失败");
     return;
   }
+  Serial.println("[SR] 唤醒词识别器创建成功");
 
-  Serial.printf("[SR] 唤醒词帧长=%d | 命令词帧长=%d | 采样率=%d\n",
+  Serial.printf("[SR] 唤醒词帧长=%d | 采样率=%d\n",
                 s_wn->get_samp_chunksize(s_wn_handle),
-                s_mn->get_samp_chunksize(s_mn_handle),
                 s_wn->get_samp_rate(s_wn_handle));
   Serial.println(">>> 语音识别就绪，请说唤醒词：你好小智");
 }
@@ -425,21 +406,6 @@ static bool pcm_take(int16_t *dst, int n) {
   s_pcm_head = (s_pcm_head + n) % PCM_BUFFER_SIZE;
   s_pcm_len -= n;
   return true;
-}
-
-// ============================================================
-// 命令处理（把识别到的命令映射成动作）
-// ============================================================
-static void handle_command(const char *cmd) {
-  Serial.printf(">>> 识别到命令: [%s]\n", cmd);
-
-  // TODO: 在这里接入你的设备动作，例如继电器/灯/风扇等
-  // if (strcmp(cmd, "打开灯") == 0)     digitalWrite(GPIO_LED, HIGH);
-  // else if (strcmp(cmd, "关闭灯") == 0) digitalWrite(GPIO_LED, LOW);
-  // else if (strcmp(cmd, "打开风扇") == 0) ...
-  // 注意：mn5_cn 内置命令词是固定的智能家居集合（开/关 空调、电视、灯、
-  //       风扇、窗帘、加湿器、插座 等）。要自定义命令（如"浇花"）需换
-  //       mn6_cn/mn7_cn 模型并配合 add_command()。
 }
 
 // ============================================================
