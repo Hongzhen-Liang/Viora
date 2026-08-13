@@ -58,6 +58,10 @@
 #define MIN_REC_MS      800    // 至少录这么久
 #define MAX_REC_MS      30000  // 最多录这么久（一次可连说 30 秒）
 
+// 连续对话参数
+#define CONV_TIMEOUT_MS 20000  // 连续对话中，这么久没人说话就退出（回到待唤醒）
+#define GUARD_MS        400    // 播放结束后静置一小段，避免扬声器余音误触发
+
 // 唤醒词 / 命令词模型名（必须与烧入 model 分区的模型一致）
 static const char *WAKE_WORD_MODEL = "wn9_nihaoxiaozhi";  // 你好小智
 static const char *COMMAND_MODEL   = "mn5q8_cn";          // 中文命令词
@@ -86,7 +90,6 @@ static bool s_wifi_online = false;
 static WebSocketsClient s_ws;
 static bool s_ws_connected = false;
 
-static bool     s_recording     = false;
 static uint32_t s_rec_start_ms  = 0;
 static uint32_t s_last_voice_ms = 0;
 static uint16_t s_voice_threshold = VOICE_THRESHOLD_DEFAULT;  // 运行时语音阈值（持续自适应）
@@ -99,6 +102,12 @@ static int32_t s_noise_hist[NOISE_HIST_LEN];
 static int     s_noise_idx   = 0;
 static int     s_noise_count = 0;
 static bool    s_vad_ready   = false;
+
+// 对话状态机：IDLE(待唤醒) → LISTENING(聆听) → PROCESSING(等服务器) → PLAYING(播放)
+enum ConvState { ST_IDLE, ST_LISTENING, ST_PROCESSING, ST_PLAYING };
+static ConvState s_state = ST_IDLE;
+static bool      s_speech_started  = false;  // 当前聆听窗口内是否已开始说话
+static uint32_t  s_listen_start_ms = 0;      // 当前聆听窗口开始时间
 
 static bool s_playing      = false;
 static bool s_tts_end_seen = false;
@@ -200,6 +209,8 @@ static void vad_update(int32_t frame_peak) {
   }
 }
 
+static void enter_listening();  // 前向声明：play_drain 播放完成后自动进入下一轮聆听
+
 // ============================================================
 // 播放缓冲（WebSocket 回调线程 → 主循环，临界区保护）
 // ============================================================
@@ -239,24 +250,29 @@ static void play_drain() {
   } else if (s_tts_end_seen) {
     s_playing = false;
     s_tts_end_seen = false;
+    // 播放完成，自动进入下一轮聆听（连续对话，无需再喊唤醒词）
+    enter_listening();
   }
 }
 
 // ============================================================
-// 开始录音并上传
+// 进入聆听状态（发 audio_start，开始收用户语音）
 // ============================================================
-static void start_recording() {
+static void enter_listening() {
   if (!s_ws_connected) {
-    Serial.println("[WS] 服务器未连接，无法录音");
+    s_state = ST_IDLE;
+    Serial.println(">>> 服务器未连接，回到待唤醒");
     return;
   }
-  s_recording = true;
+  s_state = ST_LISTENING;
+  s_speech_started = false;
+  s_listen_start_ms = millis();
   s_rec_start_ms = millis();
   s_last_voice_ms = millis();
   s_voice_frames = 0;
   s_rec_max_vol = 0;
   s_ws.sendTXT("{\"type\":\"audio_start\"}");
-  Serial.println(">>> 开始录音，请说话...");
+  Serial.println(">>> 请说话...");
 }
 
 // ============================================================
@@ -285,8 +301,7 @@ static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
         const char *reply = doc["reply"] | "";
         Serial.printf(">>> 你说: %s\n", user);
         Serial.printf(">>> 小绿: %s\n", reply);
-      } else if (strcmp(t, "tts_start") == 0) {
-        s_playing = true;
+      } else if (strcmp(t, "tts_start") == 0) {        s_state = ST_PLAYING;        s_playing = true;
         s_tts_end_seen = false;
         Serial.println("[WS] TTS 开始");
       } else if (strcmp(t, "tts_end") == 0) {
@@ -485,48 +500,66 @@ void loop() {
   }
   pcm_push(pcm, frames);
 
-  // ---- 空闲时持续估计环境噪声，动态更新语音阈值 ----
-  if (!s_recording && !s_playing) {
+  // ---- 环境噪声估计（空闲/聆听未说话时持续更新，播放时冻结） ----
+  if (s_state == ST_IDLE || (s_state == ST_LISTENING && !s_speech_started)) {
     vad_update(vol_l);
   }
 
   // ---- 播放 TTS 音频 ----
   play_drain();
 
-  // ---- 录音上传（唤醒后，能量 VAD 断句） ----
-  if (s_recording) {
+  // ---- 状态机：聆听 + 录音上传 ----
+  if (s_state == ST_LISTENING) {
     if (!s_ws_connected) {
-      // 服务器断开，放弃本次录音，避免卡住
-      s_recording = false;
+      // 服务器断开，放弃本轮并回待唤醒
+      s_state = ST_IDLE;
       Serial.println(">>> 录音中断（服务器断开）");
     } else {
       s_ws.sendBIN((uint8_t *)pcm, frames * 2);
       uint32_t now = millis();
-      if (vol_l > s_rec_max_vol) s_rec_max_vol = vol_l;
-      if (vol_l > s_voice_threshold) {
-        s_last_voice_ms = now;
-        s_voice_frames++;
-      }
-      if ((now - s_rec_start_ms > MIN_REC_MS && now - s_last_voice_ms > SILENCE_MS) ||
-          now - s_rec_start_ms > MAX_REC_MS) {
-        s_recording = false;
-        s_ws.sendTXT("{\"type\":\"audio_end\"}");
-        Serial.printf(">>> 录音结束：时长=%lums 语音帧=%lu 峰值音量=%d 阈值=%u\n",
-                      (unsigned long)(now - s_rec_start_ms),
-                      (unsigned long)s_voice_frames,
-                      (int)s_rec_max_vol,
-                      (unsigned)s_voice_threshold);
+
+      if (!s_speech_started) {
+        // 还没开始说话：等语音；先静置 GUARD_MS 避免扬声器余音误触发
+        if (now - s_listen_start_ms >= GUARD_MS) {
+          if (vol_l > s_voice_threshold) {
+            s_speech_started = true;
+            s_last_voice_ms = now;
+            s_voice_frames = 1;
+            if (vol_l > s_rec_max_vol) s_rec_max_vol = vol_l;
+          } else if (now - s_listen_start_ms > CONV_TIMEOUT_MS) {
+            // 连续对话超时，回到待唤醒
+            s_state = ST_IDLE;
+            Serial.println(">>> 对话结束（超时），回到待唤醒");
+          }
+        }
+      } else {
+        // 已开始说话：静音端点检测
+        if (vol_l > s_rec_max_vol) s_rec_max_vol = vol_l;
+        if (vol_l > s_voice_threshold) {
+          s_last_voice_ms = now;
+          s_voice_frames++;
+        }
+        if ((now - s_rec_start_ms > MIN_REC_MS && now - s_last_voice_ms > SILENCE_MS) ||
+            now - s_rec_start_ms > MAX_REC_MS) {
+          s_state = ST_PROCESSING;
+          s_ws.sendTXT("{\"type\":\"audio_end\"}");
+          Serial.printf(">>> 录音结束：时长=%lums 语音帧=%lu 峰值音量=%d 阈值=%u\n",
+                        (unsigned long)(now - s_rec_start_ms),
+                        (unsigned long)s_voice_frames,
+                        (int)s_rec_max_vol,
+                        (unsigned)s_voice_threshold);
+        }
       }
     }
   }
 
-  // ---- 唤醒词检测（连续喂帧） ----
+  // ---- 唤醒词检测（仅在待唤醒状态运行） ----
   static int16_t frame[512];
   while (pcm_take(frame, wn_chunk)) {
     wakenet_state_t wn_state = s_wn->detect(s_wn_handle, frame);
-    if (wn_state == WAKENET_DETECTED && !s_recording && !s_playing) {
+    if (wn_state == WAKENET_DETECTED && s_state == ST_IDLE) {
       Serial.println(">>> 唤醒词命中：你好小智！");
-      start_recording();
+      enter_listening();
     }
   }
 }
