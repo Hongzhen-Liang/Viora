@@ -62,6 +62,11 @@
 #define VOICE_START_FRAMES 4   // 连续 4 帧(约128ms)有声音才算"开始说话"
 #define MIN_VOICE_FRAMES   6   // 总语音帧少于这个视为误触发，不上传
 
+// 播放音量（LLM operation: volume_up / volume_down 分发到这里）
+#define VOLUME_STEP 0.2f   // 每档音量步进
+#define VOLUME_MIN  0.1f   // 音量下限
+#define VOLUME_MAX  2.0f   // 音量上限
+
 // ============================================================
 // 缓冲大小
 // ============================================================

@@ -9,7 +9,8 @@ struct NetCallbacks {
   void (*on_connected)();                                  // WS 连上
   void (*on_disconnected)();                               // WS 断开
   void (*on_text)(const char *type, const char *user,
-                  const char *reply, const char *msg);     // 文本帧（已解析）
+                  const char *reply, const char *msg,
+                  const char *op);                         // 文本帧（已解析；op=LLM 操作）
   void (*on_audio)(const uint8_t *data, size_t len);       // 二进制音频帧
 };
 

@@ -22,3 +22,5 @@ void audio_play_discard();                             // 断开时清空缓冲
 void audio_mark_tts_start();                           // 收到 tts_start 时调用
 void audio_mark_tts_end();                             // 收到 tts_end 时调用
 bool audio_playback_finished();                        // 播完时返回一次 true
+void audio_set_volume(float vol);                      // 播放音量 0.1~2.0（LLM volume_up/down 调用）
+float audio_get_volume();                              // 当前播放音量

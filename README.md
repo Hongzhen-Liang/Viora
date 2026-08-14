@@ -83,6 +83,7 @@ sequenceDiagram
 
 | 帧类型 | 内容 | 说明 |
 |--------|------|------|
+| 文本 | `{"type":"text","user":"...","reply":"...","op":"none"}` | 回复文字；`op` 为 LLM 识别操作：`none`/`exit`/`volume_up`/`volume_down`，端侧按 op 分发 |
 | 文本 | `{"type":"tts_start","bytes":N}` | 开始下发合成音频，N 为 PCM 字节总数 |
 | 二进制 | PCM 字节 | 合成音频，可拆成多块 |
 | 文本 | `{"type":"tts_end"}` | 音频结束，ESP32 完成播放 |
@@ -94,6 +95,8 @@ sequenceDiagram
 - 服务器收到 `audio_start` 后进入"收音频"状态，把后续二进制帧拼进缓冲区，直到收到 `audio_end`。
 - 收到 `audio_end` 后串行执行 ASR → LLM → TTS，期间忽略新的 `audio_start`（或返回 busy）。
 - 流水线完成后，先发 `tts_start`，再流式发送二进制音频，最后发 `tts_end`。
+- LLM 回复带 `op` 操作字段（`none`/`exit`/`volume_up`/`volume_down`）；`exit` 时服务器下发道别音频，ESP32 播完回待唤醒（text 帧的 op 驱动，无额外帧）。
+- LLM 不可用时兜底：ASR 文本命中退出词（`config.py` 的 `EXIT_WORDS`）同样走退出流程，用 `EXIT_REPLY` 固定道别。
 
 ---
 

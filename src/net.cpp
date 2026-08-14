@@ -53,17 +53,17 @@ static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
       }
       const char *t = doc["type"] | "";
       if (strcmp(t, "text") == 0) {
-        if (s_cb.on_text) s_cb.on_text("text", doc["user"] | "", doc["reply"] | "", "");
+        if (s_cb.on_text) s_cb.on_text("text", doc["user"] | "", doc["reply"] | "", "", doc["op"] | "");
       } else if (strcmp(t, "tts_start") == 0) {
         Serial.println("[WS] TTS 开始");
-        if (s_cb.on_text) s_cb.on_text("tts_start", "", "", "");
+        if (s_cb.on_text) s_cb.on_text("tts_start", "", "", "", "");
       } else if (strcmp(t, "tts_end") == 0) {
         Serial.println("[WS] TTS 结束");
-        if (s_cb.on_text) s_cb.on_text("tts_end", "", "", "");
+        if (s_cb.on_text) s_cb.on_text("tts_end", "", "", "", "");
       } else if (strcmp(t, "error") == 0) {
         const char *msg = doc["message"] | "";
         Serial.printf("[WS] 服务器错误: %s\n", msg);
-        if (s_cb.on_text) s_cb.on_text("error", "", "", msg);
+        if (s_cb.on_text) s_cb.on_text("error", "", "", msg, "");
       } else {
         Serial.printf("[WS] 收到: %.*s\n", (int)length, payload);
       }

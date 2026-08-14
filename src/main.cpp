@@ -34,6 +34,7 @@ static uint32_t  s_last_voice_ms = 0;
 static uint32_t  s_voice_frames  = 0;
 static int32_t   s_rec_max_vol   = 0;
 static bool      s_rearm_pending = false;   // 服务器返回错误后，主循环重新进入聆听
+static bool      s_exit_pending   = false;  // 收到 bye：播完道别音频后回待唤醒
 
 // ============================================================
 // 进入聆听状态（发 audio_start，开始收用户语音）
@@ -45,6 +46,7 @@ static void enter_listening() {
     return;
   }
   s_state = ST_LISTENING;
+  s_exit_pending = false;
   s_speech_started = false;
   s_consecutive_voice = 0;
   s_in_gap = false;
@@ -68,14 +70,30 @@ static void on_net_connected() {
 static void on_net_disconnected() {
   s_state = ST_IDLE;
   s_rearm_pending = false;
+  s_exit_pending = false;
   audio_play_discard();
 }
 
 static void on_server_text(const char *type, const char *user,
-                           const char *reply, const char *msg) {
+                           const char *reply, const char *msg,
+                           const char *op) {
   if (strcmp(type, "text") == 0) {
     Serial.printf(">>> 你说: %s\n", user);
     Serial.printf(">>> 小绿: %s\n", reply);
+    // ---- LLM 操作分发：端侧只判断 op，不关心语义 ----
+    if (strcmp(op, "exit") == 0) {
+      // text 帧先于 tts_start 到达：先置位，道别音频播完回待唤醒
+      s_exit_pending = true;
+      Serial.println(">>> [OP] exit：道别后回待唤醒");
+    } else if (strcmp(op, "volume_up") == 0) {
+      audio_set_volume(audio_get_volume() + VOLUME_STEP);
+      Serial.printf(">>> [OP] 音量调大 → %.0f%%\n", audio_get_volume() * 100);
+    } else if (strcmp(op, "volume_down") == 0) {
+      audio_set_volume(audio_get_volume() - VOLUME_STEP);
+      Serial.printf(">>> [OP] 音量调小 → %.0f%%\n", audio_get_volume() * 100);
+    } else if (op[0] != '\0' && strcmp(op, "none") != 0) {
+      Serial.printf(">>> [OP] 未知操作: %s（已忽略）\n", op);
+    }
   } else if (strcmp(type, "tts_start") == 0) {
     s_state = ST_PLAYING;
     audio_mark_tts_start();
@@ -148,8 +166,15 @@ void loop() {
   // ---- 播放 TTS 音频 ----
   audio_play_drain();
   if (audio_playback_finished()) {
-    // 播放完成，自动进入下一轮聆听（连续对话，无需再喊唤醒词）
-    enter_listening();
+    if (s_exit_pending) {
+      // 退出词会话：播完道别音频后回待唤醒，而非继续聆听
+      s_exit_pending = false;
+      s_state = ST_IDLE;
+      Serial.println(">>> 已退出对话，回到待唤醒（再喊唤醒词可重新开始）");
+    } else {
+      // 播放完成，自动进入下一轮聆听（连续对话，无需再喊唤醒词）
+      enter_listening();
+    }
   }
 
   // ---- 状态机：聆听 + 录音上传 ----

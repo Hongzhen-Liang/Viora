@@ -83,6 +83,7 @@ sequenceDiagram
 
 | 帧类型 | 内容 | 说明 |
 |--------|------|------|
+| 文本 | `{"type":"text","user":"...","reply":"...","op":"none"}` | 回复文字；`op` 为 LLM 识别操作：`none`/`exit`/`volume_up`/`volume_down` |
 | 文本 | `{"type":"tts_start","bytes":N}` | 开始下发合成音频，N 为 PCM 总字节数 |
 | 二进制 | PCM 字节 | 合成音频，可拆成多块 |
 | 文本 | `{"type":"tts_end"}` | 音频结束，完成播放 |
@@ -94,6 +95,7 @@ sequenceDiagram
 - 服务器收到 `audio_start` 后进入"收音频"状态，把后续二进制帧拼进缓冲区，直到 `audio_end`。
 - 收到 `audio_end` 后服务器串行执行 ASR → LLM → TTS，**期间忙**：此时再发 `audio_start` 会收到 `{"type":"error","message":"服务器忙..."}`。
 - 流水线完成后服务器先发 `tts_start`，再流式发二进制音频，最后 `tts_end`。
+- text 帧带 `op` 字段，端侧按 op 分发：`exit`→道别音频播完回待唤醒；`volume_up`/`volume_down`→调播放音量；其余忽略。
 
 **ESP32 端对应状态机：**
 
@@ -104,6 +106,7 @@ stateDiagram-v2
     录音中 --> 上传中: 说话结束 → 发 audio_end
     上传中 --> 播放中: 收到 tts_start
     播放中 --> 待机: 收到 tts_end
+    播放中 --> 待机: op=exit（道别播完后回待机）
     播放中 --> 录音中: 打断（可选二期 → 发 cancel）
 ```
 

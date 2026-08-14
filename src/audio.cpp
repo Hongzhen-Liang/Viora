@@ -20,6 +20,19 @@ static uint32_t s_play_len  = 0;
 static bool     s_tts_end_seen = false;
 static portMUX_TYPE s_play_mux = portMUX_INITIALIZER_UNLOCKED;
 
+// ---- 播放音量（LLM operation: volume_up / volume_down）----
+static float s_volume = 1.0f;
+
+void audio_set_volume(float vol) {
+  if (vol < VOLUME_MIN) vol = VOLUME_MIN;
+  if (vol > VOLUME_MAX) vol = VOLUME_MAX;
+  s_volume = vol;
+}
+
+float audio_get_volume() {
+  return s_volume;
+}
+
 // ============================================================
 // 麦克风 I2S（RX，32bit 帧装 24bit 数据，双声道诊断读左声道）
 // ============================================================
@@ -169,6 +182,17 @@ void audio_play_drain() {
     s_play_head = (s_play_head + chunk) % PLAY_BUFFER_SIZE;
     s_play_len -= chunk;
     portEXIT_CRITICAL(&s_play_mux);
+    // 音量缩放（32ms 一小块，开销可忽略）
+    if (s_volume != 1.0f) {
+      int16_t *s = (int16_t *)buf;
+      int samples = chunk / 2;
+      for (int i = 0; i < samples; i++) {
+        int32_t v = (int32_t)((float)s[i] * s_volume);
+        if (v > 32767) v = 32767;
+        else if (v < -32768) v = -32768;
+        s[i] = (int16_t)v;
+      }
+    }
     size_t written = 0;
     i2s_write(SPK_I2S_PORT, buf, chunk, &written, portMAX_DELAY);
   }
