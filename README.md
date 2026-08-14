@@ -231,19 +231,18 @@ async def synthesize(text: str) -> bytes:
 
 ---
 
-## 9. 植物人设系统提示词模板（`prompts.py`）
+## 9. 植物人设系统提示词（`persona.py` + `prompts.py`）
+
+- `persona.py`：人设正文单独维护——紫色蝴蝶兰"紫姬"（外冷内热、轻微傲娇，含说话风格、关系成长、植物状态人格化表达等），改人设只动这个文件。
+- `prompts.py`：`build_system_prompt(state)` 把「人设 + 当前植物状态 + 输出格式」拼成 system 提示词，要求 LLM 只输出 JSON `{"reply","operation"}`。
 
 ```python
+# prompts.py
+import persona
+
 def build_system_prompt(state: dict) -> str:
-    return f"""你叫"小绿"，是一盆绿萝的 AI 陪伴精灵，性格温柔幽默，会关心植物健康。
-当前植物实时状态：土壤湿度 {state.get('soil_moisture','?')}%（<30% 偏干），
-气温 {state.get('temp','?')}℃，空气湿度 {state.get('humidity','?')}%，
-光照 {state.get('light','?')} lux。
-规则：
-1. 回答 2~3 句话，口语化、有温度，不要长篇大论。
-2. 结合上面的实时数据主动关心（如"主人，我有点渴了"）。
-3. 主人问健康/养护问题时给出具体建议。
-4. 适时主动提醒浇水、遮阴、补光。"""
+    status = ""  # 由 state 生成（传感器未接入时为空，避免 LLM 编造数据）
+    return persona.PERSONA + f"\n\n{status}\n" + "输出格式：只输出 JSON ..."
 ```
 
 ---

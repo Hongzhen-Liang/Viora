@@ -79,7 +79,7 @@ static void on_server_text(const char *type, const char *user,
                            const char *op) {
   if (strcmp(type, "text") == 0) {
     Serial.printf(">>> 你说: %s\n", user);
-    Serial.printf(">>> 小绿: %s\n", reply);
+    Serial.printf(">>> 紫姬: %s\n", reply);
     // ---- LLM 操作分发：端侧只判断 op，不关心语义 ----
     if (strcmp(op, "exit") == 0) {
       // text 帧先于 tts_start 到达：先置位，道别音频播完回待唤醒
