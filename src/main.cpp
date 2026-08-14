@@ -35,6 +35,7 @@ static uint32_t  s_voice_frames  = 0;
 static int32_t   s_rec_max_vol   = 0;
 static bool      s_rearm_pending = false;   // 服务器返回错误后，主循环重新进入聆听
 static bool      s_exit_pending   = false;  // 收到 bye：播完道别音频后回待唤醒
+static int       s_consec_errors  = 0;      // 连续服务器错误次数（防背景音乐死循环）
 
 // ============================================================
 // 进入聆听状态（发 audio_start，开始收用户语音）
@@ -71,6 +72,7 @@ static void on_net_disconnected() {
   s_state = ST_IDLE;
   s_rearm_pending = false;
   s_exit_pending = false;
+  s_consec_errors = 0;
   audio_play_discard();
 }
 
@@ -80,6 +82,7 @@ static void on_server_text(const char *type, const char *user,
   if (strcmp(type, "text") == 0) {
     Serial.printf(">>> 你说: %s\n", user);
     Serial.printf(">>> 紫姬: %s\n", reply);
+    s_consec_errors = 0;   // 有正常回复，清零错误计数
     // ---- LLM 操作分发：端侧只判断 op，不关心语义 ----
     if (strcmp(op, "exit") == 0) {
       // text 帧先于 tts_start 到达：先置位，道别音频播完回待唤醒
@@ -101,8 +104,18 @@ static void on_server_text(const char *type, const char *user,
     audio_mark_tts_end();
   } else if (strcmp(type, "error") == 0) {
     Serial.printf("[WS] 服务器错误: %s\n", msg);
-    // 服务器没给出语音回复（如"没听清"）：重新进入聆听，让用户再说一遍
-    s_rearm_pending = true;
+    s_consec_errors++;
+    if (s_consec_errors >= MAX_CONSEC_ERRORS) {
+      // 连续多次识别失败（典型：背景音乐被误当人声）：不再重听，回待唤醒
+      s_consec_errors = 0;
+      s_rearm_pending = false;
+      s_state = ST_IDLE;
+      audio_play_discard();
+      Serial.println(">>> 连续多次未识别，回到待唤醒（喊唤醒词可重新开始）");
+    } else {
+      // 服务器没给出语音回复（如"没听清"）：重新进入聆听，让用户再说一遍
+      s_rearm_pending = true;
+    }
   }
 }
 

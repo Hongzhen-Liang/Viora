@@ -54,13 +54,14 @@
 #define SILENCE_BASE_MS 3000
 #define SILENCE_MAX_MS  6000
 #define MIN_REC_MS      800    // 至少录这么久
-#define MAX_REC_MS      30000  // 最多录这么久（一次可连说 30 秒）
+#define MAX_REC_MS      15000  // 最多录这么久（音乐下 VAD 误报的硬性保险）
 
 // 连续对话参数
 #define CONV_TIMEOUT_MS 20000  // 连续对话中，这么久没人说话就退出（回到待唤醒）
 #define GUARD_MS        800    // 播放结束后静置一小段，避免扬声器余音/pop 误触发
-#define VOICE_START_FRAMES 4   // 连续 4 帧(约128ms)有声音才算"开始说话"
+#define VOICE_START_FRAMES 4   // 连续 4 帧(约128ms)有人声才算"开始说话"
 #define MIN_VOICE_FRAMES   6   // 总语音帧少于这个视为误触发，不上传
+#define MAX_CONSEC_ERRORS 2    // 连续多次服务器错误（如背景音乐被当语音）→ 回待唤醒
 
 // 播放音量（LLM operation: volume_up / volume_down 分发到这里）
 #define VOLUME_STEP 0.2f   // 每档音量步进

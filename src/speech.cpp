@@ -49,7 +49,7 @@ bool speech_init() {
   cfg.se_init      = true;                     // 降噪（NS_MODE_SSP，无需模型）
   cfg.vad_init     = true;                     // 神经 VAD（抗背景音乐的关键）
   cfg.wakenet_init = true;
-  cfg.vad_mode     = VAD_MODE_3;
+  cfg.vad_mode     = VAD_MODE_4;               // 最严格：宁可漏检也不把音乐当人声
   cfg.wakenet_model_name = wn_name;
   cfg.wakenet_mode = DET_MODE_90;              // 单通道检测模式
   cfg.afe_mode     = SR_MODE_HIGH_PERF;
