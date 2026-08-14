@@ -5,6 +5,8 @@
 components/*.zip
 components/esp-sr/
 components/esp-dsp/
+components/esp-tflite-micro/
+components/esp-nn/
 components/esp-dsp147/
 components/srmodels.bin
 components/srmodels_stage/

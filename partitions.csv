@@ -1,10 +1,8 @@
 # ESP32-S3 N16R8 16MB Flash 自定义分区表
-# app: 4MB（固件代码 + ESP-SR 预编译库）
-# model: 4MB（ESP-SR 模型，label="model"；预留 mn6/mn7 大模型空间）
-# spiffs: ~8MB（文件系统，暂未使用）
+# app: 4MB（固件代码 + ESP-SR AFE + 自研 Hi Vesper TFLM 模型）
+# spiffs: ~12MB（旧 WakeNet model 分区已移除）
 # Name,   Type, SubType, Offset,   Size
 nvs,      data, nvs,     0x9000,   0x5000,
 otadata,  data, ota,     0xe000,   0x2000,
 app0,     app,  ota_0,   0x10000,  0x400000,
-model,    data, spiffs,  0x410000, 0x400000,
-spiffs,   data, spiffs,  0x810000, 0x7F0000,
+spiffs,   data, spiffs,  0x410000, 0xBF0000,

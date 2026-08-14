@@ -3,7 +3,7 @@
 > 本文档面向 **ESP32 端**项目，说明如何接入 Mac 上的 PlantTalk 服务器。
 >
 > ESP32 端职责（只做这四件事）：
-> 1. **唤醒词检测**（"你好小智"）
+> 1. **自研唤醒词检测**（"Hi Vesper"，Log-Mel + DS-CNN INT8）
 > 2. **录音上传**（16k/16bit PCM，经 WebSocket）
 > 3. **接收音频播放**（服务器下发的合成语音）
 > 4. **传感器采集上报**（土壤湿度 / 温湿度 / 光照）
@@ -19,7 +19,7 @@ sequenceDiagram
     participant E as ESP32
     participant S as Mac 服务器(8765)
 
-    Note over E: 唤醒词"你好小智"命中
+    Note over E: 唤醒词 "Hi Vesper" 命中
     E->>S: {"type":"audio_start"}
     E->>S: 二进制 PCM（连续流式发送）
     E->>S: {"type":"audio_end"}
@@ -150,7 +150,8 @@ lib_deps =
 | `arduino-esp32` 自带 I2S | 录音 / 播放（`driver/i2s.h`） |
 | `schreibfaul1/ESP32-audioI2S` | （可选）封装好的 I2S 输入输出 |
 | `DHT sensor library` | 温湿度 |
-| ESP-SR（ESP-IDF 组件） | 唤醒词 + 神经 VAD + 降噪（AFE，见 §7） |
+| ESP-SR（ESP-IDF 组件） | 神经 VAD + 降噪（AFE，见 §7） |
+| TFLite Micro + ESP-NN | 自研 Hi Vesper 全 INT8 推理 |
 
 ---
 
@@ -226,7 +227,7 @@ bool mic_begin();                    // 初始化 I2S 麦克风
 bool speaker_begin();                // 初始化 I2S 功放
 int  mic_read(int16_t* buf, int samples);   // 读一帧 PCM，返回样本数
 void speaker_play(const uint8_t* data, size_t len); // 播放一段 PCM
-bool wake_word_detected();           // 唤醒词"你好小智"是否命中
+bool wake_word_detected();           // 自研唤醒词 "Hi Vesper" 是否命中
 
 WebSocketsClient ws;
 bool collecting = false;             // 是否处于"录音上传"状态
@@ -347,16 +348,20 @@ void loop() {
 
 ## 7. 唤醒词检测 + 断句 VAD
 
-项目实际用 Espressif **ESP-SR AFE**（`esp_afe_sr_v1`，1.9.2 预编译库）统一处理：
+项目把唤醒与对话音频前端分开处理：
 
-- **唤醒词**：WakeNet `wn9_nihaoxiaozhi`（“你好小智”），命中后进入录音状态。
+- **唤醒词**：原始 16 kHz PCM 经 ESP-DSP 计算 `148×40` Log-Mel，由自研轻量 DS-CNN
+  full-int8 模型通过 TFLite Micro + ESP-NN 推理；`p>=0.97` 立即触发，或 `p>=0.90`
+  连续两次触发，冷却 2.5 秒。每次启动先运行 Python/ESP32 golden-vector 自检。
 - **断句端点**：AFE 内置**神经 VAD**（`vad_state`）判断“是否有人说话”，替代能量门限——背景音乐不会被当成人声，音乐播放中也能正确结束对话；能量法（`vad.*`）仅留作诊断。
 - **降噪**：AFE 输出增强音频（NS_MODE_SSP），上传给服务器 Whisper 的也是增强后的 PCM。
-- 配置：单麦、无参考通道（`aec_init=false`），`DET_MODE_90`，内存放 PSRAM。
+- **WakeNet 已关闭**：不加载 `wn9_nihaoxiaozhi`，不生成/烧录 `srmodels.bin`，不再需要
+  `model` 分区。AFE 配置为单麦、无参考通道（`aec_init=false`），内存优先放 PSRAM。
 
 > 注意：`src/esp_afe_sr_1mic.ref` 是新版本模板，与 1.9.2 头文件不兼容，不要编译；直接用 `esp_afe_sr_models.h` 里的 `ESP_AFE_SR_HANDLE.create_from_config()`。
 
-> 注意：AFE 模型会占一部分内存和 CPU，建议用 ESP32-S3（带 PSRAM 更稳）。
+> 当前 N16R8 板端实测模型 37,376 bytes，tensor arena 约 122 KB（内部 SRAM），单次推理
+> 约 49.2 ms；ESP32-S3 带 PSRAM 用于音频和 AFE 缓冲。
 
 ---
 

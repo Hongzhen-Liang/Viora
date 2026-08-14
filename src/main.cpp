@@ -6,7 +6,8 @@
 //   audio.*    麦克风采集 / 扬声器播放 / PCM 环形缓存 / 播放缓冲
 //   vad.*      环境噪声估计（诊断用，断句判定由 AFE VAD 接管）
 //   net.*      WiFi 与 WebSocket 通信
-//   speech.*   esp-sr AFE：唤醒词 + 神经 VAD + 降噪
+//   speech.*   esp-sr AFE：神经 VAD + 降噪
+//   wake_word.* 自研 Hi Vesper Log-Mel + DS-CNN INT8 唤醒检测
 // ============================================================
 #include <Arduino.h>
 
@@ -15,6 +16,7 @@
 #include "vad.h"
 #include "net.h"
 #include "speech.h"
+#include "wake_word.h"
 #include "led.h"
 
 // ============================================================
@@ -47,6 +49,7 @@ static void enter_listening() {
     Serial.println(">>> 服务器未连接，回到待唤醒");
     return;
   }
+  speech_reset();
   s_state = ST_LISTENING;
   s_exit_pending = false;
   s_speech_started = false;
@@ -147,7 +150,14 @@ void setup() {
                 (unsigned)ESP.getFreeHeap(),
                 (unsigned)getCpuFrequencyMhz());
   audio_init();
-  speech_init();
+  const bool afe_ok = speech_init();
+  const bool kws_ok = wake_word_init();
+  if (!afe_ok || !kws_ok) {
+    Serial.printf("[SYS] 语音初始化失败: AFE=%s KWS=%s\n",
+                  afe_ok ? "OK" : "FAIL", kws_ok ? "OK" : "FAIL");
+  } else {
+    Serial.println(">>> 语音识别就绪，请说唤醒词：Hi Vesper");
+  }
   led_init();
 }
 
@@ -182,10 +192,63 @@ void loop() {
   int frames = audio_capture(pcm, 512, &vol_l);
   if (frames <= 0) return;
 
-  // ---- AFE：唤醒词 + 神经 VAD + 降噪（内部按 feed 帧长自动累积/拉取） ----
+  // ---- 自研 Hi Vesper：原始 16 kHz PCM -> Log-Mel -> DS-CNN INT8 ----
+  const bool kws_enabled = s_state == ST_IDLE && net_connected();
+  float wake_probability = 0.0f;
+  const bool woken = wake_word_process(
+      pcm, frames, kws_enabled, &wake_probability);
+
+  // ---- KWS 实时诊断：确认主循环能否跟上 16 kHz 音频，以及声学输入分数 ----
+  // audio_ms 应与 wall_ms 基本同步；lag 持续增长说明推理/AFE 阻塞导致采音掉帧。
+  static bool kws_diag_armed = false;
+  static uint32_t kws_diag_start_ms = 0;
+  static uint32_t kws_diag_last_ms = 0;
+  static uint64_t kws_diag_samples = 0;
+  static float kws_diag_max_probability = 0.0f;
+  static int16_t kws_diag_max_peak = 0;
+  if (kws_enabled) {
+    const uint32_t now = millis();
+    if (!kws_diag_armed) {
+      kws_diag_armed = true;
+      kws_diag_start_ms = now;
+      kws_diag_last_ms = now;
+      kws_diag_samples = 0;
+      kws_diag_max_probability = 0.0f;
+      kws_diag_max_peak = 0;
+    }
+    kws_diag_samples += frames;
+    if (wake_probability > kws_diag_max_probability) {
+      kws_diag_max_probability = wake_probability;
+    }
+    if (vol_l > kws_diag_max_peak) kws_diag_max_peak = vol_l;
+    if (now - kws_diag_last_ms >= 5000) {
+      const uint32_t wall_ms = now - kws_diag_start_ms;
+      const uint32_t audio_ms = static_cast<uint32_t>(
+          kws_diag_samples * 1000ULL / SR_SAMPLE_RATE);
+      const int32_t lag_ms = static_cast<int32_t>(wall_ms) -
+                             static_cast<int32_t>(audio_ms);
+      Serial.printf(
+          "[KWS-DIAG] wall=%lums audio=%lums lag=%ldms peak=%d "
+          "wake_max=%.4f infer=%luus\n",
+          static_cast<unsigned long>(wall_ms),
+          static_cast<unsigned long>(audio_ms), static_cast<long>(lag_ms),
+          static_cast<int>(kws_diag_max_peak), kws_diag_max_probability,
+          static_cast<unsigned long>(wake_word_last_inference_us()));
+      kws_diag_last_ms = now;
+      kws_diag_max_probability = wake_probability;
+      kws_diag_max_peak = vol_l;
+    }
+  } else {
+    kws_diag_armed = false;
+  }
+
+  // ---- AFE：仅聆听时运行；待唤醒时运行会和约 49ms 的 KWS 推理争抢 CPU ----
   static int16_t afe_out[1024];
-  bool woken = false, is_speech = false;
-  bool have_afe = speech_process(pcm, frames, afe_out, &woken, &is_speech);
+  bool is_speech = false;
+  bool have_afe = false;
+  if (s_state == ST_LISTENING) {
+    have_afe = speech_process(pcm, frames, afe_out, &is_speech);
+  }
 
   // ---- 环境噪声估计（诊断用：仅打印阈值，断句已由 AFE VAD 接管） ----
   if (s_state == ST_IDLE || (s_state == ST_LISTENING && !s_speech_started)) {
@@ -291,9 +354,9 @@ void loop() {
     }
   }
 
-  // ---- 唤醒词（AFE 检测，仅在待唤醒状态） ----
+  // ---- 唤醒词（自研 TFLite Micro 检测，仅在待唤醒状态） ----
   if (woken && s_state == ST_IDLE) {
-    Serial.println(">>> 唤醒词命中：你好小智！");
+    Serial.println(">>> 唤醒词命中：Hi Vesper！");
     enter_listening();
   }
 }
