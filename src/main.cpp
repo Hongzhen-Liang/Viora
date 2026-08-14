@@ -15,6 +15,7 @@
 #include "vad.h"
 #include "net.h"
 #include "speech.h"
+#include "led.h"
 
 // ============================================================
 // 对话状态机：IDLE(待唤醒) → LISTENING(聆听) → PROCESSING(等服务器) → PLAYING(播放)
@@ -147,10 +148,21 @@ void setup() {
                 (unsigned)getCpuFrequencyMhz());
   audio_init();
   speech_init();
+  led_init();
 }
 
 void loop() {
   net_loop();
+
+  // ---- 状态灯：颜色即状态 ----
+  LedMode led_mode;
+  if (!net_connected())          led_mode = LED_MODE_ERROR;
+  else if (s_state == ST_IDLE)   led_mode = LED_MODE_IDLE;
+  else if (s_state == ST_LISTENING) led_mode = LED_MODE_LISTENING;
+  else if (s_state == ST_PROCESSING) led_mode = LED_MODE_PROCESSING;
+  else                           led_mode = LED_MODE_PLAYING;
+  led_set_mode(led_mode);
+  led_loop();
 
   // 服务器返回错误（如"没听清"）→ 重新进入聆听
   if (s_rearm_pending) {

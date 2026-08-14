@@ -1,0 +1,23 @@
+#pragma once
+// ============================================================
+// 状态灯模块：板载 WS2812 RGB（GPIO48，DevKitC-1 标准）
+// 颜色即状态，一眼可辨：
+//   红闪   = 未连接服务器
+//   蓝呼吸 = 待唤醒（IDLE）
+//   绿常亮 = 聆听中
+//   琥珀呼吸 = 等服务器处理
+//   青常亮 = 播放回复
+// ============================================================
+#include <Arduino.h>
+
+enum LedMode {
+  LED_MODE_ERROR = 0,   // 红色快闪
+  LED_MODE_IDLE,        // 蓝色呼吸
+  LED_MODE_LISTENING,   // 绿色常亮
+  LED_MODE_PROCESSING,  // 琥珀色呼吸
+  LED_MODE_PLAYING,     // 青色常亮
+};
+
+void led_init();
+void led_set_mode(LedMode mode);
+void led_loop();        // 主循环调用，驱动呼吸/闪烁动画
