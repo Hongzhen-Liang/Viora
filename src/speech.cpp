@@ -1,61 +1,138 @@
 // ============================================================
-// 语音模块实现：esp-sr wakenet
+// 语音模块实现：esp-sr AFE（音频前端）
+//   唤醒词（wn9_nihaoxiaozhi）+ 神经 VAD（抗背景音乐）+ 降噪
+//
+// 说明：esp-sr 1.9.2 的 AFE 接口（esp_afe_sr_v1）在预编译库
+//   libespsr.a 中，直接调用 create_from_config 即可；
+//   src/esp_afe_sr_1mic.ref 属于新版本模板，与 1.9.2 头文件不兼容，勿编译。
 // ============================================================
 #include <Arduino.h>
+#include <string.h>
 
-#include "esp_wn_iface.h"
-#include "esp_wn_models.h"
+#include "esp_afe_sr_iface.h"
+#include "esp_afe_sr_models.h"
 #include "model_path.h"
 
 #include "config.h"
 #include "speech.h"
 
-static const esp_wn_iface_t *s_wn = nullptr;
-static model_iface_data_t   *s_wn_handle = nullptr;
+static esp_afe_sr_data_t *s_afe = nullptr;
+static int s_feed_n  = 0;   // feed 帧长（样本）
+static int s_fetch_n = 0;   // fetch 输出帧长（样本）
+
+// ---- 累积缓冲（1.9.2 关闭 AEC 后 feed=160(10ms) ≠ fetch=512(32ms)） ----
+static int16_t s_acc[1600];
+static int     s_acc_len = 0;
+static int     s_pending = 0;       // 自上次 fetch 后已新喂的样本数
+static bool    s_last_woken = false;
+static bool    s_last_speech = false;
 
 bool speech_init() {
   srmodel_list_t *models = esp_srmodel_init("model");
   if (models == nullptr) {
-    Serial.println("[SR] 错误：未找到 model 分区，请确认已烧录模型!");
+    Serial.println("[AFE] 错误：未找到 model 分区，请确认已烧录模型!");
     return false;
   }
-  Serial.println("[SR] model 分区加载成功");
+  Serial.println("[AFE] model 分区加载成功");
 
   char *wn_name = esp_srmodel_filter(models, ESP_WN_PREFIX, "nihaoxiaozhi");
   if (wn_name == nullptr) {
-    Serial.println("[SR] 错误：模型中未找到唤醒词");
+    Serial.println("[AFE] 错误：模型中未找到唤醒词");
     return false;
   }
-  Serial.printf("[SR] 唤醒词模型: %s\n", wn_name);
+  Serial.printf("[AFE] 唤醒词模型: %s\n", wn_name);
 
-  Serial.println("[SR] 获取模型句柄...");
-  s_wn = esp_wn_handle_from_name(wn_name);
-  if (s_wn == nullptr) {
-    Serial.println("[SR] 错误：获取唤醒词模型句柄失败");
+  // C++ 中不能用 AFE_CONFIG_DEFAULT()（C99 指定初始化），逐字段赋值
+  afe_config_t cfg;
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.aec_init     = false;                    // 单麦无参考信号，关闭回声消除
+  cfg.se_init      = true;                     // 降噪（NS_MODE_SSP，无需模型）
+  cfg.vad_init     = true;                     // 神经 VAD（抗背景音乐的关键）
+  cfg.wakenet_init = true;
+  cfg.vad_mode     = VAD_MODE_3;
+  cfg.wakenet_model_name = wn_name;
+  cfg.wakenet_mode = DET_MODE_90;              // 单通道检测模式
+  cfg.afe_mode     = SR_MODE_HIGH_PERF;
+  cfg.afe_perferred_core = 0;
+  cfg.afe_perferred_priority = 5;
+  cfg.afe_ringbuf_size = 50;
+  cfg.memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
+  cfg.afe_linear_gain = 1.0f;
+  cfg.agc_mode     = AFE_MN_PEAK_NO_AGC;       // 增益交给服务器端 Whisper
+  cfg.afe_ns_mode  = NS_MODE_SSP;
+  cfg.pcm_config.total_ch_num = 1;             // 单麦、无参考通道
+  cfg.pcm_config.mic_num      = 1;
+  cfg.pcm_config.ref_num      = 0;
+  cfg.pcm_config.sample_rate  = SR_SAMPLE_RATE;
+  cfg.fixed_first_channel = true;
+
+  s_afe = ESP_AFE_SR_HANDLE.create_from_config(&cfg);
+  if (s_afe == nullptr) {
+    Serial.println("[AFE] 错误：创建 AFE 失败");
     return false;
   }
-  Serial.println("[SR] 句柄获取成功");
 
-  Serial.println("[SR] 创建唤醒词识别器...");
-  s_wn_handle = s_wn->create(wn_name, DET_MODE_90);
-  if (s_wn_handle == nullptr) {
-    Serial.println("[SR] 错误：创建唤醒词识别器失败");
-    return false;
-  }
-  Serial.println("[SR] 唤醒词识别器创建成功");
-
-  Serial.printf("[SR] 唤醒词帧长=%d | 采样率=%d\n",
-                s_wn->get_samp_chunksize(s_wn_handle),
-                s_wn->get_samp_rate(s_wn_handle));
+  s_feed_n  = ESP_AFE_SR_HANDLE.get_feed_chunksize(s_afe);
+  s_fetch_n = ESP_AFE_SR_HANDLE.get_fetch_chunksize(s_afe);
+  Serial.printf("[AFE] 就绪：feed=%d fetch=%d 采样率=%d\n",
+                s_feed_n, s_fetch_n, ESP_AFE_SR_HANDLE.get_samp_rate(s_afe));
   Serial.println(">>> 语音识别就绪，请说唤醒词：你好小智");
   return true;
 }
 
-int speech_chunk_size() {
-  return (s_wn && s_wn_handle) ? s_wn->get_samp_chunksize(s_wn_handle) : 0;
+int speech_feed_size() {
+  return s_afe ? s_feed_n : 0;
 }
 
-bool speech_detect(const int16_t *frame) {
-  if (!s_wn || !s_wn_handle) return false;
-  return s_wn->detect(s_wn_handle, (int16_t *)frame) == WAKENET_DETECTED;
+int speech_fetch_size() {
+  return s_afe ? s_fetch_n : 0;
+}
+
+bool speech_process(const int16_t *in, int in_n, int16_t *out,
+                    bool *woken, bool *is_speech) {
+  if (s_afe == nullptr) return false;
+
+  // 1) 追加输入（缓冲足够大，理论上不会溢出）
+  if (s_acc_len + in_n > (int)(sizeof(s_acc) / sizeof(s_acc[0]))) {
+    Serial.printf("[AFE] 错误：累积缓冲溢出 %d+%d\n", s_acc_len, in_n);
+    s_acc_len = 0;
+    s_pending = 0;
+  }
+  memcpy(s_acc + s_acc_len, in, in_n * sizeof(int16_t));
+  s_acc_len += in_n;
+
+  // 2) 按 feed 帧长切块喂入 AFE（feed 不阻塞）
+  int off = 0;
+  while (s_acc_len - off >= s_feed_n) {
+    ESP_AFE_SR_HANDLE.feed(s_afe, s_acc + off);
+    off += s_feed_n;
+    s_pending += s_feed_n;
+  }
+  if (off > 0) {
+    memmove(s_acc, s_acc + off, (s_acc_len - off) * sizeof(int16_t));
+    s_acc_len -= off;
+  }
+
+  // 3) 累计新喂样本足够一个 fetch 帧时才拉取：
+  //    fetch 不阻塞死等，且长期喂/取速率严格相等，不会积压
+  bool got = false;
+  if (s_pending >= s_fetch_n) {
+    afe_fetch_result_t *res = ESP_AFE_SR_HANDLE.fetch(s_afe);
+    s_pending -= s_fetch_n;
+    if (res != nullptr && res->data != nullptr) {
+      s_last_woken  = (res->wakeup_state == WAKENET_DETECTED);
+      s_last_speech = (res->vad_state == AFE_VAD_SPEECH);
+      if (out != nullptr) {
+        int nbytes = res->data_size;
+        if (nbytes > (int)(s_fetch_n * sizeof(int16_t))) nbytes = s_fetch_n * sizeof(int16_t);
+        memcpy(out, res->data, nbytes);
+      }
+      got = true;
+    }
+  }
+
+  // 未拉到新帧时保持上次状态
+  *woken = s_last_woken;
+  *is_speech = s_last_speech;
+  return got;
 }

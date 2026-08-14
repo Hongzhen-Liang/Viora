@@ -140,7 +140,7 @@ lib_deps =
 | `arduino-esp32` 自带 I2S | 录音 / 播放（`driver/i2s.h`） |
 | `schreibfaul1/ESP32-audioI2S` | （可选）封装好的 I2S 输入输出 |
 | `DHT sensor library` | 温湿度 |
-| ESP-SR（ESP-IDF 组件） | 唤醒词检测（WakeNet，见 §7） |
+| ESP-SR（ESP-IDF 组件） | 唤醒词 + 神经 VAD + 降噪（AFE，见 §7） |
 
 ---
 
@@ -335,14 +335,18 @@ void loop() {
 
 ---
 
-## 7. 唤醒词检测
+## 7. 唤醒词检测 + 断句 VAD
 
-推荐用 Espressif 官方 **ESP-SR**（`esp-sr` 组件）的 **WakeNet** 模型，识别"你好小智"：
+项目实际用 Espressif **ESP-SR AFE**（`esp_afe_sr_v1`，1.9.2 预编译库）统一处理：
 
-- **方式 A（推荐）**：项目用 ESP-IDF，在 `idf_component.yml` 引入 `esp-sr`，用 `wake_word_engine` 初始化 WakeNet，命中后回调进入录音状态。
-- **方式 B（简化）**：先用 **能量门限 VAD**（麦克风能量超阈值认为有人说话）代替唤醒词，快速联调走通链路，之后再替换成 WakeNet。
+- **唤醒词**：WakeNet `wn9_nihaoxiaozhi`（“你好小智”），命中后进入录音状态。
+- **断句端点**：AFE 内置**神经 VAD**（`vad_state`）判断“是否有人说话”，替代能量门限——背景音乐不会被当成人声，音乐播放中也能正确结束对话；能量法（`vad.*`）仅留作诊断。
+- **降噪**：AFE 输出增强音频（NS_MODE_SSP），上传给服务器 Whisper 的也是增强后的 PCM。
+- 配置：单麦、无参考通道（`aec_init=false`），`DET_MODE_90`，内存放 PSRAM。
 
-> 注意：WakeNet 模型会占一部分内存和 CPU，建议用 ESP32-S3（带 PSRAM 更稳）。
+> 注意：`src/esp_afe_sr_1mic.ref` 是新版本模板，与 1.9.2 头文件不兼容，不要编译；直接用 `esp_afe_sr_models.h` 里的 `ESP_AFE_SR_HANDLE.create_from_config()`。
+
+> 注意：AFE 模型会占一部分内存和 CPU，建议用 ESP32-S3（带 PSRAM 更稳）。
 
 ---
 

@@ -4,9 +4,9 @@
 // 模块分工：
 //   config.h   全局引脚与参数
 //   audio.*    麦克风采集 / 扬声器播放 / PCM 环形缓存 / 播放缓冲
-//   vad.*      环境噪声估计与语音判定
+//   vad.*      环境噪声估计（诊断用，断句判定由 AFE VAD 接管）
 //   net.*      WiFi 与 WebSocket 通信
-//   speech.*   esp-sr 唤醒词
+//   speech.*   esp-sr AFE：唤醒词 + 神经 VAD + 降噪
 // ============================================================
 #include <Arduino.h>
 
@@ -145,8 +145,8 @@ void loop() {
     enter_listening();
   }
 
-  int wn_chunk = speech_chunk_size();
-  if (wn_chunk <= 0) {
+  int feed_n = speech_feed_size();
+  if (feed_n <= 0) {
     delay(100);
     return;
   }
@@ -156,9 +156,13 @@ void loop() {
   int16_t vol_l = 0;
   int frames = audio_capture(pcm, 512, &vol_l);
   if (frames <= 0) return;
-  audio_ring_push(pcm, frames);
 
-  // ---- 环境噪声估计（空闲/聆听未说话时持续更新，播放时冻结） ----
+  // ---- AFE：唤醒词 + 神经 VAD + 降噪（内部按 feed 帧长自动累积/拉取） ----
+  static int16_t afe_out[1024];
+  bool woken = false, is_speech = false;
+  bool have_afe = speech_process(pcm, frames, afe_out, &woken, &is_speech);
+
+  // ---- 环境噪声估计（诊断用：仅打印阈值，断句已由 AFE VAD 接管） ----
   if (s_state == ST_IDLE || (s_state == ST_LISTENING && !s_speech_started)) {
     vad_observe(vol_l);
   }
@@ -184,14 +188,16 @@ void loop() {
       s_state = ST_IDLE;
       Serial.println(">>> 录音中断（服务器断开）");
     } else {
-      net_send_audio((uint8_t *)pcm, frames * 2);
+      // 优先上传 AFE 增强音频（降噪后 Whisper 识别更稳），无 AFE 帧则用原始 PCM
+      int up_frames = have_afe ? speech_fetch_size() : frames;
+      net_send_audio((uint8_t *)(have_afe ? afe_out : pcm), up_frames * 2);
       uint32_t now = millis();
       if (vol_l > s_rec_max_vol) s_rec_max_vol = vol_l;
 
       if (!s_speech_started) {
-        // 还没开始说话：需连续多帧有声音才算真说话（抗点击/咳嗽/扬声器杂音）
+        // 还没开始说话：需连续多帧有人声才算真说话（抗点击/咳嗽/扬声器杂音）
         if (now - s_listen_start_ms >= GUARD_MS) {
-          if (vad_is_voice(vol_l)) {
+          if (is_speech) {
             s_consecutive_voice++;
             if (s_consecutive_voice >= VOICE_START_FRAMES) {
               s_speech_started = true;
@@ -209,8 +215,8 @@ void loop() {
           }
         }
       } else {
-        // 已开始说话：静音端点检测
-        bool is_voice = vad_is_voice(vol_l);
+        // 已开始说话：AFE VAD 静音端点检测（音乐不会被当成人声）
+        bool is_voice = is_speech;
         if (is_voice) {
           s_last_voice_ms = now;
           s_voice_frames++;
@@ -260,12 +266,9 @@ void loop() {
     }
   }
 
-  // ---- 唤醒词检测（仅在待唤醒状态运行） ----
-  static int16_t frame[512];
-  while (audio_ring_take(frame, wn_chunk)) {
-    if (speech_detect(frame) && s_state == ST_IDLE) {
-      Serial.println(">>> 唤醒词命中：你好小智！");
-      enter_listening();
-    }
+  // ---- 唤醒词（AFE 检测，仅在待唤醒状态） ----
+  if (woken && s_state == ST_IDLE) {
+    Serial.println(">>> 唤醒词命中：你好小智！");
+    enter_listening();
   }
 }
