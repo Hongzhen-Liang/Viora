@@ -298,7 +298,7 @@ bool wake_word_init() {
   }
 
   Serial.printf(
-      "[KWS] Hi Vesper INT8 model=%u bytes, arena=%u/%u bytes (%s), "
+      "[KWS] wake-word INT8 model=%u bytes, arena=%u/%u bytes (%s), "
       "input=(scale %.8f,zp %d), output=(scale %.8f,zp %d)\n",
       static_cast<unsigned>(g_hi_vesper_model_data_len),
       static_cast<unsigned>(s_interpreter->arena_used_bytes()),
@@ -306,7 +306,7 @@ bool wake_word_init() {
       s_input->params.zero_point, s_output->params.scale, s_output->params.zero_point);
 
   if (!run_golden_test()) {
-    Serial.println("[KWS] 错误：Hi Vesper golden vector 自检失败");
+    Serial.println("[KWS] 错误：wake-word golden vector 自检失败");
     return false;
   }
   Serial.println("[KWS] Golden vector 自检通过");
@@ -365,7 +365,7 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
           s_cooldown_until_ms = now + kCooldownMs;
           clear_detection_history();
           Serial.printf(
-              "[KWS] Hi Vesper p=%.4f, evidence=%d/%d peak=%.4f, "
+              "[KWS] wake-word p=%.4f, evidence=%d/%d peak=%.4f, "
               "inference=%lu us\n",
                         probabilities[0], evidence_hits, kEvidenceWindow,
                         evidence_peak,

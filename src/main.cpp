@@ -310,7 +310,7 @@ void setup() {
     Serial.printf("[SYS] 语音初始化失败: AFE=%s KWS=%s\n",
                   afe_ok ? "OK" : "FAIL", kws_ok ? "OK" : "FAIL");
   } else {
-    Serial.println(">>> 语音识别就绪，请说唤醒词：Hi Vesper");
+    Serial.printf(">>> 语音识别就绪，请说唤醒词：%s\n", WAKE_WORD);
   }
   led_init();
 }
@@ -456,7 +456,7 @@ void loop() {
   }
 
   if (woken && s_state == ST_IDLE) {
-    Serial.println(">>> 唤醒词命中：Hi Vesper！");
+    Serial.printf(">>> 唤醒词命中：%s！\n", WAKE_WORD);
     enter_listening(LISTEN_FROM_WAKE);
   }
 }

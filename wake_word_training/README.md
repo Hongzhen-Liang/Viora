@@ -1,11 +1,12 @@
-# Hi Vesper 自研唤醒词：现有数据与个人录音
+# Viora 自研唤醒词：TTS 自动训练与固件替换
 
-Viora 的目标唤醒短语固定为 **Hi Vesper**（`high VESS-per`）。模型、Log-Mel、
-DS-CNN、INT8 量化与 ESP32-S3 触发逻辑由本项目实现，不使用 Espressif WakeNet 模型。
+Viora 的唤醒短语通过 `wake_word_training/.env` 的 `WAKE_WORD` 配置（默认 **Hi
+Vesper**，`high VESS-per`）。模型、Log-Mel、DS-CNN、INT8 量化与 ESP32-S3 触发逻辑
+由本项目实现，不使用 Espressif WakeNet 模型。
 
-当前版本复用仓库已有的 `data/`，并加入 6 条个人 `Hi Vesper` 录音。训练、全 INT8
-转换、ESP32-S3 前端、TFLite Micro 推理和烧录链路均已完成，设备端不再加载
-“你好小智”WakeNet。
+流水线已全自动：edge-tts 生成唤醒词/普通句子/近音负样本（无需真人录音），训练、
+全 INT8 转换、ESP32-S3 前端导出后，自动替换固件 `config.h` 与服务端 `.env` 的唤醒
+词，并可自动重新编译固件。设备端不再加载“你好小智”WakeNet。
 
 ## 现有数据
 
@@ -20,7 +21,7 @@ DS-CNN、INT8 量化与 ESP32-S3 触发逻辑由本项目实现，不使用 Espr
 | `unknown` | 普通英文句子 TTS | 295 | Edge TTS voice |
 | `noise` | Speech Commands environment | 270 | 原始 background source |
 | `noise` | `data/background` | 4 | noise source |
-| `hard_negative` | 无 | 0 | — |
+| `hard_negative` | 无 | 0 | `run.sh` 运行时用 TTS 自动生成 |
 
 所有文件都是 16 kHz、mono、PCM16。原始时长约 0.427–3.312 秒；训练前端会在 Log-Mel
 之前统一做 1.5 秒的裁剪/补零。导入器不会把 ordinary unknown 错标成 hard negative。
@@ -28,7 +29,8 @@ DS-CNN、INT8 量化与 ESP32-S3 触发逻辑由本项目实现，不使用 Espr
 现有数据可以训练一个 baseline，但存在两个明确限制：
 
 - 真人 wake 目前只有同一 speaker、同一批次的 6 条，设备/房间/距离覆盖仍然很有限；
-- 没有 `Hi Jasper`、`Hi Casper`、`Hey Vesper`、`Hello Vesper` 等近音 hard negative。
+- 近音 hard negative 由 `run.sh` 用 TTS 自动生成（默认 `Hey Vesper` / `Hi Jasper` /
+  `Hi Casper`），但仍是 TTS 音色，真实环境误触率仍需实机观察。
 
 因此 baseline 指标只能用于验证训练和部署链路，不能代表真实环境唤醒率或近音词误触率。
 
@@ -50,8 +52,9 @@ DS-CNN、INT8 量化与 ESP32-S3 触发逻辑由本项目实现，不使用 Espr
 
 ```text
 wake_word_training/
-├── data/                              # 唯一的 legacy 音频源，原样保留
-├── run.sh                             # 个人录音 → 最终 INT8/固件资产的一键流水线
+├── .env / .env.example               # 唤醒词与训练参数（WAKE_WORD 等）
+├── data/                              # legacy 音频源 + TTS 生成结果（git 忽略）
+├── run.sh                             # 一键全自动流水线
 ├── dataset/
 │   ├── raw/{wake,hard_negative,unknown,noise}/
 │   ├── train/{wake,unknown,noise}/
@@ -59,17 +62,19 @@ wake_word_training/
 │   └── test/{wake,unknown,noise}/
 ├── scripts/
 │   ├── hi_vesper_config.py
-│   ├── import_human_wake.py           # M4A/WAV → 16kHz mono 1.5s PCM16
+│   ├── generate_tts_data.py           # edge-tts 生成 wake/unknown/近音样本
+│   ├── import_human_wake.py           # 可选真人录音 → 16kHz mono PCM16
 │   ├── import_legacy_data.py          # data/ → dataset/raw 相对符号链接
 │   ├── split_dataset.py               # speaker/source-safe split
 │   ├── train.py / modeling.py          # 轻量 DS-CNN 训练
 │   ├── convert_int8.py / evaluate.py   # 全 INT8 转换与独立测试
-│   └── export_firmware_assets.py       # 模型/Mel/golden vector → C++
+│   ├── export_firmware_assets.py       # 模型/Mel/golden vector → C++
+│   └── update_wake_word.py            # 同步固件 config.h 与 VioraServer/.env
 ├── tests/
 └── models/                            # 当前训练模型、INT8 模型与评估元数据
 ```
 
-`dataset/raw` 和 train/val/test 默认都是相对符号链接，不会再复制一份 132 MB 音频。
+`dataset/raw` 和 train/val/test 默认都是相对符号链接，不会再复制一份音频。
 `data/` 仍是唯一真实文件来源。
 
 ## 1. 环境
@@ -85,27 +90,32 @@ python -m pip install -r requirements.txt
 当前流水线只读取已有录音，不需要 `sounddevice`、PortAudio 或麦克风权限。导入 M4A
 需要 `ffmpeg`；macOS 可执行 `brew install ffmpeg`。
 
-`run.sh` 默认复用 `VioraServer/.venv/bin/python`（服务端环境里已装好依赖）；若想用
-上面的独立 `.venv`，把 `HI_VESPER_PYTHON` 指过去即可。
+`run.sh` 默认复用 `VioraServer/.venv/bin/python`（服务端环境里已装好依赖，含
+edge-tts）；若想用上面的独立 `.venv`，把 `HI_VESPER_PYTHON` 指过去即可。
 
-## 2. 一键加入个人录音并训练
-
-当前 6 个 Downloads 录音已配置为默认输入，直接执行：
+## 2. 一键自动训练并替换唤醒词
 
 ```bash
 cd wake_word_training
+cp .env.example .env    # 首次；修改 WAKE_WORD 换成想要的唤醒短语
 ./run.sh
 ```
 
-也可以传入任意数量的 M4A/WAV：
+不需要真人录音。`run.sh` 会自动：
 
-```bash
-./run.sh /path/to/hi-vesper-01.m4a /path/to/hi-vesper-02.wav
-```
+1. 用 edge-tts 按 `.env` 配置生成唤醒词样本（多个 voice × rate/pitch 变体）、普通
+   英文句子 unknown 样本和近音负样本（默认 `Hey Vesper` / `Hi Jasper` / `Hi Casper`）；
+   没有任何 legacy noise 时还会合成白/粉/棕噪声兜底。
+2. 可选导入真人录音：`./run.sh 录音.m4a ...`，固定进入 train 并按 `HUMAN_REPEAT`
+   倍权重增强；不传参数就是纯 TTS 训练。
+3. 重建 speaker-safe 拆分、契约测试、训练、full-INT8 转换、独立测试集评估。
+4. 导出 ESP32 C++ 资产，并把新唤醒词同步到 `src/config.h` 与 `VioraServer/.env`。
+5. `AUTO_BUILD=1`（默认）自动 `platformio run` 编译固件；`AUTO_UPLOAD=1` 自动烧录。
 
-脚本会依次完成：格式转换与静音裁剪、legacy 映射、无 speaker 泄漏拆分、测试、训练、
-full-INT8 转换、独立测试集评估，以及 ESP32 C++ 资产导出。个人录音固定进入 train，
-默认按 8 倍权重参与数据增强；可用 `HI_VESPER_HUMAN_REPEAT` 调整。
+自定义唤醒词（如 `Hey Jarvis`）时，wake 数据写入 `data/wake_word/tts/{slug}/`，
+不会与 legacy `Hi Vesper` 数据混用；换回 `Hi Vesper` 则继续沿用原有 365 条 TTS
+和 6 条真人录音。近音负样本与 ASR 别名可在 `.env` 的 `HARD_NEGATIVE_PHRASES`、
+`WAKE_WORD_ALIASES` 中调整。
 
 ## 3. 手动建立 legacy 数据映射
 

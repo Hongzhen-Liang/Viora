@@ -137,6 +137,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--session", default="personal-session")
     parser.add_argument("--ffmpeg", default="ffmpeg")
     parser.add_argument("--data-root", type=Path, default=LEGACY_DATA_ROOT)
+    parser.add_argument(
+        "--human-dir",
+        type=Path,
+        default=None,
+        help="归一化输出目录（默认 data/wake_word/human；自定义唤醒词时用 human_{slug}/）",
+    )
     return parser
 
 
@@ -147,7 +153,11 @@ def main() -> int:
     if shutil.which(args.ffmpeg) is None:
         raise RuntimeError(f"找不到 ffmpeg: {args.ffmpeg}")
 
-    human_dir = args.data_root.resolve() / "wake_word" / "human"
+    human_dir = (
+        args.human_dir.resolve()
+        if args.human_dir is not None
+        else args.data_root.resolve() / "wake_word" / "human"
+    )
     source_dir = args.data_root.resolve() / "wake_word" / "human_source" / speaker / session
     created = 0
     outputs: list[Path] = []

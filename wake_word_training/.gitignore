@@ -19,6 +19,7 @@ models/*.h
 data/
 .cache/
 .venv/
+.env
 
 # Python
 __pycache__/

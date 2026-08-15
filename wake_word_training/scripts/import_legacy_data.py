@@ -100,28 +100,49 @@ def _add_record(
     )
 
 
-def discover_legacy(legacy_root: Path) -> list[LegacyRecord]:
+def discover_legacy(
+    legacy_root: Path,
+    *,
+    wake_tts_dir: Path | None = None,
+    human_dir: Path | None = None,
+    include_validation: bool = True,
+) -> list[LegacyRecord]:
     if not legacy_root.is_dir():
         raise DatasetError(f"legacy data 目录不存在: {legacy_root}")
     records: list[LegacyRecord] = []
+    scanned_dirs: list[Path] = []
 
-    for origin, folder in (
-        ("wake_tts", legacy_root / "wake_word" / "tts"),
-        ("legacy_validation_tts", legacy_root / "validation"),
-    ):
-        for path in sorted(folder.glob("*.wav")):
+    wake_tts_dir = wake_tts_dir or (legacy_root / "wake_word" / "tts")
+    if not wake_tts_dir.is_dir():
+        raise DatasetError(f"wake TTS 目录不存在: {wake_tts_dir}")
+    scanned_dirs.append(wake_tts_dir)
+    for path in sorted(wake_tts_dir.glob("*.wav")):
+        voice = _tts_voice(path.name)
+        _add_record(
+            records,
+            path,
+            raw_label="wake",
+            speaker=f"tts-{voice}",
+            origin="wake_tts",
+        )
+
+    if include_validation:
+        validation_dir = legacy_root / "validation"
+        scanned_dirs.append(validation_dir)
+        for path in sorted(validation_dir.glob("*.wav")):
             voice = _tts_voice(path.name)
-            prefix = "validation__" if origin.startswith("legacy_validation") else ""
             _add_record(
                 records,
                 path,
                 raw_label="wake",
                 speaker=f"tts-{voice}",
-                origin=origin,
-                destination_name=prefix + path.name,
+                origin="legacy_validation_tts",
+                destination_name="validation__" + path.name,
             )
 
-    for path in sorted((legacy_root / "wake_word" / "human").glob("*.wav")):
+    human_dir = human_dir or (legacy_root / "wake_word" / "human")
+    scanned_dirs.append(human_dir)
+    for path in sorted(human_dir.glob("*.wav")):
         match = HUMAN_WAKE_RE.match(path.name)
         _add_record(
             records,
@@ -136,7 +157,9 @@ def discover_legacy(legacy_root: Path) -> list[LegacyRecord]:
             origin="wake_human",
         )
 
-    for path in sorted((legacy_root / "not_wake_word" / "tts").glob("*.wav")):
+    unknown_tts_dir = legacy_root / "not_wake_word" / "tts"
+    scanned_dirs.append(unknown_tts_dir)
+    for path in sorted(unknown_tts_dir.glob("*.wav")):
         voice = _tts_voice(path.name, negative=True)
         _add_record(
             records,
@@ -146,7 +169,21 @@ def discover_legacy(legacy_root: Path) -> list[LegacyRecord]:
             origin="unknown_tts",
         )
 
-    for path in sorted((legacy_root / "not_wake_word" / "human").glob("*.wav")):
+    hard_dir = legacy_root / "not_wake_word" / "hard"
+    scanned_dirs.append(hard_dir)
+    for path in sorted(hard_dir.glob("*.wav")):
+        voice = _tts_voice(path.name)
+        _add_record(
+            records,
+            path,
+            raw_label="hard_negative",
+            speaker=f"tts-{voice}",
+            origin="hard_negative_tts",
+        )
+
+    human_sc_dir = legacy_root / "not_wake_word" / "human"
+    scanned_dirs.append(human_sc_dir)
+    for path in sorted(human_sc_dir.glob("*.wav")):
         match = SPEECH_COMMAND_RE.match(path.name)
         if not match:
             raise DatasetError(f"无法从 Speech Commands 文件名解析 speaker: {path.name}")
@@ -158,7 +195,9 @@ def discover_legacy(legacy_root: Path) -> list[LegacyRecord]:
             origin=f"speech_commands:{match.group('keyword')}",
         )
 
-    for path in sorted((legacy_root / "not_wake_word" / "environment").glob("*.wav")):
+    environment_dir = legacy_root / "not_wake_word" / "environment"
+    scanned_dirs.append(environment_dir)
+    for path in sorted(environment_dir.glob("*.wav")):
         match = ENVIRONMENT_RE.match(path.name)
         if not match:
             raise DatasetError(f"无法从 environment 文件名解析来源: {path.name}")
@@ -170,7 +209,9 @@ def discover_legacy(legacy_root: Path) -> list[LegacyRecord]:
             origin=f"environment:{match.group('source')}",
         )
 
-    for path in sorted((legacy_root / "background").glob("*.wav")):
+    background_dir = legacy_root / "background"
+    scanned_dirs.append(background_dir)
+    for path in sorted(background_dir.glob("*.wav")):
         _add_record(
             records,
             path,
@@ -182,7 +223,12 @@ def discover_legacy(legacy_root: Path) -> list[LegacyRecord]:
     if not records:
         raise DatasetError(f"{legacy_root} 中没有可导入的 WAV")
     mapped = {record.source for record in records}
-    all_wavs = {path.resolve() for path in legacy_root.rglob("*.wav")}
+    all_wavs = {
+        path.resolve()
+        for directory in scanned_dirs
+        if directory.is_dir()
+        for path in directory.rglob("*.wav")
+    }
     unmapped = sorted(all_wavs - mapped)
     if unmapped:
         preview = "\n".join(f"  - {path}" for path in unmapped[:20])
@@ -309,6 +355,23 @@ def build_parser() -> argparse.ArgumentParser:
         default="symlink",
         help="默认创建相对符号链接，不复制 132 MB legacy data",
     )
+    parser.add_argument(
+        "--wake-tts-dir",
+        type=Path,
+        default=None,
+        help="wake TTS 目录（默认 data/wake_word/tts；自定义唤醒词时指向 tts/{slug}/）",
+    )
+    parser.add_argument(
+        "--human-dir",
+        type=Path,
+        default=None,
+        help="真人 wake 目录（默认 data/wake_word/human）",
+    )
+    parser.add_argument(
+        "--skip-validation",
+        action="store_true",
+        help="跳过 legacy validation TTS（非 Hi Vesper 唤醒词时使用）",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -319,8 +382,26 @@ def main() -> int:
     legacy_root = args.legacy_root.resolve()
     dataset_root = args.dataset_root.resolve()
     ensure_project_layout(dataset_root)
+
+    def resolve_under_root(value: Path | None, default: Path) -> Path:
+        if value is None:
+            return default
+        candidate = value if value.is_absolute() else legacy_root / value
+        return candidate.resolve()
+
+    wake_tts_dir = resolve_under_root(
+        args.wake_tts_dir, legacy_root / "wake_word" / "tts"
+    )
+    human_dir = resolve_under_root(
+        args.human_dir, legacy_root / "wake_word" / "human"
+    )
     try:
-        records = discover_legacy(legacy_root)
+        records = discover_legacy(
+            legacy_root,
+            wake_tts_dir=wake_tts_dir,
+            human_dir=human_dir,
+            include_validation=not args.skip_validation,
+        )
         created, reused = materialize_legacy(
             records,
             dataset_root=dataset_root,
