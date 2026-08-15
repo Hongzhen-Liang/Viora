@@ -4,7 +4,7 @@
 		{
 			"label": "Viora Build (AFE)",
 			"type": "shell",
-			"command": "platformio run",
+			"command": "PATH=\"$HOME/.platformio/penv/bin:$PATH\" platformio run",
 			"args": [],
 			"isBackground": false,
 			"problemMatcher": [],

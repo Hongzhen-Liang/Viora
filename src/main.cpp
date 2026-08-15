@@ -344,7 +344,8 @@ void loop() {
   net_loop();
 
   LedMode led_mode;
-  if (!net_connected()) led_mode = LED_MODE_ERROR;
+  if (net_provisioning_active()) led_mode = LED_MODE_PROVISIONING;
+  else if (!net_connected()) led_mode = LED_MODE_ERROR;
   else if (s_state == ST_IDLE) led_mode = LED_MODE_IDLE;
   else if (s_state == ST_LISTENING) led_mode = LED_MODE_LISTENING;
   else if (s_state == ST_PROCESSING) led_mode = LED_MODE_PROCESSING;

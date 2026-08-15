@@ -8,6 +8,7 @@
 
 #include "config.h"
 #include "net.h"
+#include "provisioning.h"
 
 static WebSocketsClient s_ws;
 static bool s_ws_connected = false;
@@ -18,14 +19,32 @@ static uint32_t s_wifi_retry_ms = 0;
 static bool s_wifi_online = false;
 static bool s_target_ready = false;
 
+// 多网络轮询：候选列表 = NVS 已保存网络 + secrets.h 默认网络
+static int s_wifi_cand = -1;        // 当前尝试的候选下标
+static uint32_t s_cand_start_ms = 0;
+static bool s_wifi_was_up = false;  // 用于计算连续断网时长
+static uint32_t s_wifi_down_since = 0;
+
 // ============================================================
-// WiFi（非阻塞，net_loop 里定时重连）
+// WiFi（非阻塞，net_loop 里定时推进）
 // ============================================================
 static void wifi_connect() {
   if (WiFi.status() == WL_CONNECTED) return;
+  const auto &cands = prov_candidates();
+  if (cands.empty()) return;  // 无任何候选（secrets.h 缺失且 NVS 为空）
+  const uint32_t now = millis();
+  // 每个候选给 WIFI_ATTEMPT_MS 时间，窗口内不重复 begin，避免打断握手
+  if (s_wifi_cand >= 0 && s_wifi_cand < static_cast<int>(cands.size()) &&
+      now - s_cand_start_ms < WIFI_ATTEMPT_MS) {
+    return;
+  }
+  s_wifi_cand = (s_wifi_cand + 1) % static_cast<int>(cands.size());
+  s_cand_start_ms = now;
+  WiFi.disconnect();
   WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  Serial.printf("[WiFi] 连接中 %s ...\n", WIFI_SSID);
+  WiFi.begin(cands[s_wifi_cand].ssid, cands[s_wifi_cand].pass);
+  Serial.printf("[WiFi] 尝试 %d/%d: %s ...\n", s_wifi_cand + 1,
+                static_cast<int>(cands.size()), cands[s_wifi_cand].ssid);
 }
 
 // ============================================================
@@ -129,13 +148,16 @@ static void start_websocket() {
 // ============================================================
 void net_init(const NetCallbacks &cb) {
   s_cb = cb;
+  prov_setup();  // 加载 NVS 里保存过的 WiFi（出门配网用）
   wifi_connect();
   s_ws.onEvent(on_ws_event);
 }
 
 void net_loop() {
-  // WiFi 状态显示 + 断线自动重连（5 秒一次，不阻塞主循环）
   if (WiFi.status() == WL_CONNECTED) {
+    if (prov_active()) prov_end();  // 连上即关闭配网热点
+    s_wifi_was_up = true;
+    s_wifi_cand = -1;
     if (!s_wifi_online) {
       s_wifi_online = true;
       Serial.printf("[WiFi] 已连接! IP: %s DNS: %s\n",
@@ -145,9 +167,22 @@ void net_loop() {
     if (!s_target_ready) start_websocket();
   } else {
     s_wifi_online = false;
-    if (millis() - s_wifi_retry_ms > 5000) {
-      s_wifi_retry_ms = millis();
-      wifi_connect();
+    if (s_wifi_was_up) {
+      s_wifi_was_up = false;
+      s_wifi_down_since = millis();
+    }
+    if (prov_active()) {
+      prov_loop();  // 配网网页服务
+    } else {
+      // 每 5 秒推进一次候选网络轮询
+      if (millis() - s_wifi_retry_ms > 5000) {
+        s_wifi_retry_ms = millis();
+        wifi_connect();
+      }
+      // 连续断网超时 → 开启配网热点
+      if (millis() - s_wifi_down_since > PROV_TIMEOUT_MS) {
+        prov_begin();
+      }
     }
   }
 
@@ -156,6 +191,10 @@ void net_loop() {
 
 bool net_connected() {
   return s_ws_connected;
+}
+
+bool net_provisioning_active() {
+  return prov_active();
 }
 
 bool net_send_audio(const uint8_t *data, size_t len) {

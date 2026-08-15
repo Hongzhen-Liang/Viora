@@ -61,6 +61,15 @@ void led_loop() {
       g = 48;
       b = 48;
       break;
+
+    case LED_MODE_PROVISIONING:       // 白色脉冲（1.2s 周期）——配网模式
+      {
+        uint8_t v = breath(1200) / 6;
+        r = v;
+        g = v;
+        b = v;
+      }
+      break;
   }
   neopixelWrite((uint8_t)LED_PIN, r, g, b);
 }

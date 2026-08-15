@@ -17,6 +17,7 @@ struct NetCallbacks {
 void net_init(const NetCallbacks &cb);   // WiFi + WebSocket 初始化
 void net_loop();                         // WiFi 重连检查 + WS 收发（必须频繁调用）
 bool net_connected();
+bool net_provisioning_active();          // 是否处于配网热点模式
 // 返回 WebSocket 是否实际接受该二进制帧，便于端侧发现上行丢帧。
 bool net_send_audio(const uint8_t *data, size_t len);
 void net_send_json(const char *json);

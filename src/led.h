@@ -7,6 +7,7 @@
 //   绿常亮 = 聆听中
 //   琥珀呼吸 = 等服务器处理
 //   青常亮 = 播放回复
+//   白脉冲 = WiFi 配网模式（连热点 Viora-Setup 配置网络）
 // ============================================================
 #include <Arduino.h>
 
@@ -16,6 +17,7 @@ enum LedMode {
   LED_MODE_LISTENING,   // 绿色常亮
   LED_MODE_PROCESSING,  // 琥珀色呼吸
   LED_MODE_PLAYING,     // 青色常亮
+  LED_MODE_PROVISIONING,// 白色脉冲（配网中）
 };
 
 void led_init();
