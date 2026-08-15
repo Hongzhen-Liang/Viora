@@ -62,8 +62,9 @@ static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
         if (s_cb.on_text) s_cb.on_text("tts_end", "", "", "", "");
       } else if (strcmp(t, "error") == 0) {
         const char *msg = doc["message"] | "";
-        Serial.printf("[WS] 服务器错误: %s\n", msg);
         if (s_cb.on_text) s_cb.on_text("error", "", "", msg, "");
+      } else if (strcmp(t, "no_speech") == 0) {
+        if (s_cb.on_text) s_cb.on_text("no_speech", "", "", "", "");
       } else {
         Serial.printf("[WS] 收到: %.*s\n", (int)length, payload);
       }

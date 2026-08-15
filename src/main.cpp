@@ -241,6 +241,23 @@ static void on_net_disconnected() {
   audio_play_discard();
 }
 
+// 服务器错误 / 未识别到有效语音后的共同回退：清播放、回聆听；
+// 连续多次（如背景音乐反复被当语音）则回到待唤醒。
+static void retry_listening_after_failure() {
+  s_exit_pending = false;
+  s_accept_tts_audio = false;
+  audio_play_discard();
+  ++s_consec_errors;
+  if (s_consec_errors >= MAX_CONSEC_ERRORS) {
+    s_consec_errors = 0;
+    s_rearm_pending = false;
+    end_active_session("consecutive_errors");
+    Serial.println(">>> 连续多次未识别，回到待唤醒");
+  } else {
+    s_rearm_pending = true;
+  }
+}
+
 static void on_server_text(const char *type, const char *user,
                            const char *reply, const char *msg,
                            const char *op) {
@@ -278,18 +295,10 @@ static void on_server_text(const char *type, const char *user,
         static_cast<unsigned long>(audio_play_buffered_bytes()));
   } else if (strcmp(type, "error") == 0) {
     Serial.printf("[WS] 服务器错误: %s\n", msg);
-    s_exit_pending = false;
-    s_accept_tts_audio = false;
-    audio_play_discard();
-    ++s_consec_errors;
-    if (s_consec_errors >= MAX_CONSEC_ERRORS) {
-      s_consec_errors = 0;
-      s_rearm_pending = false;
-      end_active_session("consecutive_errors");
-      Serial.println(">>> 连续多次未识别，回到待唤醒");
-    } else {
-      s_rearm_pending = true;
-    }
+    retry_listening_after_failure();
+  } else if (strcmp(type, "no_speech") == 0) {
+    // 可能是背景音乐/无人说话：不提示、不报错，默默继续聆听。
+    retry_listening_after_failure();
   }
 }
 

@@ -85,7 +85,7 @@
 #define FOLLOWUP_GUARD_MS      180    // 只屏蔽扬声器的最后一点余音
 #define VOICE_START_FRAMES     3      // 约 96ms 连续人声才确认开始
 #define MIN_VOICE_FRAMES       5      // 少于约 160ms 视为短促噪声
-#define MAX_CONSEC_ERRORS 2    // 连续多次服务器错误（如背景音乐被当语音）→ 回待唤醒
+#define MAX_CONSEC_ERRORS 2    // 连续多次未识别/服务器错误（如背景音乐被当语音）→ 回待唤醒
 #define ENABLE_BARGE_IN        1      // 播放中说话可打断；依赖 AFE AEC
 #define BARGE_IN_GUARD_MS      450    // 回答刚开始时避免瞬态误打断
 #define BARGE_IN_VOICE_FRAMES  5      // AEC 后连续约 160ms 人声才打断
