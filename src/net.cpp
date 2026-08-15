@@ -16,6 +16,7 @@ static NetCallbacks s_cb = {};
 // WiFi 重连
 static uint32_t s_wifi_retry_ms = 0;
 static bool s_wifi_online = false;
+static bool s_target_ready = false;
 
 // ============================================================
 // WiFi（非阻塞，net_loop 里定时重连）
@@ -40,8 +41,14 @@ static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
 
     case WStype_DISCONNECTED:
       s_ws_connected = false;
-      Serial.println("[WS] 与 Mac 服务器断开，回到待唤醒");
+      Serial.printf("[WS] 与 Mac 服务器断开（%.*s），回到待唤醒\n", (int)length,
+                    payload ? reinterpret_cast<const char *>(payload) : "");
       if (s_cb.on_disconnected) s_cb.on_disconnected();
+      break;
+
+    case WStype_ERROR:
+      Serial.printf("[WS] 连接错误: %.*s\n", (int)length,
+                    payload ? reinterpret_cast<const char *>(payload) : "");
       break;
 
     case WStype_TEXT: {
@@ -80,16 +87,50 @@ static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
   }
 }
 
+static bool is_private_ip(const IPAddress &ip) {
+  return ip[0] == 10 ||
+         (ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31) ||
+         (ip[0] == 192 && ip[1] == 168);
+}
+
+// WiFi 上线后、首次连接前解析一次域名并打印结果，便于诊断 DNS 配置。
+// 连接目标始终是 SERVER_HOST；解析失败时库会在每次重连时重新解析。
+static void start_websocket() {
+  IPAddress resolved;
+  if (WiFi.hostByName(SERVER_HOST, resolved)) {
+    Serial.printf("[WS] 域名 %s 解析为 %s（%s地址）\n", SERVER_HOST,
+                  resolved.toString().c_str(),
+                  is_private_ip(resolved) ? "内网" : "公网");
+    if (!is_private_ip(resolved)) {
+      Serial.println("[WS] 注意：解析到公网地址，连接可能不稳定（请检查局域网 DNS 配置）");
+    }
+  } else {
+    Serial.printf("[WS] 域名 %s 解析失败，重连时会重试解析\n", SERVER_HOST);
+  }
+  s_ws.begin(SERVER_HOST, SERVER_PORT, SERVER_PATH);
+  s_ws.setReconnectInterval(3000);
+  s_ws.enableHeartbeat(15000, 3000, 2);  // 15s ping / 3s 超时 / 连续 2 次判死
+  if (SERVER_API_KEY[0] != '\0') {
+    static char s_api_headers[160];
+    // 注意：库在 extraHeaders 后会自己追加换行，这里不能再带 \r\n，
+    // 否则握手头会提前空行，残留字节被当非法 WS 帧导致连接 0ms 被杀。
+    snprintf(s_api_headers, sizeof(s_api_headers), "X-Api-Key: %s",
+             SERVER_API_KEY);
+    s_ws.setExtraHeaders(s_api_headers);
+    Serial.println("[WS] 已附加 X-Api-Key 鉴权头");
+  }
+  s_target_ready = true;
+  Serial.printf("[WS] 目标服务器: ws://%s:%d%s（心跳 15s）\n", SERVER_HOST,
+                SERVER_PORT, SERVER_PATH);
+}
+
 // ============================================================
 // 对外接口
 // ============================================================
 void net_init(const NetCallbacks &cb) {
   s_cb = cb;
   wifi_connect();
-  s_ws.begin(SERVER_HOST, SERVER_PORT, SERVER_PATH);
   s_ws.onEvent(on_ws_event);
-  s_ws.setReconnectInterval(3000);
-  Serial.printf("[WS] 目标服务器: ws://%s:%d%s\n", SERVER_HOST, SERVER_PORT, SERVER_PATH);
 }
 
 void net_loop() {
@@ -97,8 +138,11 @@ void net_loop() {
   if (WiFi.status() == WL_CONNECTED) {
     if (!s_wifi_online) {
       s_wifi_online = true;
-      Serial.printf("[WiFi] 已连接! IP: %s\n", WiFi.localIP().toString().c_str());
+      Serial.printf("[WiFi] 已连接! IP: %s DNS: %s\n",
+                    WiFi.localIP().toString().c_str(),
+                    WiFi.dnsIP(0).toString().c_str());
     }
+    if (!s_target_ready) start_websocket();
   } else {
     s_wifi_online = false;
     if (millis() - s_wifi_retry_ms > 5000) {

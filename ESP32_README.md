@@ -182,22 +182,27 @@ viora-esp32/
     └── sensors.cpp        # 传感器采集
 ```
 
-### `include/config.h`
+### 敏感配置（`src/secrets.h`）
+
+WiFi、服务器域名/端口、API Key 属于敏感信息，不会提交到 GitHub：
+
+```bash
+cp src/secrets.example.h src/secrets.h   # 复制模板后填写
+```
+
+`secrets.h` 内容（已被 `.gitignore` 忽略）：
 
 ```cpp
-#pragma once
+#define SECRET_WIFI_SSID    "你的WiFi名"
+#define SECRET_WIFI_PASS    "你的WiFi密码"
+#define SECRET_SERVER_HOST  "your-server-host"   // 域名需局域网 DNS 能解析，或直接填 IP
+#define SECRET_SERVER_PORT  8765
+#define SECRET_API_KEY      "与 VioraServer/.env 的 API_KEY 一致"
+```
 
-// WiFi
-#define WIFI_SSID     "你的WiFi名"
-#define WIFI_PASSWORD "你的WiFi密码"
-
-// 服务器（Mac 局域网 IP + 端口）
-#define SERVER_IP     "CHANGED-SERVER-IP"
-#define SERVER_PORT   8765
-#define WS_PATH       "/ws"
-
-// 音频规格（与服务器一致，勿改）
-#define AUDIO_SAMPLE_RATE  16000
+固件握手时携带 `X-Api-Key` 请求头，服务端校验失败会拒绝连接（close 1008）。
+服务端 `.env` 里 `API_KEY` 留空则鉴权关闭（开发模式）。其余公开参数（引脚、
+VAD、唤醒词等）仍在 `src/config.h`。
 #define AUDIO_BITS         I2S_DATA_BIT_WIDTH_16BIT
 #define AUDIO_CHANNELS     I2S_CHANNEL_FMT_ONLY_LEFT
 

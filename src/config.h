@@ -39,16 +39,24 @@
 #define LED_PIN 48
 
 // ============================================================
-// WiFi 配置（连接 Mac 服务器所在局域网）
+// 敏感配置：WiFi / 服务器地址 / API Key
+// 真实值在 src/secrets.h（已被 git 忽略），模板见 src/secrets.example.h。
+// 缺失 secrets.h 时回退到本地开发默认值（连不上真实服务器）。
 // ============================================================
-#define WIFI_SSID "CHANGED-WIFI-SSID"
-#define WIFI_PASS "CHANGED-WIFI-PASSWORD"
-
-// ============================================================
-// Mac 服务器（WebSocket）配置
-// ============================================================
-#define SERVER_HOST "CHANGED-SERVER-IP"   // TODO: 改成你 Mac 的局域网 IP
-#define SERVER_PORT 8765
+#if __has_include("secrets.h")
+#include "secrets.h"
+#define WIFI_SSID     SECRET_WIFI_SSID
+#define WIFI_PASS     SECRET_WIFI_PASS
+#define SERVER_HOST   SECRET_SERVER_HOST
+#define SERVER_PORT   SECRET_SERVER_PORT
+#define SERVER_API_KEY SECRET_API_KEY
+#else
+#define WIFI_SSID     ""
+#define WIFI_PASS     ""
+#define SERVER_HOST   "127.0.0.1"
+#define SERVER_PORT   8765
+#define SERVER_API_KEY ""
+#endif
 #define SERVER_PATH "/ws"
 
 // ============================================================
