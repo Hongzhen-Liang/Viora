@@ -43,8 +43,9 @@ static int s_consec_errors = 0;
 
 // 播放中 AEC/VAD 打断状态。
 static bool s_accept_tts_audio = false;
-static bool s_playback_afe_needs_reset = false;
 static uint32_t s_playback_start_ms = 0;
+static uint32_t s_last_play_diag_ms = 0;
+static uint32_t s_tts_received_bytes = 0;
 static uint16_t s_barge_voice_frames = 0;
 
 static const char *listen_source(ListenOrigin origin) {
@@ -84,7 +85,9 @@ static void enter_listening(ListenOrigin origin) {
       origin == LISTEN_FROM_WAKE || origin == LISTEN_FROM_BARGE_IN;
   if (!keep_preroll) audio_ring_clear();
 
-  speech_reset();
+  // 使上一轮尚未返回的 AFE 结果失效。该操作非阻塞，
+  // 不会让聆听链路再次等待 esp-sr fetch。
+  speech_async_reset();
   s_state = ST_LISTENING;
   s_listen_origin = origin;
   s_exit_pending = false;
@@ -220,6 +223,7 @@ static void on_net_disconnected() {
   s_exit_pending = false;
   s_accept_tts_audio = false;
   s_consec_errors = 0;
+  speech_async_reset();
   audio_ring_clear();
   audio_play_discard();
 }
@@ -247,12 +251,19 @@ static void on_server_text(const char *type, const char *user,
     s_state = ST_PLAYING;
     s_accept_tts_audio = true;
     s_playback_start_ms = millis();
-    s_playback_afe_needs_reset = true;
+    s_last_play_diag_ms = s_playback_start_ms;
+    s_tts_received_bytes = 0;
     s_barge_voice_frames = 0;
+    speech_async_reset();
     audio_ring_clear();
     audio_mark_tts_start();
   } else if (strcmp(type, "tts_end") == 0) {
     audio_mark_tts_end();
+    Serial.printf(
+        ">>> TTS 接收完成：%luB（%.2fs PCM），待播放=%luB\n",
+        static_cast<unsigned long>(s_tts_received_bytes),
+        s_tts_received_bytes / 32000.0f,
+        static_cast<unsigned long>(audio_play_buffered_bytes()));
   } else if (strcmp(type, "error") == 0) {
     Serial.printf("[WS] 服务器错误: %s\n", msg);
     s_exit_pending = false;
@@ -271,7 +282,10 @@ static void on_server_text(const char *type, const char *user,
 }
 
 static void on_net_audio(const uint8_t *data, size_t len) {
-  if (s_accept_tts_audio) audio_play_push(data, len);
+  if (s_accept_tts_audio) {
+    audio_play_push(data, len);
+    s_tts_received_bytes += len;
+  }
 }
 
 void setup() {
@@ -393,23 +407,37 @@ void loop() {
     kws_diag_armed = false;
   }
 
-  // AFE 只在播放阶段工作：此时必须借助扬声器参考做 AEC，
-  // 才能区分 Vesper 的回放和用户打断。静默聆听时若仍同步等待
-  // ESP-SR fetch，单次 32ms 的录音循环会被拉长到约 110ms：设备
-  // 听了 5 秒，实际只采传约 1.3 秒，中间的语音会被 I2S DMA
-  // 覆盖。因此用户说话时直接传原始 PCM，用本地自适应能量 VAD
-  // 断句，降噪和 ASR 交给 Mac；这样采样时钟与现实时间一致。
-  static int16_t afe_out[1024];
+  // 播放时将麦克风与扬声器参考非阻塞地提交给独立
+  // AFE 工作任务。主循环只轮询已完成的结果，所以即使
+  // esp-sr fetch 卡住，WebSocket/TTS/Ping-Pong 仍会继续运行。
+  static int16_t afe_out[512];
   static int16_t playback_ref[512];
   bool is_speech = false;
   bool have_afe = false;
   if (s_state == ST_PLAYING) {
-    if (s_playback_afe_needs_reset) {
-      speech_reset();
-      s_playback_afe_needs_reset = false;
-    }
     audio_play_reference(playback_ref, frames);
-    have_afe = speech_process(pcm, playback_ref, frames, afe_out, &is_speech);
+    speech_async_submit(pcm, playback_ref, frames);
+    // 队列中若有多帧，优先跟上最新时间轴；每帧都用于
+    // barge-in 连续证据，避免丢掉用户持续说话的信号。
+    while (speech_async_poll(afe_out, &is_speech)) {
+      have_afe = true;
+#if ENABLE_BARGE_IN
+      audio_ring_push(afe_out, speech_fetch_size());
+      const uint32_t now = millis();
+      if (now - s_playback_start_ms >= BARGE_IN_GUARD_MS) {
+        if (is_speech) ++s_barge_voice_frames;
+        else s_barge_voice_frames = 0;
+        if (s_barge_voice_frames >= BARGE_IN_VOICE_FRAMES) {
+          Serial.println(">>> 检测到用户打断，立即停止当前回复");
+          s_accept_tts_audio = false;
+          audio_play_discard();
+          net_send_json("{\"type\":\"cancel\",\"reason\":\"barge_in\"}");
+          enter_listening(LISTEN_FROM_BARGE_IN);
+          break;
+        }
+      }
+#endif
+    }
   }
 
   if (s_state == ST_IDLE ||
@@ -424,29 +452,34 @@ void loop() {
       vad_is_voice(vol_l) && audio_capture_rms() >= VOICE_RMS_MIN;
   // is_speech 在没有新 fetch 时是 AFE 的旧状态，不能拿它继续推进轮次，
   // 否则一次旧的 speech=true 可能永久拖住句尾。
-  const bool neural_speech = have_afe && is_speech;
+  const bool neural_speech = s_state == ST_PLAYING && have_afe && is_speech;
   const bool turn_speech = neural_speech || energy_speech;
 
-  // 播放中把 AEC 后的近端音频留作打断前置音频，并用连续 VAD 防止误触。
-#if ENABLE_BARGE_IN
-  if (s_state == ST_PLAYING && have_afe) {
-    audio_ring_push(afe_out, speech_fetch_size());
-    const uint32_t now = millis();
-    if (now - s_playback_start_ms >= BARGE_IN_GUARD_MS) {
-      if (is_speech) ++s_barge_voice_frames;
-      else s_barge_voice_frames = 0;
-      if (s_barge_voice_frames >= BARGE_IN_VOICE_FRAMES) {
-        Serial.println(">>> 检测到用户打断，立即停止当前回复");
-        s_accept_tts_audio = false;
-        audio_play_discard();
-        net_send_json("{\"type\":\"cancel\",\"reason\":\"barge_in\"}");
-        enter_listening(LISTEN_FROM_BARGE_IN);
-      }
-    }
-  }
-#endif
-
   audio_play_drain();
+  if (s_state == ST_PLAYING && millis() - s_last_play_diag_ms >= 2000) {
+    s_last_play_diag_ms = millis();
+    const SpeechAsyncStats stats = speech_async_stats();
+    const uint32_t buffered_bytes = audio_play_buffered_bytes();
+    const uint32_t result_age_ms =
+        stats.last_result_ms == 0 ? 0 : millis() - stats.last_result_ms;
+    Serial.printf(
+        "[PLAY-DIAG] TTS=%luB 待播=%luB/%lums "
+        "AFE=提交%lu 完成%lu 丢帧%lu 队列=%lu/%lu "
+        "最近=%lums 单帧=%luus max=%luus stack_free=%lu reset=%d\n",
+        static_cast<unsigned long>(s_tts_received_bytes),
+        static_cast<unsigned long>(buffered_bytes),
+        static_cast<unsigned long>(buffered_bytes * 1000ULL / 32000),
+        static_cast<unsigned long>(stats.submitted_frames),
+        static_cast<unsigned long>(stats.processed_frames),
+        static_cast<unsigned long>(stats.dropped_frames),
+        static_cast<unsigned long>(stats.pending_input_frames),
+        static_cast<unsigned long>(stats.pending_output_frames),
+        static_cast<unsigned long>(result_age_ms),
+        static_cast<unsigned long>(stats.last_process_us),
+        static_cast<unsigned long>(stats.max_process_us),
+        static_cast<unsigned long>(stats.worker_stack_free),
+        stats.reset_pending ? 1 : 0);
+  }
   if (s_state == ST_PLAYING && audio_playback_finished()) {
     s_accept_tts_audio = false;
     audio_ring_clear();

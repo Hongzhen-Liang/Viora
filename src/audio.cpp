@@ -206,6 +206,13 @@ void audio_play_push(const uint8_t *src, uint32_t n) {
   portEXIT_CRITICAL(&s_play_mux);
 }
 
+uint32_t audio_play_buffered_bytes() {
+  portENTER_CRITICAL(&s_play_mux);
+  const uint32_t n = s_play_len;
+  portEXIT_CRITICAL(&s_play_mux);
+  return n;
+}
+
 void audio_play_drain() {
   uint32_t n;
   portENTER_CRITICAL(&s_play_mux);

@@ -9,6 +9,10 @@
 #include <Arduino.h>
 #include <string.h>
 
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
+
 #include "esp_afe_sr_iface.h"
 #include "esp_afe_sr_models.h"
 #include "config.h"
@@ -28,6 +32,165 @@ static int16_t s_feed_interleaved[1600 * 2];
 static int     s_acc_len = 0;
 static int     s_pending = 0;       // 自上次 fetch 后已新喂的样本数
 static bool    s_last_speech = false;
+
+namespace {
+
+constexpr int kAsyncMaxSamples = 512;
+constexpr int kInputQueueDepth = 3;
+constexpr int kOutputQueueDepth = 4;
+// ESP-SR fetch 的调用链比普通 Arduino 函数深得多。大型 PCM
+// 帧全部放在静态区后仍保留 12KB 工作栈，并在运行时暴露
+// high-water mark，避免再出现 afe_worker stack canary。
+constexpr uint32_t kWorkerStackBytes = 12288;
+
+struct SpeechInputFrame {
+  uint32_t generation;
+  uint16_t samples;
+  int16_t mic[kAsyncMaxSamples];
+  int16_t reference[kAsyncMaxSamples];
+};
+
+struct SpeechOutputFrame {
+  uint32_t generation;
+  bool is_speech;
+  int16_t data[kAsyncMaxSamples];
+};
+
+static QueueHandle_t s_input_queue = nullptr;
+static QueueHandle_t s_output_queue = nullptr;
+static TaskHandle_t s_worker_task = nullptr;
+static portMUX_TYPE s_async_mux = portMUX_INITIALIZER_UNLOCKED;
+static uint32_t s_generation = 1;
+static uint32_t s_worker_generation = 0;
+static SpeechAsyncStats s_stats = {};
+// 队列本身会复制元素；工作任务和提交端各自使用独立
+// 静态帧，避免 2–3KB 的音频结构落到 FreeRTOS 任务栈上。
+static SpeechInputFrame s_worker_input;
+static SpeechOutputFrame s_worker_output;
+static SpeechOutputFrame s_discarded_output;
+static SpeechInputFrame s_submit_frame;
+static SpeechInputFrame s_discarded_input;
+
+static void reset_afe_internal() {
+  s_acc_len = 0;
+  s_pending = 0;
+  s_last_speech = false;
+  if (s_afe != nullptr) ESP_AFE_SR_HANDLE.reset_buffer(s_afe);
+}
+
+// 只能由 AFE 工作任务调用。fetch 可能同步等待，所以该函数
+// 绝不得回到 Arduino loopTask 上执行。
+static bool process_internal(const int16_t *mic, const int16_t *reference,
+                             int in_n, int16_t *out, bool *is_speech) {
+  if (s_afe == nullptr || mic == nullptr || is_speech == nullptr) return false;
+
+  if (s_acc_len + in_n >
+      static_cast<int>(sizeof(s_acc_mic) / sizeof(s_acc_mic[0]))) {
+    s_acc_len = 0;
+    s_pending = 0;
+  }
+  memcpy(s_acc_mic + s_acc_len, mic, in_n * sizeof(int16_t));
+  if (reference != nullptr) {
+    memcpy(s_acc_ref + s_acc_len, reference, in_n * sizeof(int16_t));
+  } else {
+    memset(s_acc_ref + s_acc_len, 0, in_n * sizeof(int16_t));
+  }
+  s_acc_len += in_n;
+
+  int off = 0;
+  while (s_acc_len - off >= s_feed_n) {
+    if (s_feed_n * 2 > static_cast<int>(
+                             sizeof(s_feed_interleaved) /
+                             sizeof(s_feed_interleaved[0]))) {
+      return false;
+    }
+    for (int i = 0; i < s_feed_n; ++i) {
+      s_feed_interleaved[i * 2] = s_acc_mic[off + i];
+      s_feed_interleaved[i * 2 + 1] = s_acc_ref[off + i];
+    }
+    ESP_AFE_SR_HANDLE.feed(s_afe, s_feed_interleaved);
+    off += s_feed_n;
+    s_pending += s_feed_n;
+  }
+  if (off > 0) {
+    memmove(s_acc_mic, s_acc_mic + off,
+            (s_acc_len - off) * sizeof(int16_t));
+    memmove(s_acc_ref, s_acc_ref + off,
+            (s_acc_len - off) * sizeof(int16_t));
+    s_acc_len -= off;
+  }
+
+  bool got = false;
+  if (s_pending >= s_fetch_n) {
+    afe_fetch_result_t *res = ESP_AFE_SR_HANDLE.fetch(s_afe);
+    s_pending -= s_fetch_n;
+    if (res != nullptr && res->data != nullptr) {
+      s_last_speech = (res->vad_state == AFE_VAD_SPEECH);
+      if (out != nullptr) {
+        int nbytes = res->data_size;
+        if (nbytes > s_fetch_n * static_cast<int>(sizeof(int16_t))) {
+          nbytes = s_fetch_n * sizeof(int16_t);
+        }
+        memcpy(out, res->data, nbytes);
+      }
+      got = true;
+    }
+  }
+  *is_speech = s_last_speech;
+  return got;
+}
+
+static uint32_t current_generation() {
+  portENTER_CRITICAL(&s_async_mux);
+  const uint32_t generation = s_generation;
+  portEXIT_CRITICAL(&s_async_mux);
+  return generation;
+}
+
+static void speech_worker(void *) {
+  for (;;) {
+    if (xQueueReceive(s_input_queue, &s_worker_input, portMAX_DELAY) != pdTRUE) {
+      continue;
+    }
+
+    if (s_worker_input.generation != s_worker_generation) {
+      reset_afe_internal();
+      portENTER_CRITICAL(&s_async_mux);
+      s_worker_generation = s_worker_input.generation;
+      portEXIT_CRITICAL(&s_async_mux);
+    }
+
+    const uint32_t started_us = micros();
+    bool is_speech = false;
+    const bool got = process_internal(
+        s_worker_input.mic, s_worker_input.reference,
+        s_worker_input.samples, s_worker_output.data, &is_speech);
+    const uint32_t elapsed_us = micros() - started_us;
+
+    // reset 可能在 fetch 等待时发生。旧世代结果不允许回流到
+    // 新一轮播放，否则会把上次人声误当成新的 barge-in。
+    if (s_worker_input.generation != current_generation()) continue;
+
+    portENTER_CRITICAL(&s_async_mux);
+    ++s_stats.processed_frames;
+    s_stats.last_process_us = elapsed_us;
+    if (elapsed_us > s_stats.max_process_us) s_stats.max_process_us = elapsed_us;
+    portEXIT_CRITICAL(&s_async_mux);
+    if (!got) continue;
+
+    s_worker_output.generation = s_worker_input.generation;
+    s_worker_output.is_speech = is_speech;
+    if (xQueueSend(s_output_queue, &s_worker_output, 0) != pdTRUE) {
+      xQueueReceive(s_output_queue, &s_discarded_output, 0);
+      xQueueSend(s_output_queue, &s_worker_output, 0);
+    }
+    portENTER_CRITICAL(&s_async_mux);
+    s_stats.last_result_ms = millis();
+    portEXIT_CRITICAL(&s_async_mux);
+  }
+}
+
+}  // namespace
 
 bool speech_init() {
   // C++ 中不能用 AFE_CONFIG_DEFAULT()（C99 指定初始化），逐字段赋值
@@ -64,9 +227,27 @@ bool speech_init() {
 
   s_feed_n  = ESP_AFE_SR_HANDLE.get_feed_chunksize(s_afe);
   s_fetch_n = ESP_AFE_SR_HANDLE.get_fetch_chunksize(s_afe);
+  if (s_feed_n <= 0 || s_fetch_n <= 0 ||
+      s_feed_n > kAsyncMaxSamples || s_fetch_n > kAsyncMaxSamples) {
+    Serial.printf("[AFE] 错误：异步帧过大 feed=%d fetch=%d max=%d\n",
+                  s_feed_n, s_fetch_n, kAsyncMaxSamples);
+    return false;
+  }
+
+  s_input_queue = xQueueCreate(kInputQueueDepth, sizeof(SpeechInputFrame));
+  s_output_queue = xQueueCreate(kOutputQueueDepth, sizeof(SpeechOutputFrame));
+  if (s_input_queue == nullptr || s_output_queue == nullptr) {
+    Serial.println("[AFE] 错误：异步队列分配失败");
+    return false;
+  }
+  if (xTaskCreatePinnedToCore(speech_worker, "afe_worker", kWorkerStackBytes,
+                              nullptr, 1, &s_worker_task, 1) != pdPASS) {
+    Serial.println("[AFE] 错误：工作任务创建失败");
+    return false;
+  }
   Serial.printf("[AFE] 就绪：feed=%d fetch=%d 采样率=%d\n",
                 s_feed_n, s_fetch_n, ESP_AFE_SR_HANDLE.get_samp_rate(s_afe));
-  Serial.println("[AFE] AEC / 神经 VAD / 降噪就绪（支持播放中打断）");
+  Serial.println("[AFE] AEC / VAD 异步工作任务就绪（不阻塞 TTS）");
   return true;
 }
 
@@ -78,74 +259,67 @@ int speech_fetch_size() {
   return s_afe ? s_fetch_n : 0;
 }
 
-void speech_reset() {
-  s_acc_len = 0;
-  s_pending = 0;
-  s_last_speech = false;
-  if (s_afe != nullptr) ESP_AFE_SR_HANDLE.reset_buffer(s_afe);
+void speech_async_reset() {
+  if (s_input_queue == nullptr || s_output_queue == nullptr) return;
+  portENTER_CRITICAL(&s_async_mux);
+  ++s_generation;
+  if (s_generation == 0) ++s_generation;
+  memset(&s_stats, 0, sizeof(s_stats));
+  portEXIT_CRITICAL(&s_async_mux);
+  xQueueReset(s_input_queue);
+  xQueueReset(s_output_queue);
 }
 
-bool speech_process(const int16_t *mic, const int16_t *reference, int in_n,
-                    int16_t *out,
-                    bool *is_speech) {
-  if (s_afe == nullptr || mic == nullptr || is_speech == nullptr) return false;
+bool speech_async_submit(const int16_t *mic, const int16_t *reference,
+                         int samples) {
+  if (s_input_queue == nullptr || mic == nullptr || reference == nullptr ||
+      samples <= 0 || samples > kAsyncMaxSamples) {
+    return false;
+  }
+  s_submit_frame.generation = current_generation();
+  s_submit_frame.samples = samples;
+  memcpy(s_submit_frame.mic, mic, samples * sizeof(int16_t));
+  memcpy(s_submit_frame.reference, reference, samples * sizeof(int16_t));
 
-  // 1) 追加同时间轴的麦克风与播放参考；没有播放时参考为全零。
-  if (s_acc_len + in_n > (int)(sizeof(s_acc_mic) / sizeof(s_acc_mic[0]))) {
-    Serial.printf("[AFE] 错误：累积缓冲溢出 %d+%d\n", s_acc_len, in_n);
-    s_acc_len = 0;
-    s_pending = 0;
+  bool dropped = false;
+  if (xQueueSend(s_input_queue, &s_submit_frame, 0) != pdTRUE) {
+    xQueueReceive(s_input_queue, &s_discarded_input, 0);
+    dropped = true;
+    if (xQueueSend(s_input_queue, &s_submit_frame, 0) != pdTRUE) return false;
   }
-  memcpy(s_acc_mic + s_acc_len, mic, in_n * sizeof(int16_t));
-  if (reference != nullptr) {
-    memcpy(s_acc_ref + s_acc_len, reference, in_n * sizeof(int16_t));
-  } else {
-    memset(s_acc_ref + s_acc_len, 0, in_n * sizeof(int16_t));
-  }
-  s_acc_len += in_n;
+  portENTER_CRITICAL(&s_async_mux);
+  ++s_stats.submitted_frames;
+  if (dropped) ++s_stats.dropped_frames;
+  portEXIT_CRITICAL(&s_async_mux);
+  return true;
+}
 
-  // 2) 按 feed 帧长切块喂入 AFE（feed 不阻塞）
-  int off = 0;
-  while (s_acc_len - off >= s_feed_n) {
-    if (s_feed_n * 2 > (int)(sizeof(s_feed_interleaved) /
-                              sizeof(s_feed_interleaved[0]))) {
-      Serial.printf("[AFE] 错误：feed 帧过大 %d\n", s_feed_n);
-      return false;
-    }
-    for (int i = 0; i < s_feed_n; ++i) {
-      s_feed_interleaved[i * 2] = s_acc_mic[off + i];
-      s_feed_interleaved[i * 2 + 1] = s_acc_ref[off + i];
-    }
-    ESP_AFE_SR_HANDLE.feed(s_afe, s_feed_interleaved);
-    off += s_feed_n;
-    s_pending += s_feed_n;
+bool speech_async_poll(int16_t *out, bool *is_speech) {
+  if (s_output_queue == nullptr || out == nullptr || is_speech == nullptr) {
+    return false;
   }
-  if (off > 0) {
-    memmove(s_acc_mic, s_acc_mic + off,
-            (s_acc_len - off) * sizeof(int16_t));
-    memmove(s_acc_ref, s_acc_ref + off,
-            (s_acc_len - off) * sizeof(int16_t));
-    s_acc_len -= off;
+  SpeechOutputFrame frame;
+  while (xQueueReceive(s_output_queue, &frame, 0) == pdTRUE) {
+    if (frame.generation != current_generation()) continue;
+    memcpy(out, frame.data, s_fetch_n * sizeof(int16_t));
+    *is_speech = frame.is_speech;
+    return true;
   }
+  return false;
+}
 
-  // 3) 累计新喂样本足够一个 fetch 帧时才拉取：
-  //    fetch 不阻塞死等，且长期喂/取速率严格相等，不会积压
-  bool got = false;
-  if (s_pending >= s_fetch_n) {
-    afe_fetch_result_t *res = ESP_AFE_SR_HANDLE.fetch(s_afe);
-    s_pending -= s_fetch_n;
-    if (res != nullptr && res->data != nullptr) {
-      s_last_speech = (res->vad_state == AFE_VAD_SPEECH);
-      if (out != nullptr) {
-        int nbytes = res->data_size;
-        if (nbytes > (int)(s_fetch_n * sizeof(int16_t))) nbytes = s_fetch_n * sizeof(int16_t);
-        memcpy(out, res->data, nbytes);
-      }
-      got = true;
-    }
-  }
-
-  // 未拉到新帧时保持上次状态
-  *is_speech = s_last_speech;
-  return got;
+SpeechAsyncStats speech_async_stats() {
+  portENTER_CRITICAL(&s_async_mux);
+  SpeechAsyncStats stats = s_stats;
+  const uint32_t generation = s_generation;
+  const uint32_t worker_generation = s_worker_generation;
+  portEXIT_CRITICAL(&s_async_mux);
+  stats.pending_input_frames =
+      s_input_queue ? uxQueueMessagesWaiting(s_input_queue) : 0;
+  stats.pending_output_frames =
+      s_output_queue ? uxQueueMessagesWaiting(s_output_queue) : 0;
+  stats.worker_stack_free =
+      s_worker_task ? uxTaskGetStackHighWaterMark(s_worker_task) : 0;
+  stats.reset_pending = generation != worker_generation;
+  return stats;
 }
