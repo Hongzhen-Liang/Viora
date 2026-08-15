@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <driver/i2s.h>
 #include <esp_heap_caps.h>
+#include <math.h>
 
 #include "config.h"
 #include "audio.h"
@@ -22,6 +23,10 @@ static portMUX_TYPE s_play_mux = portMUX_INITIALIZER_UNLOCKED;
 
 // ---- 播放音量（LLM operation: volume_up / volume_down）----
 static float s_volume = 1.0f;
+
+// ---- 麦克风幅度诊断 ----
+static uint16_t s_capture_rms = 0;
+static uint32_t s_capture_clipped_samples = 0;
 
 void audio_set_volume(float vol) {
   if (vol < VOLUME_MIN) vol = VOLUME_MIN;
@@ -113,16 +118,36 @@ int audio_capture(int16_t *pcm, int max_frames, int16_t *peak) {
     return 0;
   int frames = bytes_read / 8;   // 每帧 = L(4B) + R(4B)
   if (frames > max_frames) frames = max_frames;
-  int16_t vol = 0;
+  int32_t vol = 0;
+  uint64_t square_sum = 0;
   for (int i = 0; i < frames; i++) {
-    int16_t l = (int16_t)(raw[2 * i] >> 14);      // 左声道（已确认数据在 L）
+    // 麦克风的 24-bit 二补码样本位于 32-bit I2S slot 高位。右移 14 位
+    // 保留原有的约 4x 数字增益，但必须显式饱和；直接强转 int16 会在
+    // 大声说话或背景音乐较响时回绕，产生比普通削波更严重的频谱失真。
+    int32_t sample = raw[2 * i] >> 14;             // 左声道（已确认数据在 L）
+    if (sample > INT16_MAX) {
+      sample = INT16_MAX;
+      ++s_capture_clipped_samples;
+    } else if (sample < INT16_MIN) {
+      sample = INT16_MIN;
+      ++s_capture_clipped_samples;
+    }
+    const int16_t l = static_cast<int16_t>(sample);
     pcm[i] = l;
-    int16_t al = l < 0 ? -l : l;
+    const int32_t al = sample < 0 ? -sample : sample;
     if (al > vol) vol = al;
+    square_sum += static_cast<int64_t>(sample) * sample;
   }
-  if (peak) *peak = vol;
+  s_capture_rms = frames > 0
+                      ? static_cast<uint16_t>(sqrt(static_cast<double>(square_sum) / frames))
+                      : 0;
+  if (peak) *peak = static_cast<int16_t>(vol > INT16_MAX ? INT16_MAX : vol);
   return frames;
 }
+
+uint16_t audio_capture_rms() { return s_capture_rms; }
+
+uint32_t audio_capture_clipped_samples() { return s_capture_clipped_samples; }
 
 // ============================================================
 // wakenet 环形缓存

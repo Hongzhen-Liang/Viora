@@ -28,8 +28,15 @@ constexpr int kFeatureValues = kFeatureFrames * kMelBins;
 // One inference takes about 49 ms on this ESP32-S3. Running it every 50 ms
 // leaves no CPU budget for I2S and the frontend, so use a 100 ms cadence.
 constexpr int kInferenceFrameStride = 10;  // 100 ms at a 10 ms feature hop.
-constexpr float kImmediateThreshold = 0.97f;
-constexpr float kConfirmThreshold = 0.90f;
+// Music often depresses one or two adjacent window scores without erasing the
+// complete temporal pattern. Require broad evidence instead of one very high
+// (and potentially spurious) score: 3 of the last 4 windows must be above the
+// evidence floor, with at least one strong window. These values were selected
+// against the existing clean/music/noise streaming evaluation corpus.
+constexpr float kEvidenceThreshold = 0.675f;
+constexpr float kEvidencePeakThreshold = 0.85f;
+constexpr int kEvidenceWindow = 4;
+constexpr int kEvidenceRequiredHits = 3;
 constexpr uint32_t kCooldownMs = 2500;
 constexpr size_t kTensorArenaBytes = 144 * 1024;
 
@@ -59,12 +66,41 @@ int s_audio_head = 0;
 int s_feature_count = 0;
 int s_feature_head = 0;
 int s_frames_since_inference = 0;
-int s_confirmation_count = 0;
+float s_probability_history[kEvidenceWindow] = {};
+int s_probability_history_head = 0;
+int s_probability_history_count = 0;
 uint32_t s_cooldown_until_ms = 0;
 uint32_t s_last_inference_us = 0;
 float s_last_probability = 0.0f;
 bool s_ready = false;
 bool s_was_enabled = false;
+
+void clear_detection_history() {
+  memset(s_probability_history, 0, sizeof(s_probability_history));
+  s_probability_history_head = 0;
+  s_probability_history_count = 0;
+}
+
+bool has_detection_evidence(float probability, int *hit_count, float *peak) {
+  s_probability_history[s_probability_history_head] = probability;
+  s_probability_history_head =
+      (s_probability_history_head + 1) % kEvidenceWindow;
+  if (s_probability_history_count < kEvidenceWindow) {
+    ++s_probability_history_count;
+  }
+
+  int hits = 0;
+  float window_peak = 0.0f;
+  for (int index = 0; index < s_probability_history_count; ++index) {
+    const float value = s_probability_history[index];
+    if (value >= kEvidenceThreshold) ++hits;
+    if (value > window_peak) window_peak = value;
+  }
+  if (hit_count != nullptr) *hit_count = hits;
+  if (peak != nullptr) *peak = window_peak;
+  return hits >= kEvidenceRequiredHits &&
+         window_peak >= kEvidencePeakThreshold;
+}
 
 bool shape_is(const TfLiteTensor *tensor, int d0, int d1, int d2, int d3) {
   return tensor != nullptr && tensor->dims != nullptr && tensor->dims->size == 4 &&
@@ -285,7 +321,7 @@ void wake_word_reset() {
   s_feature_count = 0;
   s_feature_head = 0;
   s_frames_since_inference = 0;
-  s_confirmation_count = 0;
+  clear_detection_history();
   s_last_probability = 0.0f;
   memset(s_audio_ring, 0, sizeof(s_audio_ring));
 }
@@ -318,22 +354,21 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
         if (!invoke(probabilities)) continue;
         const uint32_t now = millis();
         if (static_cast<int32_t>(now - s_cooldown_until_ms) < 0) {
-          s_confirmation_count = 0;
+          clear_detection_history();
           continue;
         }
-        if (probabilities[0] >= kImmediateThreshold) {
-          detected = true;
-        } else if (probabilities[0] >= kConfirmThreshold) {
-          ++s_confirmation_count;
-          detected = s_confirmation_count >= 2;
-        } else {
-          s_confirmation_count = 0;
-        }
+        int evidence_hits = 0;
+        float evidence_peak = 0.0f;
+        detected = has_detection_evidence(probabilities[0], &evidence_hits,
+                                          &evidence_peak);
         if (detected) {
           s_cooldown_until_ms = now + kCooldownMs;
-          s_confirmation_count = 0;
-          Serial.printf("[KWS] Hi Vesper p=%.4f, inference=%lu us\n",
-                        probabilities[0],
+          clear_detection_history();
+          Serial.printf(
+              "[KWS] Hi Vesper p=%.4f, evidence=%d/%d peak=%.4f, "
+              "inference=%lu us\n",
+                        probabilities[0], evidence_hits, kEvidenceWindow,
+                        evidence_peak,
                         static_cast<unsigned long>(s_last_inference_us));
           break;
         }

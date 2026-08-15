@@ -206,6 +206,8 @@ void loop() {
   static uint64_t kws_diag_samples = 0;
   static float kws_diag_max_probability = 0.0f;
   static int16_t kws_diag_max_peak = 0;
+  static uint16_t kws_diag_max_rms = 0;
+  static uint32_t kws_diag_clip_start = 0;
   if (kws_enabled) {
     const uint32_t now = millis();
     if (!kws_diag_armed) {
@@ -215,28 +217,37 @@ void loop() {
       kws_diag_samples = 0;
       kws_diag_max_probability = 0.0f;
       kws_diag_max_peak = 0;
+      kws_diag_max_rms = 0;
+      kws_diag_clip_start = audio_capture_clipped_samples();
     }
     kws_diag_samples += frames;
     if (wake_probability > kws_diag_max_probability) {
       kws_diag_max_probability = wake_probability;
     }
     if (vol_l > kws_diag_max_peak) kws_diag_max_peak = vol_l;
+    const uint16_t frame_rms = audio_capture_rms();
+    if (frame_rms > kws_diag_max_rms) kws_diag_max_rms = frame_rms;
     if (now - kws_diag_last_ms >= 5000) {
       const uint32_t wall_ms = now - kws_diag_start_ms;
       const uint32_t audio_ms = static_cast<uint32_t>(
           kws_diag_samples * 1000ULL / SR_SAMPLE_RATE);
       const int32_t lag_ms = static_cast<int32_t>(wall_ms) -
                              static_cast<int32_t>(audio_ms);
+      const uint32_t clipped =
+          audio_capture_clipped_samples() - kws_diag_clip_start;
       Serial.printf(
-          "[KWS-DIAG] wall=%lums audio=%lums lag=%ldms peak=%d "
-          "wake_max=%.4f infer=%luus\n",
+          "[KWS-DIAG] wall=%lums audio=%lums lag=%ldms peak=%d rms=%u "
+          "clip=%lu wake_max=%.4f infer=%luus\n",
           static_cast<unsigned long>(wall_ms),
           static_cast<unsigned long>(audio_ms), static_cast<long>(lag_ms),
-          static_cast<int>(kws_diag_max_peak), kws_diag_max_probability,
+          static_cast<int>(kws_diag_max_peak),
+          static_cast<unsigned>(kws_diag_max_rms),
+          static_cast<unsigned long>(clipped), kws_diag_max_probability,
           static_cast<unsigned long>(wake_word_last_inference_us()));
       kws_diag_last_ms = now;
       kws_diag_max_probability = wake_probability;
       kws_diag_max_peak = vol_l;
+      kws_diag_max_rms = frame_rms;
     }
   } else {
     kws_diag_armed = false;
