@@ -2,7 +2,7 @@
 	"version": "2.0.0",
 	"tasks": [
 		{
-			"label": "PlantTalk Build (AFE)",
+			"label": "Viora Build (AFE)",
 			"type": "shell",
 			"command": "platformio run",
 			"args": [],

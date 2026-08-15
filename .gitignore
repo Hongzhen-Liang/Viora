@@ -21,4 +21,4 @@ components/esp-sr/lib/esp32s3_merged/
 # ---- macOS ----
 .DS_Store
 
-PlantTalkServer/
+VioraServer/

@@ -1,6 +1,6 @@
-# PlantTalk ESP32 客户端接入文档
+# Viora ESP32 客户端接入文档
 
-> 本文档面向 **ESP32 端**项目，说明如何接入 Mac 上的 PlantTalk 服务器。
+> 本文档面向 **ESP32 端**项目，说明如何接入 Mac 上的 Viora 服务器。
 >
 > ESP32 端职责（只做这四件事）：
 > 1. **自研唤醒词检测**（"Hi Vesper"，Log-Mel + DS-CNN INT8）
@@ -158,7 +158,7 @@ lib_deps =
 ## 5. 目录结构建议
 
 ```
-planttalk-esp32/
+viora-esp32/
 ├── platformio.ini
 ├── README.md              # 本文件
 ├── include/
@@ -384,7 +384,7 @@ void loop() {
 
 ## 9. 调试清单
 
-1. **连不上**：确认 ESP32 与 Mac 同一局域网；Mac 上服务器已启动（`curl http://<Mac IP>:8765/health` 应返回 `{"service":"PlantTalk","status":"ok"}`）。
+1. **连不上**：确认 ESP32 与 Mac 同一局域网；Mac 上服务器已启动（`curl http://<Mac IP>:8765/health` 应返回 `{"service":"Viora","status":"ok"}`）。
 2. **收到 `{"type":"error","message":"服务器忙..."}`**：上一轮流水线还没结束，等收到 `tts_end` 后再发下一段语音。
 3. **上传后无回复**：检查麦克风采样率是否为 16k、位深 16bit、单声道；打印 `mic_read` 读到的样本数确认非 0。
 4. **播放声音小/杂音**：确认 MAX98357A 的 `GAIN` 引脚接法；INMP441 的 L/R 引脚接地表示左声道。

@@ -1,6 +1,6 @@
-# PlantTalk 服务器端（Mac）项目规格
+# Viora 服务器端（Mac）项目规格
 
-> 本 README 是 **Mac 服务器端新项目**的完整规格说明书。用它作为蓝本，在 Mac 上新建一个独立项目（例如 `planttalk-server/`），实现"语音识别 → 大模型对话 → 语音合成"的编排服务。
+> 本 README 是 **Mac 服务器端新项目**的完整规格说明书。用它作为蓝本，在 Mac 上新建一个独立项目（例如 `viora-server/`），实现"语音识别 → 大模型对话 → 语音合成"的编排服务。
 >
 > ESP32 端只负责：**自研 Hi Vesper 唤醒检测 + 录音上传（断句由神经 VAD 判定）+ 接收音频播放 + 传感器采集**。所有语音理解、对话、合成都在 Mac 端完成。
 
@@ -8,7 +8,7 @@
 
 ## 1. 项目定位
 
-PlantTalk 是一个"植物陪伴 Agent"。用户对盆栽说唤醒词 **Hi Vesper** 后开始说话，ESP32 把音频发给 Mac 服务器，服务器依次完成：
+Viora 是一个"植物陪伴 Agent"。用户对盆栽说唤醒词 **Hi Vesper** 后开始说话，ESP32 把音频发给 Mac 服务器，服务器依次完成：
 
 ```
 音频 → ASR(Whisper) → LLM(DeepSeek) → TTS(edge-tts) → 音频回传 → ESP32 播放
@@ -103,7 +103,7 @@ sequenceDiagram
 ## 5. 目录结构
 
 ```
-planttalk-server/
+viora-server/
 ├── README.md          # 本文件
 ├── requirements.txt   # 依赖
 ├── .env.example       # 环境变量模板
