@@ -58,6 +58,11 @@ static void send_ring_audio() {
   while (audio_ring_size() > 0) {
     const int n = audio_ring_size() < 512 ? audio_ring_size() : 512;
     if (!audio_ring_take(chunk, n)) break;
+    for (int i = 0; i < n; ++i) {
+      const int16_t magnitude =
+          chunk[i] < 0 ? static_cast<int16_t>(-chunk[i]) : chunk[i];
+      if (magnitude > s_rec_max_vol) s_rec_max_vol = magnitude;
+    }
     const uint32_t bytes = n * sizeof(int16_t);
     if (net_send_audio(reinterpret_cast<const uint8_t *>(chunk), bytes)) {
       s_uploaded_bytes += bytes;
@@ -138,6 +143,16 @@ static void end_active_session(const char *reason) {
 }
 
 static void commit_turn(uint32_t now_ms) {
+  if (s_listen_origin == LISTEN_FROM_WAKE &&
+      s_turn.voice_frames() <= MIN_VOICE_FRAMES &&
+      s_rec_max_vol < WAKE_MIN_SPEAK_PEAK) {
+    // 唤醒后没人真正开口（只有唤醒词证据的静音）：不提交、不上传，
+    // 重新计时继续聆听，避免 Whisper 把静音幻觉成符号串。
+    Serial.println(">>> 唤醒后未检测到有效语音，继续聆听");
+    s_turn.reset(now_ms, 0);
+    return;
+  }
+
   uint32_t trim_start_ms = 0;
   if (s_listen_origin == LISTEN_FROM_BARGE_IN) {
     // 打断证据在切换状态前已经出现，保留最近 600ms AEC 输出。
