@@ -113,8 +113,9 @@ bool net_connected() {
   return s_ws_connected;
 }
 
-void net_send_audio(const uint8_t *data, size_t len) {
-  s_ws.sendBIN((uint8_t *)data, len);
+bool net_send_audio(const uint8_t *data, size_t len) {
+  if (!s_ws_connected || data == nullptr || len == 0) return false;
+  return s_ws.sendBIN((uint8_t *)data, len);
 }
 
 void net_send_json(const char *json) {

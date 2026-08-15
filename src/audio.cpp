@@ -9,7 +9,7 @@
 #include "config.h"
 #include "audio.h"
 
-// ---- PCM 环形缓存（喂 wakenet） ----
+// ---- PCM 环形缓存（唤醒/打断前置音频） ----
 static int16_t s_pcm[PCM_BUFFER_SIZE];
 static int     s_pcm_head = 0;
 static int     s_pcm_len  = 0;
@@ -19,7 +19,14 @@ static uint8_t *s_play_buf  = nullptr;
 static uint32_t s_play_head = 0;
 static uint32_t s_play_len  = 0;
 static bool     s_tts_end_seen = false;
+static bool     s_play_started = false;
+static uint32_t s_last_play_write_ms = 0;
 static portMUX_TYPE s_play_mux = portMUX_INITIALIZER_UNLOCKED;
+
+// 上一块实际写入功放的音频。主循环先采麦、再写下一块扬声器数据，
+// 因而这个块正好可作为本次麦克风帧的 AEC 参考。
+static int16_t s_play_reference[512] = {};
+static int     s_play_reference_frames = 0;
 
 // ---- 播放音量（LLM operation: volume_up / volume_down）----
 static float s_volume = 1.0f;
@@ -150,7 +157,7 @@ uint16_t audio_capture_rms() { return s_capture_rms; }
 uint32_t audio_capture_clipped_samples() { return s_capture_clipped_samples; }
 
 // ============================================================
-// wakenet 环形缓存
+// 唤醒/打断前置音频环形缓存
 // ============================================================
 void audio_ring_push(const int16_t *src, int n) {
   for (int i = 0; i < n; i++) {
@@ -171,6 +178,13 @@ bool audio_ring_take(int16_t *dst, int n) {
   s_pcm_head = (s_pcm_head + n) % PCM_BUFFER_SIZE;
   s_pcm_len -= n;
   return true;
+}
+
+int audio_ring_size() { return s_pcm_len; }
+
+void audio_ring_clear() {
+  s_pcm_head = 0;
+  s_pcm_len = 0;
 }
 
 // ============================================================
@@ -198,7 +212,16 @@ void audio_play_drain() {
   n = s_play_len;
   portEXIT_CRITICAL(&s_play_mux);
 
+  const uint32_t prebuffer_bytes =
+      (SR_SAMPLE_RATE * 2U * PLAY_PREBUFFER_MS) / 1000U;
+  if (!s_play_started && n > 0 && !s_tts_end_seen && n < prebuffer_bytes) {
+    // 流式 TTS 刚开始时先积累约 128ms，换取无卡顿的连续播放。
+    s_play_reference_frames = 0;
+    return;
+  }
+
   if (n > 0) {
+    s_play_started = true;
     // 每次写 512 样本(1024 字节 = 32ms)，与麦克风 32ms 一帧对齐，保持实时播放
     uint32_t chunk = n < 1024 ? n : 1024;
     static uint8_t buf[1024];
@@ -218,9 +241,29 @@ void audio_play_drain() {
         s[i] = (int16_t)v;
       }
     }
+    const int reference_frames = chunk / 2;
+    for (int i = 0; i < reference_frames; ++i) {
+      s_play_reference[i] = reinterpret_cast<int16_t *>(buf)[i];
+    }
+    s_play_reference_frames = reference_frames;
     size_t written = 0;
     i2s_write(SPK_I2S_PORT, buf, chunk, &written, portMAX_DELAY);
+    s_last_play_write_ms = millis();
+  } else {
+    // 上一块已经覆盖了刚完成的采音窗口；下一窗口应使用静音参考。
+    if (!s_tts_end_seen || millis() - s_last_play_write_ms >= PLAYBACK_DRAIN_MS) {
+      s_play_reference_frames = 0;
+    }
   }
+}
+
+void audio_play_reference(int16_t *dst, int frames) {
+  if (dst == nullptr || frames <= 0) return;
+  const int available = s_play_reference_frames < frames
+                            ? s_play_reference_frames
+                            : frames;
+  for (int i = 0; i < available; ++i) dst[i] = s_play_reference[i];
+  for (int i = available; i < frames; ++i) dst[i] = 0;
 }
 
 void audio_play_discard() {
@@ -229,10 +272,16 @@ void audio_play_discard() {
   s_play_len = 0;
   portEXIT_CRITICAL(&s_play_mux);
   s_tts_end_seen = false;
+  s_play_started = false;
+  s_play_reference_frames = 0;
+  // 打断时不仅清应用缓冲，也立即清掉 I2S DMA 中尚未播放的尾音。
+  i2s_zero_dma_buffer(SPK_I2S_PORT);
 }
 
 void audio_mark_tts_start() {
   s_tts_end_seen = false;
+  s_play_started = false;
+  s_play_reference_frames = 0;
 }
 
 void audio_mark_tts_end() {
@@ -246,6 +295,12 @@ bool audio_playback_finished() {
   n = s_play_len;
   portEXIT_CRITICAL(&s_play_mux);
   if (n == 0) {
+    // 应用环形缓冲清空不等于 DMA 已物理播完；非阻塞地等最后一小块
+    // 离开功放，再开放下一轮麦克风，减少尾音被识别成用户话语。
+    if (s_play_started &&
+        millis() - s_last_play_write_ms < PLAYBACK_DRAIN_MS) {
+      return false;
+    }
     s_tts_end_seen = false;
     return true;
   }

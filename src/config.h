@@ -51,23 +51,39 @@
 #define SPK_I2S_PORT I2S_NUM_1
 
 // ============================================================
-// 录音 VAD 参数（能量断句，语音阈值持续自适应）
+// 录音 VAD 参数（神经 VAD 负责判定；能量阈值仅用于诊断）
 // ============================================================
 #define VOICE_THRESHOLD_DEFAULT 400   // 校准前的兜底阈值
 #define VOICE_THRESHOLD_MIN     500   // 自适应阈值下限（高于环境噪声尖峰~265）
 #define VOICE_THRESHOLD_MAX     2500  // 自适应阈值上限
-// 断句静音时长：基础 3 秒；若检测到用户句内有长停顿，会自动放宽（上限 6 秒）
-#define SILENCE_BASE_MS 3000
-#define SILENCE_MAX_MS  6000
-#define MIN_REC_MS      800    // 至少录这么久
-#define MAX_REC_MS      15000  // 最多录这么久（音乐下 VAD 误报的硬性保险）
+#define VOICE_RMS_MIN           220   // 能量兜底还需满足 RMS，过滤点击/单点尖峰
+// 自然断句参数：短回答多等一会儿；正常句约 0.85 秒静音即回复；
+// 用户曾在句内停顿后继续说时，会自动学习其节奏并放宽，最多 1.8 秒。
+#define VAD_FRAME_MS              32
+#define ENDPOINT_SHORT_SPEECH_MS  640
+#define ENDPOINT_SHORT_MS         1200
+#define ENDPOINT_NORMAL_MS        850
+#define ENDPOINT_LONG_TURN_MS     5000
+#define ENDPOINT_LONG_MS          750
+#define ENDPOINT_MAX_MS           1800
+#define ENDPOINT_LEARN_GAP_MS     160
+#define MIN_REC_MS                450
+#define MAX_REC_MS                30000
 
-// 连续对话参数
-#define CONV_TIMEOUT_MS 20000  // 连续对话中，这么久没人说话就退出（回到待唤醒）
-#define GUARD_MS        800    // 播放结束后静置一小段，避免扬声器余音/pop 误触发
-#define VOICE_START_FRAMES 4   // 连续 4 帧(约128ms)有人声才算"开始说话"
-#define MIN_VOICE_FRAMES   6   // 总语音帧少于这个视为误触发，不上传
+// 连续对话与打断参数
+#define CONV_TIMEOUT_MS        15000  // 回复后继续等这一时长，无需重复唤醒
+#define FOLLOWUP_GUARD_MS      180    // 只屏蔽扬声器的最后一点余音
+#define VOICE_START_FRAMES     3      // 约 96ms 连续人声才确认开始
+#define MIN_VOICE_FRAMES       5      // 少于约 160ms 视为短促噪声
 #define MAX_CONSEC_ERRORS 2    // 连续多次服务器错误（如背景音乐被当语音）→ 回待唤醒
+#define ENABLE_BARGE_IN        1      // 播放中说话可打断；依赖 AFE AEC
+#define BARGE_IN_GUARD_MS      450    // 回答刚开始时避免瞬态误打断
+#define BARGE_IN_VOICE_FRAMES  5      // AEC 后连续约 160ms 人声才打断
+
+// 唤醒/打断前置音频：避免 KWS/VAD 固有延迟截掉紧跟唤醒词的首字。
+#define AUDIO_PREROLL_MS       900
+#define ASR_PREFIX_PADDING_MS  600
+#define ASR_SUFFIX_PADDING_MS  200
 
 // 播放音量（LLM operation: volume_up / volume_down 分发到这里）
 #define VOLUME_STEP 0.2f   // 每档音量步进
@@ -77,6 +93,8 @@
 // ============================================================
 // 缓冲大小
 // ============================================================
-#define PCM_BUFFER_SIZE 4096                     // wakenet 环形缓存
+#define PCM_BUFFER_SIZE ((SR_SAMPLE_RATE * AUDIO_PREROLL_MS) / 1000) // 前置音频环形缓存
 #define PLAY_BUFFER_SIZE (1536 * 1024)           // 播放缓冲 1.5MB ≈ 48 秒音频
+#define PLAY_PREBUFFER_MS 128                     // 流式 TTS 先攒一点，避免网络抖动卡顿
+#define PLAYBACK_DRAIN_MS 64                      // 等 I2S DMA 最后一块物理播完再重开麦
 #define NOISE_HIST_LEN  64                       // 噪声估计窗口 64 帧 × 32ms ≈ 2 秒

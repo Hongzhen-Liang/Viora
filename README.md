@@ -74,9 +74,10 @@ sequenceDiagram
 
 | 帧类型 | 内容 | 说明 |
 |--------|------|------|
-| 文本 | `{"type":"audio_start"}` | 开始上传一段用户语音 |
+| 文本 | `{"type":"audio_start","source":"wake","new_conversation":true}` | 开始上传；唤醒轮清旧上下文，追问轮保留上下文 |
 | 二进制 | PCM 字节 | 音频数据，可拆成多块连续发送 |
-| 文本 | `{"type":"audio_end"}` | 语音结束，触发 ASR→LLM→TTS 流水线 |
+| 文本 | `{"type":"audio_end","trim_start_ms":300,"trim_end_ms":650}` | 自适应断句结束，并提示裁掉多余静音 |
+| 文本 | `{"type":"cancel","reason":"barge_in"}` | 用户在播放中打断当前回复 |
 | 文本 | `{"type":"telemetry","soil_moisture":23,"temp":26.5,"humidity":60,"light":4200}` | 传感器快照，服务器更新最新状态 |
 
 ### 4.2 服务器 → ESP32
@@ -93,8 +94,9 @@ sequenceDiagram
 ### 4.3 状态机约定
 
 - 服务器收到 `audio_start` 后进入"收音频"状态，把后续二进制帧拼进缓冲区，直到收到 `audio_end`。
-- 收到 `audio_end` 后串行执行 ASR → LLM → TTS，期间忽略新的 `audio_start`（或返回 busy）。
-- 流水线完成后，先发 `tts_start`，再流式发送二进制音频，最后发 `tts_end`。
+- 收到 `audio_end` 后在独立可取消任务中执行 ASR → LLM → TTS，接收循环仍可即时处理打断。
+- 第一块 PCM 就绪后即发 `tts_start`，边合成、边转码、边发送，最后发 `tts_end`。
+- 回复播完 ESP32 自动重回聆听；15 秒无人继续才结束会话，期间无需重复唤醒。
 - LLM 回复带 `op` 操作字段（`none`/`exit`/`volume_up`/`volume_down`）；`exit` 时服务器下发道别音频，ESP32 播完回待唤醒（text 帧的 op 驱动，无额外帧）。
 - LLM 不可用时兜底：ASR 文本命中退出词（`config.py` 的 `EXIT_WORDS`）同样走退出流程，用 `EXIT_REPLY` 固定道别。
 
@@ -260,7 +262,7 @@ uvicorn main:app --host 0.0.0.0 --port 8765
 
 ## 11. 后续扩展
 
-- **打断**：ESP32 播放时检测到新语音 → 发 `{"type":"cancel"}` → 服务器停止下发并重新收音频。
+- **打断调优**：已支持 AEC + 神经 VAD barge-in；可按具体腔体声学调整参考延迟与连续帧阈值。
 - **主动提醒**：服务器定时任务（如每天早上）主动给 ESP32 推一段 TTS。
 - **浇水控制**：LLM 输出结构化动作 → 服务器发 `{"type":"cmd","action":"pump","seconds":N}` → ESP32 驱动继电器。
 - **语音克隆**：把 edge-tts 换成 CosyVoice 2 / GPT-SoVITS，得到专属音色。
