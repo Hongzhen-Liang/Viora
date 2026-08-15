@@ -22,7 +22,8 @@ void audio_ring_clear();
 
 // ---- TTS 播放 ----
 void audio_play_push(const uint8_t *src, uint32_t n);  // 线程安全（WS 回调线程调用）
-void audio_play_drain();                               // 主循环调用，保持实时播放
+void audio_play_drain();                               // 播放任务的一次喂数；仅任务创建失败时由主循环兜底
+bool audio_play_task_running();                        // 独立 I2S 播放任务是否已启动
 void audio_play_discard();                             // 断开时清空缓冲
 uint32_t audio_play_buffered_bytes();                  // 当前尚未播放的 PCM 字节数
 // 取上一轮送入扬声器的 PCM，供 AFE AEC 作为参考信号；不足部分补零。

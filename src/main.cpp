@@ -364,9 +364,18 @@ void loop() {
   }
 
   static int16_t pcm[512];
+  static int16_t playback_ref[512];
   int16_t vol_l = 0;
   const int frames = audio_capture(pcm, 512, &vol_l);
   if (frames <= 0) return;
+
+  // 独立播放任务会把扬声器 PCM 及其 AEC 参考按相同时间轴排队；
+  // 此处取出与刚完成的麦克风帧对应的一块。
+  if (s_state == ST_PLAYING) {
+    audio_play_reference(playback_ref, frames);
+  }
+  // 极低内存等异常情况下若播放任务创建失败，仍保留主循环兜底。
+  if (!audio_play_task_running()) audio_play_drain();
 
   // 待唤醒时持续保留最后 900ms；命中帧也会在 enter_listening 前入环。
   if (s_state == ST_IDLE && net_connected()) audio_ring_push(pcm, frames);
@@ -380,11 +389,9 @@ void loop() {
   // AFE 工作任务。主循环只轮询已完成的结果，所以即使
   // esp-sr fetch 卡住，WebSocket/TTS/Ping-Pong 仍会继续运行。
   static int16_t afe_out[512];
-  static int16_t playback_ref[512];
   bool is_speech = false;
   bool have_afe = false;
   if (s_state == ST_PLAYING) {
-    audio_play_reference(playback_ref, frames);
     speech_async_submit(pcm, playback_ref, frames);
     // 队列中若有多帧，优先跟上最新时间轴；每帧都用于
     // barge-in 连续证据，避免丢掉用户持续说话的信号。
@@ -424,7 +431,6 @@ void loop() {
   const bool neural_speech = s_state == ST_PLAYING && have_afe && is_speech;
   const bool turn_speech = neural_speech || energy_speech;
 
-  audio_play_drain();
   if (s_state == ST_PLAYING && audio_playback_finished()) {
     s_accept_tts_audio = false;
     audio_ring_clear();
