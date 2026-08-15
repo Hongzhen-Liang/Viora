@@ -56,9 +56,9 @@ sequenceDiagram
 | 麦克风 VDD | GPIO 1 | 软件输出 3.3V 供电（约 1.4mA） |
 | 麦克风 L/R | GPIO 17 | 输出低电平 = 左声道 |
 | MAX98357 VIN | 5V | 功放供电（2.5~5.5V，5V 更响） |
-| MAX98357 BCLK | GPIO 13 | I2S 位时钟 |
-| MAX98357 LRC | GPIO 12 | I2S 左右时钟（WS） |
-| MAX98357 DIN | GPIO 14 | I2S 音频数据 |
+| MAX98357 LRC | GPIO 11 | I2S 左右时钟（WS） |
+| MAX98357 BCLK | GPIO 12 | I2S 位时钟 |
+| MAX98357 DIN | GPIO 13 | I2S 音频数据 |
 | MAX98357 GAIN | 悬空 | 多数模块默认 9dB，焊跳线可调 3~15dB |
 | 板载 WS2812 状态灯 | GPIO 48 | 麦克风 SD 不能用 48，会把灯灌成白色 |
 | DHT22 / BH1750 / 土壤湿度 | 待定 | `sensors.h` 为占位，传感器到货后实现 |
