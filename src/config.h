@@ -73,12 +73,13 @@
 
 // ============================================================
 // 扬声器（MAX98357 I2S 功放，输出 TTS 音频）
-//   BCLK → GPIO13 / LRC(WS) → GPIO12 / DIN → GPIO14
+//   LRC(WS) → GPIO11 / BCLK → GPIO12 / DIN → GPIO13 / SD → GPIO14
 // 避开 PSRAM(26-37)、strapping(0/3/45/46)、麦克风(1/2/15/16/17)、状态灯(48)
 // ============================================================
 #define SPK_WS       11   // 接功放 LRC（WS）
 #define SPK_BCK      12   // 接功放 BCLK
 #define SPK_DIN      13   // 接功放 DIN
+#define SPK_SD       14   // 接功放 SD_MODE；高电平启用并选择左声道
 #define SPK_I2S_PORT I2S_NUM_1
 
 // ============================================================
