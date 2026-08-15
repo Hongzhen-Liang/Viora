@@ -1,0 +1,29 @@
+# Hi Vesper datasets and generated model artefacts
+dataset/**/*.wav
+dataset/**/*.wave
+dataset/**/*.flac
+dataset/**/*.mp3
+dataset/**/*.m4a
+dataset/**/*.ogg
+dataset/**/*.pcm
+dataset/**/recordings.jsonl
+dataset/split_manifest.csv
+dataset/legacy_import_manifest.csv
+models/*.keras
+models/*.h5
+models/*.tflite
+models/*.cc
+models/*.h
+
+# Source data and generated local artefacts.
+data/
+.cache/
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# macOS
+.DS_Store

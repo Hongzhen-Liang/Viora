@@ -1,0 +1,170 @@
+{
+  "test_files": 520,
+  "class_counts": {
+    "wake": 60,
+    "unknown": 415,
+    "noise": 45
+  },
+  "fp32_accuracy": 0.9615384615384616,
+  "int8_accuracy": 0.9615384615384616,
+  "fp32_int8_class_agreement": 1.0,
+  "fp32_int8_max_probability_delta": 0.19277161359786987,
+  "fp32_confusion_matrix": [
+    [
+      60,
+      0,
+      0
+    ],
+    [
+      3,
+      410,
+      2
+    ],
+    [
+      0,
+      15,
+      30
+    ]
+  ],
+  "int8_confusion_matrix": [
+    [
+      60,
+      0,
+      0
+    ],
+    [
+      3,
+      410,
+      2
+    ],
+    [
+      0,
+      15,
+      30
+    ]
+  ],
+  "fp32_classification": {
+    "wake": {
+      "precision": 0.9523809523809523,
+      "recall": 1.0,
+      "f1-score": 0.975609756097561,
+      "support": 60.0
+    },
+    "unknown": {
+      "precision": 0.9647058823529412,
+      "recall": 0.9879518072289156,
+      "f1-score": 0.9761904761904762,
+      "support": 415.0
+    },
+    "noise": {
+      "precision": 0.9375,
+      "recall": 0.6666666666666666,
+      "f1-score": 0.7792207792207793,
+      "support": 45.0
+    },
+    "accuracy": 0.9615384615384616,
+    "macro avg": {
+      "precision": 0.9515289449112978,
+      "recall": 0.8848728246318607,
+      "f1-score": 0.9103403371696054,
+      "support": 520.0
+    },
+    "weighted avg": {
+      "precision": 0.960929419844861,
+      "recall": 0.9615384615384616,
+      "f1-score": 0.9590780154804543,
+      "support": 520.0
+    }
+  },
+  "int8_classification": {
+    "wake": {
+      "precision": 0.9523809523809523,
+      "recall": 1.0,
+      "f1-score": 0.975609756097561,
+      "support": 60.0
+    },
+    "unknown": {
+      "precision": 0.9647058823529412,
+      "recall": 0.9879518072289156,
+      "f1-score": 0.9761904761904762,
+      "support": 415.0
+    },
+    "noise": {
+      "precision": 0.9375,
+      "recall": 0.6666666666666666,
+      "f1-score": 0.7792207792207793,
+      "support": 45.0
+    },
+    "accuracy": 0.9615384615384616,
+    "macro avg": {
+      "precision": 0.9515289449112978,
+      "recall": 0.8848728246318607,
+      "f1-score": 0.9103403371696054,
+      "support": 520.0
+    },
+    "weighted avg": {
+      "precision": 0.960929419844861,
+      "recall": 0.9615384615384616,
+      "f1-score": 0.9590780154804543,
+      "support": 520.0
+    }
+  },
+  "fp32_thresholds": [
+    {
+      "threshold": 0.9,
+      "wake_recall": 1.0,
+      "false_accept_rate": 0.0,
+      "false_accept_count": 0,
+      "negative_count": 460
+    },
+    {
+      "threshold": 0.97,
+      "wake_recall": 1.0,
+      "false_accept_rate": 0.0,
+      "false_accept_count": 0,
+      "negative_count": 460
+    }
+  ],
+  "int8_thresholds": [
+    {
+      "threshold": 0.9,
+      "wake_recall": 1.0,
+      "false_accept_rate": 0.0,
+      "false_accept_count": 0,
+      "negative_count": 460
+    },
+    {
+      "threshold": 0.97,
+      "wake_recall": 1.0,
+      "false_accept_rate": 0.0,
+      "false_accept_count": 0,
+      "negative_count": 460
+    }
+  ],
+  "input_quantization": {
+    "scale": 0.031313441693782806,
+    "zero_point": -23
+  },
+  "output_quantization": {
+    "scale": 0.00390625,
+    "zero_point": -128
+  },
+  "limitations": [
+    "6 personal human wake files are train-only; test wake positives remain TTS-only",
+    "the corpus contains zero Hi-Vesper hard negatives"
+  ],
+  "train_human_wake_files": 6,
+  "train_human_wake_diagnostic": {
+    "note": "training-set diagnostic; not an independent test metric",
+    "minimum_probability": 0.9765625,
+    "mean_probability": 0.9921875,
+    "at_or_above_0_97": 6,
+    "count": 6
+  },
+  "golden_wake_path": "/Volumes/T7_APFS/Github/ESP32Projects/PlantTalk/PlantTalkServer/wake_word_training/data/wake_word/tts/en-AU-WilliamNeural_m15_m10_329.wav",
+  "golden_wake_probabilities": [
+    0.99609375,
+    0.00390625,
+    0.0
+  ]
+}

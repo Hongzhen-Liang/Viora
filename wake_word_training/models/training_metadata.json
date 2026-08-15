@@ -1,0 +1,14 @@
+{
+  "seed": 42,
+  "epochs_requested": 40,
+  "epochs_completed": 40,
+  "parameter_count": 14715,
+  "train_files": 2485,
+  "train_source_files": 2443,
+  "train_human_wake_files": 6,
+  "human_wake_repeat": 8,
+  "train_balanced_examples_per_epoch": 5907,
+  "val_files": 517,
+  "best_val_loss": 0.03274603188037872,
+  "best_val_accuracy": 0.988394558429718
+}
