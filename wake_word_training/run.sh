@@ -52,7 +52,7 @@ Usage: ./run.sh [recording.m4a ...]
   1. edge-tts 生成唤醒词 / 普通句子 / 近音负样本（无需真人录音）
   2. （可选）导入参数指定的真人录音
   3. legacy 映射 -> speaker-safe 拆分 -> 契约测试 -> 训练 -> INT8 -> 评估
-  4. 导出固件模型，并自动替换固件 config.h 与 VioraServer/.env 的唤醒词
+  4. 导出固件模型，并自动同步固件 config.h 的唤醒词与服务端 ASR 别名
   5. AUTO_BUILD=1 时自动编译固件，AUTO_UPLOAD=1 时自动烧录
 
 可选配置见 .env.example。
@@ -168,7 +168,7 @@ echo "[7/9] 转换 full-INT8 TFLite"
 echo "[8/9] 独立测试集评估"
 "$PYTHON_BIN" -B scripts/evaluate.py --batch-size "$BATCH_SIZE"
 
-echo "[9/9] 导出固件资产并替换唤醒词"
+echo "[9/9] 导出固件资产并同步唤醒词"
 "$PYTHON_BIN" -B scripts/export_firmware_assets.py
 "$PYTHON_BIN" -B scripts/update_wake_word.py --wake-word "$WAKE_WORD"
 

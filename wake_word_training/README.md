@@ -5,8 +5,10 @@ Vesper**，`high VESS-per`）。模型、Log-Mel、DS-CNN、INT8 量化与 ESP32
 由本项目实现，不使用 Espressif WakeNet 模型。
 
 流水线已全自动：edge-tts 生成唤醒词/普通句子/近音负样本（无需真人录音），训练、
-全 INT8 转换、ESP32-S3 前端导出后，自动替换固件 `config.h` 与服务端 `.env` 的唤醒
-词，并可自动重新编译固件。设备端不再加载“你好小智”WakeNet。
+全 INT8 转换、ESP32-S3 前端导出后，自动同步固件 `config.h` 的唤醒词，并可自动重新
+编译固件。服务端不需要配置唤醒词：ESP32 在 `audio_start` 帧中声明当前唤醒词，
+服务端据此剥离 ASR 前缀（近音写法可选的写入 `VioraServer/.env`）。设备端不再加载
+“你好小智”WakeNet。
 
 ## 现有数据
 
@@ -109,7 +111,8 @@ cp .env.example .env    # 首次；修改 WAKE_WORD 换成想要的唤醒短语
 2. 可选导入真人录音：`./run.sh 录音.m4a ...`，固定进入 train 并按 `HUMAN_REPEAT`
    倍权重增强；不传参数就是纯 TTS 训练。
 3. 重建 speaker-safe 拆分、契约测试、训练、full-INT8 转换、独立测试集评估。
-4. 导出 ESP32 C++ 资产，并把新唤醒词同步到 `src/config.h` 与 `VioraServer/.env`。
+4. 导出 ESP32 C++ 资产，并把新唤醒词同步到 `src/config.h`；Whisper 近音别名
+   （如有）写入 `VioraServer/.env`。
 5. `AUTO_BUILD=1`（默认）自动 `platformio run` 编译固件；`AUTO_UPLOAD=1` 自动烧录。
 
 自定义唤醒词（如 `Hey Jarvis`）时，wake 数据写入 `data/wake_word/tts/{slug}/`，

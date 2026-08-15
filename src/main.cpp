@@ -109,12 +109,13 @@ static void enter_listening(ListenOrigin origin) {
     s_turn.prime_speech(s_listen_start_ms, BARGE_IN_VOICE_FRAMES);
   }
 
-  char start_frame[160];
+  char start_frame[256];
   snprintf(start_frame, sizeof(start_frame),
            "{\"type\":\"audio_start\",\"source\":\"%s\","
-           "\"new_conversation\":%s}",
+           "\"new_conversation\":%s,\"wake_word\":\"%s\"}",
            listen_source(origin),
-           origin == LISTEN_FROM_WAKE ? "true" : "false");
+           origin == LISTEN_FROM_WAKE ? "true" : "false",
+           WAKE_WORD);
   net_send_json(start_frame);
   if (keep_preroll) send_ring_audio();
   audio_ring_clear();

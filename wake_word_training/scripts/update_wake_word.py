@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Sync the configured wake word into firmware config.h and VioraServer/.env.
+"""Sync the trained wake word into firmware config.h and VioraServer/.env.
 
 训练出新的唤醒词模型之后调用本脚本：
 
-* src/config.h         -> 更新 `#define WAKE_WORD "..."`（固件串口提示/日志用）
-* VioraServer/.env     -> 更新 WAKE_WORD / WAKE_WORD_ALIASES（服务端剥离唤醒前缀用）
+* src/config.h         -> 更新 `#define WAKE_WORD "..."`（固件串口提示与 audio_start 帧）
+* VioraServer/.env     -> 更新 WAKE_WORD_ALIASES（Whisper 近音写法；服务端不配置唤醒词本身）
 
 固件实际检测由 export_firmware_assets.py 导出的 INT8 模型完成，字符串只是提示。
 """
@@ -75,11 +75,10 @@ def main() -> int:
             for line in lines
             if not re.match(r"^\s*(WAKE_WORD|WAKE_WORD_ALIASES)\s*=", line)
         ]
-        lines.append(f'WAKE_WORD="{wake_word}"')
         lines.append(f'WAKE_WORD_ALIASES="{aliases}"')
         env_path.parent.mkdir(parents=True, exist_ok=True)
         env_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        print(f"server .env WAKE_WORD -> {wake_word!r}  ({env_path})")
+        print(f"server .env WAKE_WORD_ALIASES -> {aliases!r}  ({env_path})")
     return 0
 
 
