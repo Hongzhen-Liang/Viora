@@ -233,7 +233,7 @@ async def synthesize(text: str) -> bytes:
 
 ## 9. 植物人设系统提示词（`persona.py` + `prompts.py`）
 
-- `persona.py`：人设正文单独维护——紫色蝴蝶兰"紫姬"（外冷内热、轻微傲娇，含说话风格、关系成长、植物状态人格化表达等），改人设只动这个文件。
+- `persona.py`：人设正文单独维护——紫色蝴蝶兰"Vesper"（外冷内热、轻微傲娇，含说话风格、关系成长、植物状态人格化表达等），改人设只动这个文件。
 - `prompts.py`：`build_system_prompt(state)` 把「人设 + 当前植物状态 + 输出格式」拼成 system 提示词，要求 LLM 只输出 JSON `{"reply","operation"}`。
 
 ```python

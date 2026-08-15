@@ -85,7 +85,7 @@ static void on_server_text(const char *type, const char *user,
                            const char *op) {
   if (strcmp(type, "text") == 0) {
     Serial.printf(">>> 你说: %s\n", user);
-    Serial.printf(">>> 紫姬: %s\n", reply);
+    Serial.printf(">>> Vesper: %s\n", reply);
     s_consec_errors = 0;   // 有正常回复，清零错误计数
     // ---- LLM 操作分发：端侧只判断 op，不关心语义 ----
     if (strcmp(op, "exit") == 0) {
