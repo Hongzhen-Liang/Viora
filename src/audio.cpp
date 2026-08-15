@@ -33,7 +33,6 @@ static float s_volume = 1.0f;
 
 // ---- 麦克风幅度诊断 ----
 static uint16_t s_capture_rms = 0;
-static uint32_t s_capture_clipped_samples = 0;
 
 void audio_set_volume(float vol) {
   if (vol < VOLUME_MIN) vol = VOLUME_MIN;
@@ -134,10 +133,8 @@ int audio_capture(int16_t *pcm, int max_frames, int16_t *peak) {
     int32_t sample = raw[2 * i] >> 14;             // 左声道（已确认数据在 L）
     if (sample > INT16_MAX) {
       sample = INT16_MAX;
-      ++s_capture_clipped_samples;
     } else if (sample < INT16_MIN) {
       sample = INT16_MIN;
-      ++s_capture_clipped_samples;
     }
     const int16_t l = static_cast<int16_t>(sample);
     pcm[i] = l;
@@ -153,8 +150,6 @@ int audio_capture(int16_t *pcm, int max_frames, int16_t *peak) {
 }
 
 uint16_t audio_capture_rms() { return s_capture_rms; }
-
-uint32_t audio_capture_clipped_samples() { return s_capture_clipped_samples; }
 
 // ============================================================
 // 唤醒/打断前置音频环形缓存

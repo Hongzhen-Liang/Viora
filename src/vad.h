@@ -9,6 +9,3 @@ void vad_observe(int16_t peak);
 
 // 该帧峰值是否超过语音阈值
 bool vad_is_voice(int16_t peak);
-
-// 当前语音阈值（诊断打印用）
-uint16_t vad_threshold();

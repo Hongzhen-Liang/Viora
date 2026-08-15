@@ -11,10 +11,8 @@ void audio_init();
 // 读一帧双声道 I2S，取左声道转 int16。返回帧数；peak 输出本帧峰值。
 int  audio_capture(int16_t *pcm, int max_frames, int16_t *peak);
 
-// 最近一帧的 RMS，以及开机以来 24-bit -> 16-bit 转换发生饱和的样本总数。
-// 用于判断麦克风增益是否过高；饱和计数持续增长时应降低前端增益。
+// 最近一帧的 RMS，用于判断麦克风增益是否过高。
 uint16_t audio_capture_rms();
-uint32_t audio_capture_clipped_samples();
 
 // ---- 唤醒/打断前置音频环形缓存 ----
 void audio_ring_push(const int16_t *src, int n);

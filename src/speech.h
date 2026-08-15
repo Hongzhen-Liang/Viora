@@ -28,18 +28,3 @@ bool speech_async_submit(const int16_t *mic, const int16_t *reference,
 
 // 非阻塞取一帧 AFE 结果。返回 false 表示当前没有新结果。
 bool speech_async_poll(int16_t *out, bool *is_speech);
-
-struct SpeechAsyncStats {
-  uint32_t submitted_frames;
-  uint32_t dropped_frames;
-  uint32_t processed_frames;
-  uint32_t last_process_us;
-  uint32_t max_process_us;
-  uint32_t last_result_ms;
-  uint32_t pending_input_frames;
-  uint32_t pending_output_frames;
-  uint32_t worker_stack_free;
-  bool reset_pending;
-};
-
-SpeechAsyncStats speech_async_stats();

@@ -45,7 +45,3 @@ void vad_observe(int16_t peak) {
 bool vad_is_voice(int16_t peak) {
   return (int)peak > (int)s_voice_threshold;
 }
-
-uint16_t vad_threshold() {
-  return s_voice_threshold;
-}

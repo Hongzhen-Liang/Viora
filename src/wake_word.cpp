@@ -378,5 +378,3 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
   if (probability != nullptr) *probability = s_last_probability;
   return detected;
 }
-
-uint32_t wake_word_last_inference_us() { return s_last_inference_us; }

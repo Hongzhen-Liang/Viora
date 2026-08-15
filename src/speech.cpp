@@ -62,7 +62,6 @@ static TaskHandle_t s_worker_task = nullptr;
 static portMUX_TYPE s_async_mux = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t s_generation = 1;
 static uint32_t s_worker_generation = 0;
-static SpeechAsyncStats s_stats = {};
 // 队列本身会复制元素；工作任务和提交端各自使用独立
 // 静态帧，避免 2–3KB 的音频结构落到 FreeRTOS 任务栈上。
 static SpeechInputFrame s_worker_input;
@@ -160,22 +159,15 @@ static void speech_worker(void *) {
       portEXIT_CRITICAL(&s_async_mux);
     }
 
-    const uint32_t started_us = micros();
     bool is_speech = false;
     const bool got = process_internal(
         s_worker_input.mic, s_worker_input.reference,
         s_worker_input.samples, s_worker_output.data, &is_speech);
-    const uint32_t elapsed_us = micros() - started_us;
 
     // reset 可能在 fetch 等待时发生。旧世代结果不允许回流到
     // 新一轮播放，否则会把上次人声误当成新的 barge-in。
     if (s_worker_input.generation != current_generation()) continue;
 
-    portENTER_CRITICAL(&s_async_mux);
-    ++s_stats.processed_frames;
-    s_stats.last_process_us = elapsed_us;
-    if (elapsed_us > s_stats.max_process_us) s_stats.max_process_us = elapsed_us;
-    portEXIT_CRITICAL(&s_async_mux);
     if (!got) continue;
 
     s_worker_output.generation = s_worker_input.generation;
@@ -184,9 +176,6 @@ static void speech_worker(void *) {
       xQueueReceive(s_output_queue, &s_discarded_output, 0);
       xQueueSend(s_output_queue, &s_worker_output, 0);
     }
-    portENTER_CRITICAL(&s_async_mux);
-    s_stats.last_result_ms = millis();
-    portEXIT_CRITICAL(&s_async_mux);
   }
 }
 
@@ -264,7 +253,6 @@ void speech_async_reset() {
   portENTER_CRITICAL(&s_async_mux);
   ++s_generation;
   if (s_generation == 0) ++s_generation;
-  memset(&s_stats, 0, sizeof(s_stats));
   portEXIT_CRITICAL(&s_async_mux);
   xQueueReset(s_input_queue);
   xQueueReset(s_output_queue);
@@ -281,16 +269,10 @@ bool speech_async_submit(const int16_t *mic, const int16_t *reference,
   memcpy(s_submit_frame.mic, mic, samples * sizeof(int16_t));
   memcpy(s_submit_frame.reference, reference, samples * sizeof(int16_t));
 
-  bool dropped = false;
   if (xQueueSend(s_input_queue, &s_submit_frame, 0) != pdTRUE) {
     xQueueReceive(s_input_queue, &s_discarded_input, 0);
-    dropped = true;
     if (xQueueSend(s_input_queue, &s_submit_frame, 0) != pdTRUE) return false;
   }
-  portENTER_CRITICAL(&s_async_mux);
-  ++s_stats.submitted_frames;
-  if (dropped) ++s_stats.dropped_frames;
-  portEXIT_CRITICAL(&s_async_mux);
   return true;
 }
 
@@ -306,20 +288,4 @@ bool speech_async_poll(int16_t *out, bool *is_speech) {
     return true;
   }
   return false;
-}
-
-SpeechAsyncStats speech_async_stats() {
-  portENTER_CRITICAL(&s_async_mux);
-  SpeechAsyncStats stats = s_stats;
-  const uint32_t generation = s_generation;
-  const uint32_t worker_generation = s_worker_generation;
-  portEXIT_CRITICAL(&s_async_mux);
-  stats.pending_input_frames =
-      s_input_queue ? uxQueueMessagesWaiting(s_input_queue) : 0;
-  stats.pending_output_frames =
-      s_output_queue ? uxQueueMessagesWaiting(s_output_queue) : 0;
-  stats.worker_stack_free =
-      s_worker_task ? uxTaskGetStackHighWaterMark(s_worker_task) : 0;
-  stats.reset_pending = generation != worker_generation;
-  return stats;
 }

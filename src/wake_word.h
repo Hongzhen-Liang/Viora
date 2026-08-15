@@ -14,6 +14,3 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
 
 // Drop all live frontend history and temporal evidence state.
 void wake_word_reset();
-
-// Last measured model invocation time, for device diagnostics.
-uint32_t wake_word_last_inference_us();

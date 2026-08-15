@@ -33,7 +33,6 @@ static TurnDetector s_turn(kTurnConfig);
 static uint32_t s_listen_start_ms = 0;
 static uint32_t s_preroll_ms = 0;
 static int32_t s_rec_max_vol = 0;
-static uint32_t s_last_listen_diag_ms = 0;
 static bool s_live_voice_seen = false;
 static uint32_t s_uploaded_bytes = 0;
 static uint32_t s_upload_failed_bytes = 0;
@@ -44,7 +43,6 @@ static int s_consec_errors = 0;
 // 播放中 AEC/VAD 打断状态。
 static bool s_accept_tts_audio = false;
 static uint32_t s_playback_start_ms = 0;
-static uint32_t s_last_play_diag_ms = 0;
 static uint32_t s_tts_received_bytes = 0;
 static uint16_t s_barge_voice_frames = 0;
 
@@ -98,7 +96,6 @@ static void enter_listening(ListenOrigin origin) {
   s_uploaded_bytes = 0;
   s_upload_failed_bytes = 0;
   s_listen_start_ms = millis();
-  s_last_listen_diag_ms = s_listen_start_ms;
   s_live_voice_seen = false;
   const uint32_t guard_ms =
       origin == LISTEN_FROM_FOLLOWUP ? FOLLOWUP_GUARD_MS : 0;
@@ -251,7 +248,6 @@ static void on_server_text(const char *type, const char *user,
     s_state = ST_PLAYING;
     s_accept_tts_audio = true;
     s_playback_start_ms = millis();
-    s_last_play_diag_ms = s_playback_start_ms;
     s_tts_received_bytes = 0;
     s_barge_voice_frames = 0;
     speech_async_reset();
@@ -354,59 +350,6 @@ void loop() {
   const bool woken =
       wake_word_process(pcm, frames, kws_enabled, &wake_probability);
 
-  // KWS 实时诊断：audio_ms 应与 wall_ms 基本同步。
-  static bool kws_diag_armed = false;
-  static uint32_t kws_diag_start_ms = 0;
-  static uint32_t kws_diag_last_ms = 0;
-  static uint64_t kws_diag_samples = 0;
-  static float kws_diag_max_probability = 0.0f;
-  static int16_t kws_diag_max_peak = 0;
-  static uint16_t kws_diag_max_rms = 0;
-  static uint32_t kws_diag_clip_start = 0;
-  if (kws_enabled) {
-    const uint32_t now = millis();
-    if (!kws_diag_armed) {
-      kws_diag_armed = true;
-      kws_diag_start_ms = now;
-      kws_diag_last_ms = now;
-      kws_diag_samples = 0;
-      kws_diag_max_probability = 0.0f;
-      kws_diag_max_peak = 0;
-      kws_diag_max_rms = 0;
-      kws_diag_clip_start = audio_capture_clipped_samples();
-    }
-    kws_diag_samples += frames;
-    if (wake_probability > kws_diag_max_probability)
-      kws_diag_max_probability = wake_probability;
-    if (vol_l > kws_diag_max_peak) kws_diag_max_peak = vol_l;
-    const uint16_t frame_rms = audio_capture_rms();
-    if (frame_rms > kws_diag_max_rms) kws_diag_max_rms = frame_rms;
-    if (now - kws_diag_last_ms >= 5000) {
-      const uint32_t wall_ms = now - kws_diag_start_ms;
-      const uint32_t audio_ms = static_cast<uint32_t>(
-          kws_diag_samples * 1000ULL / SR_SAMPLE_RATE);
-      const int32_t lag_ms = static_cast<int32_t>(wall_ms) -
-                             static_cast<int32_t>(audio_ms);
-      const uint32_t clipped =
-          audio_capture_clipped_samples() - kws_diag_clip_start;
-      Serial.printf(
-          "[KWS-DIAG] wall=%lums audio=%lums lag=%ldms peak=%d rms=%u "
-          "clip=%lu wake_max=%.4f infer=%luus\n",
-          static_cast<unsigned long>(wall_ms),
-          static_cast<unsigned long>(audio_ms), static_cast<long>(lag_ms),
-          static_cast<int>(kws_diag_max_peak),
-          static_cast<unsigned>(kws_diag_max_rms),
-          static_cast<unsigned long>(clipped), kws_diag_max_probability,
-          static_cast<unsigned long>(wake_word_last_inference_us()));
-      kws_diag_last_ms = now;
-      kws_diag_max_probability = wake_probability;
-      kws_diag_max_peak = vol_l;
-      kws_diag_max_rms = frame_rms;
-    }
-  } else {
-    kws_diag_armed = false;
-  }
-
   // 播放时将麦克风与扬声器参考非阻塞地提交给独立
   // AFE 工作任务。主循环只轮询已完成的结果，所以即使
   // esp-sr fetch 卡住，WebSocket/TTS/Ping-Pong 仍会继续运行。
@@ -456,30 +399,6 @@ void loop() {
   const bool turn_speech = neural_speech || energy_speech;
 
   audio_play_drain();
-  if (s_state == ST_PLAYING && millis() - s_last_play_diag_ms >= 2000) {
-    s_last_play_diag_ms = millis();
-    const SpeechAsyncStats stats = speech_async_stats();
-    const uint32_t buffered_bytes = audio_play_buffered_bytes();
-    const uint32_t result_age_ms =
-        stats.last_result_ms == 0 ? 0 : millis() - stats.last_result_ms;
-    Serial.printf(
-        "[PLAY-DIAG] TTS=%luB 待播=%luB/%lums "
-        "AFE=提交%lu 完成%lu 丢帧%lu 队列=%lu/%lu "
-        "最近=%lums 单帧=%luus max=%luus stack_free=%lu reset=%d\n",
-        static_cast<unsigned long>(s_tts_received_bytes),
-        static_cast<unsigned long>(buffered_bytes),
-        static_cast<unsigned long>(buffered_bytes * 1000ULL / 32000),
-        static_cast<unsigned long>(stats.submitted_frames),
-        static_cast<unsigned long>(stats.processed_frames),
-        static_cast<unsigned long>(stats.dropped_frames),
-        static_cast<unsigned long>(stats.pending_input_frames),
-        static_cast<unsigned long>(stats.pending_output_frames),
-        static_cast<unsigned long>(result_age_ms),
-        static_cast<unsigned long>(stats.last_process_us),
-        static_cast<unsigned long>(stats.max_process_us),
-        static_cast<unsigned long>(stats.worker_stack_free),
-        stats.reset_pending ? 1 : 0);
-  }
   if (s_state == ST_PLAYING && audio_playback_finished()) {
     s_accept_tts_audio = false;
     audio_ring_clear();
@@ -519,16 +438,6 @@ void loop() {
             neural_speech ? 1 : 0, energy_speech ? 1 : 0,
             static_cast<int>(vol_l),
             static_cast<unsigned>(audio_capture_rms()));
-      }
-      if (!s_live_voice_seen && now - s_last_listen_diag_ms >= 2000) {
-        Serial.printf(
-            "[LISTEN-DIAG] afe_fresh=%d neural=%d energy=%d peak=%d "
-            "rms=%u threshold=%u\n",
-            have_afe ? 1 : 0, neural_speech ? 1 : 0,
-            energy_speech ? 1 : 0, static_cast<int>(vol_l),
-            static_cast<unsigned>(audio_capture_rms()),
-            static_cast<unsigned>(vad_threshold()));
-        s_last_listen_diag_ms = now;
       }
       const TurnEvent event = s_turn.update(now, turn_speech);
       if (event == TURN_EVENT_SPEECH_STARTED) {
