@@ -29,7 +29,7 @@ static int16_t s_play_reference[512] = {};
 static int     s_play_reference_frames = 0;
 
 // ---- 播放音量（LLM operation: volume_up / volume_down）----
-static float s_volume = 1.0f;
+static float s_volume = VOLUME_DEFAULT;
 
 // ---- 麦克风幅度诊断 ----
 static uint16_t s_capture_rms = 0;
@@ -77,11 +77,6 @@ static void init_i2s_mic() {
 // 扬声器 I2S（TX，输出 TTS 音频到 MAX98357）
 // ============================================================
 static void init_i2s_speaker() {
-  // MAX98357A 的 SD_MODE 悬空时状态不可靠。初始化期间先保持关断，
-  // 等 BCLK/LRCLK/DIN 均配置完成后再拉高，启用与当前输出匹配的左声道。
-  pinMode(SPK_SD, OUTPUT);
-  digitalWrite(SPK_SD, LOW);
-
   i2s_config_t cfg = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
     .sample_rate = SR_SAMPLE_RATE,
@@ -103,10 +98,8 @@ static void init_i2s_speaker() {
   };
   ESP_ERROR_CHECK(i2s_driver_install(SPK_I2S_PORT, &cfg, 0, nullptr));
   ESP_ERROR_CHECK(i2s_set_pin(SPK_I2S_PORT, &pins));
-  digitalWrite(SPK_SD, HIGH);
-  Serial.printf(
-      "[I2S] 扬声器初始化完成, BCK=%d WS=%d DIN=%d SD=%d(HIGH) @%dHz\n",
-      SPK_BCK, SPK_WS, SPK_DIN, SPK_SD, SR_SAMPLE_RATE);
+  Serial.printf("[I2S] 扬声器初始化完成, BCK=%d WS=%d DIN=%d @%dHz\n",
+                SPK_BCK, SPK_WS, SPK_DIN, SR_SAMPLE_RATE);
 }
 
 void audio_init() {
@@ -256,7 +249,13 @@ void audio_play_drain() {
     }
     s_play_reference_frames = reference_frames;
     size_t written = 0;
-    i2s_write(SPK_I2S_PORT, buf, chunk, &written, portMAX_DELAY);
+    const esp_err_t err =
+        i2s_write(SPK_I2S_PORT, buf, chunk, &written, portMAX_DELAY);
+    if (err != ESP_OK || written != chunk) {
+      Serial.printf("[I2S] 播放写入异常 err=%s written=%u/%u\n",
+                    esp_err_to_name(err), static_cast<unsigned>(written),
+                    static_cast<unsigned>(chunk));
+    }
     s_last_play_write_ms = millis();
   } else {
     // 上一块已经覆盖了刚完成的采音窗口；下一窗口应使用静音参考。
