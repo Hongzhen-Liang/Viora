@@ -24,8 +24,8 @@
 // ============================================================
 #define I2S_SCK  15
 #define I2S_WS   16
-#define I2S_SD   12
-#define MIC_VDD  13   // 输出高电平 ≈3.3V，给麦克风 VDD 供电（~1.4mA，安全）
+#define I2S_SD   20
+#define MIC_VDD  19   // 输出高电平 ≈3.3V，给麦克风 VDD 供电（~1.4mA，安全）
 #define MIC_LR   17   // 输出低电平 → 左声道（模块 L/R 接这里）
 #define I2S_PORT I2S_NUM_0
 

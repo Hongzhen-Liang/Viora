@@ -46,19 +46,22 @@ sequenceDiagram
 | 温湿度 | DHT22 / SHT30 | I2C 或单总线 |
 | 光照 | BH1750 或光敏电阻 | I2C / ADC |
 
-### 推荐引脚连接（以 ESP32-S3 为例）
+### 实际引脚连接（与 `src/config.h` 一致）
 
 | 外设 | 引脚 | 说明 |
 |------|------|------|
-| INMP441 SCK | GPIO 4 | I2S BCLK |
-| INMP441 WS | GPIO 5 | I2S LRCK |
-| INMP441 SD | GPIO 6 | I2S DIN |
-| MAX98357A BCLK | GPIO 15 | I2S BCLK |
-| MAX98357A LRC | GPIO 16 | I2S LRCK |
-| MAX98357A DIN | GPIO 17 | I2S DOUT |
-| DHT22 DATA | GPIO 8 | 单总线 |
-| BH1750 SDA/SCL | GPIO 11 / 12 | I2C |
-| 土壤湿度 AO | GPIO 2 | ADC |
+| 麦克风 SD（数据） | GPIO 20 | MSM3526 / INMP441 I2S 数据 |
+| 麦克风 SCK（位时钟） | GPIO 15 | I2S BCLK |
+| 麦克风 WS（左右时钟） | GPIO 16 | I2S LRCK |
+| 麦克风 VDD | GPIO 19 | 软件输出 3.3V 供电（约 1.4mA） |
+| 麦克风 L/R | GPIO 17 | 输出低电平 = 左声道 |
+| MAX98357 VIN | 5V | 功放供电（2.5~5.5V，5V 更响） |
+| MAX98357 BCLK | GPIO 4 | I2S 位时钟 |
+| MAX98357 LRC | GPIO 5 | I2S 左右时钟（WS） |
+| MAX98357 DIN | GPIO 6 | I2S 音频数据 |
+| MAX98357 GAIN | 悬空 | 多数模块默认 9dB，焊跳线可调 3~15dB |
+| 板载 WS2812 状态灯 | GPIO 48 | 若板子在 GPIO38 改 `config.h` |
+| DHT22 / BH1750 / 土壤湿度 | 待定 | `sensors.h` 为占位，传感器到货后实现 |
 
 > 引脚可按实际板子调整，只需在 `config.h` 里改。
 
