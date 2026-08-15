@@ -3,6 +3,7 @@
 // ============================================================
 #include <Arduino.h>
 #include <WiFi.h>
+#include <esp_wifi.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
 
@@ -13,6 +14,13 @@
 static WebSocketsClient s_ws;
 static bool s_ws_connected = false;
 static NetCallbacks s_cb = {};
+
+// links2004/WebSockets 的同步客户端每次 loop() 最多只解析一个完整 WS 帧。
+// 服务端在 tts_start 后会快速下发约 1.2s 预缓冲（当前为 10 个 4096B
+// 二进制帧）；若每个 32ms 采音周期只调用一次 loop()，音频帧会挡住后面的
+// Pong/tts_end，最终同时造成播放欠载和心跳误断。一次泵完控制帧 + 整批
+// 预缓冲，后续流也能及时进入 1.5MB 的端侧播放环形缓冲。
+static constexpr uint8_t WS_LOOP_PUMP_PASSES = 12;
 
 // WiFi 重连
 static uint32_t s_wifi_retry_ms = 0;
@@ -128,7 +136,9 @@ static void start_websocket() {
   }
   s_ws.begin(SERVER_HOST, SERVER_PORT, SERVER_PATH);
   s_ws.setReconnectInterval(3000);
-  s_ws.enableHeartbeat(15000, 3000, 2);  // 15s ping / 3s 超时 / 连续 2 次判死
+  // 心跳放宽：长 TTS 流播放期间偶尔的收包停顿不应直接判死断连。
+  // 15s ping / 10s 超时 / 连续 4 次才断开（约 40s 无 pong）。
+  s_ws.enableHeartbeat(15000, 10000, 4);
   if (SERVER_API_KEY[0] != '\0') {
     static char s_api_headers[160];
     // 注意：库在 extraHeaders 后会自己追加换行，这里不能再带 \r\n，
@@ -160,6 +170,9 @@ void net_loop() {
     s_wifi_cand = -1;
     if (!s_wifi_online) {
       s_wifi_online = true;
+      // 关闭 WiFi 省电：调制解调器睡眠会在长 TTS 流接收时造成
+      // 周期性的收包停顿，表现为播放欠载甚至心跳误判断连。
+      esp_wifi_set_ps(WIFI_PS_NONE);
       Serial.printf("[WiFi] 已连接! IP: %s DNS: %s\n",
                     WiFi.localIP().toString().c_str(),
                     WiFi.dnsIP(0).toString().c_str());
@@ -186,7 +199,12 @@ void net_loop() {
     }
   }
 
-  s_ws.loop();   // WebSocket 收发（必须频繁调用）
+  // 该库一次 loop() 只消费一帧，不能只按主采音循环（约 32ms）调用一次。
+  // 多次空轮询成本很低；有积压时则可一次清掉服务端的 TTS 预缓冲批次，
+  // 也避免 Pong 长时间排在 PCM 后面被客户端自己的心跳误判超时。
+  for (uint8_t i = 0; i < WS_LOOP_PUMP_PASSES; ++i) {
+    s_ws.loop();
+  }
 }
 
 bool net_connected() {
