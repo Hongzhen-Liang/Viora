@@ -165,15 +165,11 @@ int audio_capture(int16_t *pcm, int max_frames, int16_t *peak) {
   int32_t vol = 0;
   uint64_t square_sum = 0;
   for (int i = 0; i < frames; i++) {
-    // 麦克风的 24-bit 二补码样本位于 32-bit I2S slot 高位。右移 14 位
-    // 保留原有的约 4x 数字增益，但必须显式饱和；直接强转 int16 会在
-    // 大声说话或背景音乐较响时回绕，产生比普通削波更严重的频谱失真。
-    int32_t sample = raw[2 * i] >> 14;             // 左声道（已确认数据在 L）
-    if (sample > INT16_MAX) {
-      sample = INT16_MAX;
-    } else if (sample < INT16_MIN) {
-      sample = INT16_MIN;
-    }
+    // 麦克风的 24-bit 二补码样本位于 32-bit I2S slot 高位。直接取高
+    // 16 bit；旧实现右移 14 位等于额外放大 4 倍，真人近讲时大量样本
+    // 被压到 +/-32767，削波后的谐波会显著拉低 KWS 分数。Log-Mel 在
+    // 每个窗口内会做均值/方差归一化，不需要用数字增益换灵敏度。
+    const int32_t sample = raw[2 * i] >> 16;        // 左声道（已确认数据在 L）
     const int16_t l = static_cast<int16_t>(sample);
     pcm[i] = l;
     const int32_t al = sample < 0 ? -sample : sample;

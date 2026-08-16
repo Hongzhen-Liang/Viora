@@ -25,18 +25,20 @@ constexpr int kSpectrumBins = kFftLength / 2 + 1;
 constexpr int kMelBins = 40;
 constexpr int kFeatureFrames = 148;
 constexpr int kFeatureValues = kFeatureFrames * kMelBins;
-// One inference takes about 49-59 ms on this ESP32-S3. A 100 ms cadence keeps
-// one core near 50% even while idle and makes the module unnecessarily hot.
-// A 150 ms cadence still gives several overlapping 1.5 s windows per wake-word
-// utterance while cutting steady-state KWS compute and heat by about one third.
-constexpr int kInferenceFrameStride = 15;  // 150 ms at a 10 ms feature hop.
+// One inference takes about 49-60 ms on this ESP32-S3. Use a 100 ms cadence so
+// short probability peaks are not skipped between two 1.5 s windows. The
+// measured 46-51 C operating range leaves enough thermal headroom, while the
+// extra overlap materially improves casual/quiet wake-word recall.
+constexpr int kInferenceFrameStride = 10;  // 100 ms at a 10 ms feature hop.
 // 真人语音实测分两档：清晰发音单窗可冲到 0.93~0.98（直通兑住）；随意或连续
 // 重复说时是 0.30~0.70 的平台，轻一些的重复尝试常见“双峰”形态（两个
 // 0.62~0.65 的峰夹着 0.30 左右的谷，单峰下 4 窗内只有 2 窗过 0.40）。
-// 门限据此按实机数据校准：最近 4 个推理窗中至少 2 个 p >= 0.40 且峰值
+// 门限据此按实机数据校准：最近 4 个 100ms 推理窗中至少 2 个 p >= 0.40 且峰值
 // p >= 0.60；任一窗口 p >= 0.95 直接触发（同时缩短 100~200ms 触发延迟）。
-// 证据路径额外要求最近约 512ms 麦克风峰值达到 kEnergyGatePeak（实测静音
-// 峰值 <240），防止纯静音/底噪在低门限下误触。
+// 证据路径额外要求当前 1.5s 模型窗口内的麦克风峰值达到
+// kEnergyGatePeak（旧标度实测静音峰值 <240，换算到高 16 bit 后 <60），
+// 防止纯静音/底噪在低门限下误触。能量窗与模型窗对齐，避免概率峰滞后于
+// 发音时，较短的能量历史已经把有效语音丢掉。
 // 音乐/电视误触风险靠 0.95 直通高门限、双窗宽证据与 2.5s 冷却兑底；
 // 继续用 cand 日志观察实机误触率后再定。
 constexpr float kEvidenceThreshold = 0.40f;
@@ -45,11 +47,11 @@ constexpr float kDirectTriggerThreshold = 0.95f;
 constexpr int kEvidenceWindow = 4;
 constexpr int kEvidenceRequiredHits = 2;
 constexpr uint32_t kCooldownMs = 2500;
-// 证据路径的麦克风能量门：最近 16 个 32ms 采集块（≈512ms）内的峰值。
-constexpr int kEnergyHistoryChunks = 16;
-constexpr int16_t kEnergyGatePeak = 400;
+// 证据路径的麦克风能量门：最近 48 个 32ms 采集块（≈1.536s）内的峰值。
+constexpr int kEnergyHistoryChunks = 48;
+constexpr int16_t kEnergyGatePeak = 100;
 // 重武装诊断：记录重新武装后前 16 个 32ms 块（≈512ms）的麦克风峰值，用于
-// 验证“TTS 尾音/房间混响是否污染重武装后的首个特征窗”（静音基线 <240）。
+// 验证“TTS 尾音/房间混响是否污染重武装后的首个特征窗”（静音基线 <60）。
 constexpr int kArmHeadChunks = 16;
 // 候选分数诊断：打印所有 p >= 0.25 的滑窗，用于实机收集真人/噪声分数分布；
 // 收集够数据后可把 kDebugLogCandidates 置为 false 关闭。

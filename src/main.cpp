@@ -116,7 +116,7 @@ static void enter_listening(ListenOrigin origin) {
       origin == LISTEN_FROM_FOLLOWUP ? FOLLOWUP_GUARD_MS : 0;
   s_turn.reset(s_listen_start_ms, guard_ms);
   if (origin == LISTEN_FROM_WAKE) {
-    // KWS 的 3/4 窗口证据会带来数百毫秒确认延迟；用户若把问题紧跟在
+    // KWS 的多窗口证据会带来数百毫秒确认延迟；用户若把问题紧跟在
     // 唤醒词后面，问题可能已经全部落在前置音频中。把唤醒视为本轮已有
     // 最小语音证据，随后静音即可提交前置音频，而不是空等 15 秒。
     s_turn.prime_speech(s_listen_start_ms, MIN_VOICE_FRAMES);
@@ -353,8 +353,10 @@ void setup() {
 void loop() {
   net_loop();
 
-  // 只有纯待唤醒阶段允许 modem sleep；流式录放音保持全性能。
-  net_set_idle_power_save(s_state == ST_IDLE && net_connected());
+  // 默认保持 WiFi 全性能，避免待唤醒阶段的 modem sleep 令 WebSocket
+  // 断线，从用户视角表现为“叫了没反应”。电池供电场景可在 config.h 开启。
+  net_set_idle_power_save(ENABLE_IDLE_WIFI_POWER_SAVE &&
+                          s_state == ST_IDLE && net_connected());
 
   LedMode led_mode;
   if (net_provisioning_active()) led_mode = LED_MODE_PROVISIONING;
@@ -393,10 +395,12 @@ void loop() {
   // 极低内存等异常情况下若播放任务创建失败，仍保留主循环兜底。
   if (!audio_play_task_running()) audio_play_drain();
 
-  // 待唤醒时持续保留最后 900ms；命中帧也会在 enter_listening 前入环。
-  if (s_state == ST_IDLE && net_connected()) audio_ring_push(pcm, frames);
+  // 待唤醒时持续保留最后 900ms；网络短暂抖动也不停止本地 KWS，避免
+  // 每次 WS 重连后重新填充 1.5s 特征窗形成盲区。离线命中时
+  // enter_listening() 会给出明确日志并安全留在 IDLE。
+  if (s_state == ST_IDLE) audio_ring_push(pcm, frames);
 
-  const bool kws_enabled = s_state == ST_IDLE && net_connected();
+  const bool kws_enabled = s_state == ST_IDLE;
   float wake_probability = 0.0f;
   const bool woken =
       wake_word_process(pcm, frames, kws_enabled, &wake_probability);

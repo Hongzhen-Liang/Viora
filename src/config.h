@@ -12,8 +12,9 @@
 // ============================================================
 #define WAKE_WORD "Hi Vesper"
 // 唤醒轮提交前，整段录音（含 900ms 前置）的峰值低于此值视为“没人说话”，
-// 不提交也不上传，继续聆听等待。实测静音峰值 <240，正常说话 >1000。
-#define WAKE_MIN_SPEAK_PEAK 600
+// 不提交也不上传，继续聆听等待。按原始实机日志换算，取 I2S 高 16 bit 后
+// 静音峰值预期 <60，正常说话通常 >250。
+#define WAKE_MIN_SPEAK_PEAK 150
 
 // ============================================================
 // 引脚定义（MSM3526 / INMP441，I2S 数字 MEMS 麦克风）
@@ -71,6 +72,10 @@
 #define WIFI_ATTEMPT_MS   8000           // 每个候选 WiFi 的尝试时长
 #define PROV_MAX_NETWORKS 4              // NVS 最多保存的 WiFi 数量
 
+// 待唤醒也保持 WiFi 全性能。实机日志显示 modem sleep 打开后 WebSocket
+// 会间歇断线，而 KWS 只在服务器在线时可进入对话；稳定连接比这点功耗更重要。
+#define ENABLE_IDLE_WIFI_POWER_SAVE 0
+
 // ============================================================
 // 扬声器（MAX98357 I2S 功放，输出 TTS 音频）
 //   LRC(WS) → GPIO11 / BCLK → GPIO12 / DIN → GPIO13
@@ -85,10 +90,10 @@
 // ============================================================
 // 录音 VAD 参数（神经 VAD 负责判定；能量阈值仅用于诊断）
 // ============================================================
-#define VOICE_THRESHOLD_DEFAULT 400   // 校准前的兜底阈值
-#define VOICE_THRESHOLD_MIN     500   // 自适应阈值下限（高于环境噪声尖峰~265）
-#define VOICE_THRESHOLD_MAX     2500  // 自适应阈值上限
-#define VOICE_RMS_MIN           220   // 能量兜底还需满足 RMS，过滤点击/单点尖峰
+#define VOICE_THRESHOLD_DEFAULT 100   // 校准前的兜底阈值
+#define VOICE_THRESHOLD_MIN     125   // 自适应阈值下限（高于环境噪声尖峰~65）
+#define VOICE_THRESHOLD_MAX     625   // 自适应阈值上限
+#define VOICE_RMS_MIN           55    // 能量兜底还需满足 RMS，过滤点击/单点尖峰
 // 自然断句参数：短回答多等一会儿；正常句约 0.65 秒静音即回复；
 // 用户曾在句内停顿后继续说时，会自动学习其节奏并放宽，最多 1.8 秒。
 #define VAD_FRAME_MS              32
