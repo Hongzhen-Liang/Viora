@@ -29,31 +29,46 @@ constexpr int kFeatureValues = kFeatureFrames * kMelBins;
 // measured 46-51 C operating range leaves enough thermal headroom, while the
 // extra overlap materially improves casual/quiet wake-word recall.
 constexpr int kInferenceFrameStride = 10;  // 100 ms at a 10 ms feature hop.
-// 真人语音实测分两档：清晰发音单窗可冲到 0.81~0.98（直通/强单窗兜住）；
-// 随意或连续重复说时是 0.30~0.68 的平台，轻一些的重复尝试常见“双峰”形态。
-// 触发策略 v4（按两轮实机分数分布校准）：
+// 真人语音实测分三档：清晰/近距离发音单窗可冲到 0.75~0.98；正常距离
+// 发音平台 0.30~0.56；大声喊反而更低（0.25~0.38，喊叫改变频谱形态）。
+// 特征在每个 1.5s 窗内做均值/方差归一化，模型对恒定增益不敏感——
+// 数字调大麦克风增益不会抬高远场分数，真正掉分的是距离带来的信噪比
+// 与房间混响。阈值只能迁就，根治要靠真人实距离录音重训（见
+// wake_word_training/README：现有 wake 数据 365 条 TTS + 仅 6 条真人）。
+// 触发策略 v7（用户要求继续放宽，待扬声器回放测试后用实测分数再校准）：
 //  - 直通：任一窗口 p >= 0.95 直接触发（不需要能量门，几乎只出现在真唤醒词）；
-//  - 强单窗：任一窗口 p >= 0.65 且能量门通过即触发（接住单峰型发音，
-//    如 0.8125 / 0.7266 / 0.8477，以及 0.6758 这类略弱的单峰）；
-//  - 较宽证据：最近 8 个 100ms 窗（≈800ms）中至少 2 个 p >= 0.45 且峰值
-//    p >= 0.55（实机复测中两次没叫醒都是“4~5 窗过 0.45 但峰值只有
-//    0.5625 / 0.5898”，卡在旧峰值门 0.60 上；0.30 以下的弱尝试仍不触发）；
+//  - 强单窗：任一窗口 p >= 0.50 且能量门通过即触发（单峰型清晰发音）；
+//  - 较宽证据：最近 12 个 100ms 窗（≈1.2s）中至少 2 个 p >= 0.35 且峰值
+//    p >= 0.45（接住远场低分平台）；
+//  - 响度兜底档：任一窗口 p >= 0.25 且最近 1.5s 麦克风峰值 >= 200 直接
+//    触发。实测安静底噪峰值 23~132、说话 453~905，能量维度能把“远场
+//    低分说话”和“安静底噪里的低分噪声窗”分开；代价是放电视/音乐时
+//    若音乐窗也过 0.25 会误醒，属临时兜底，重训模型后应移除；
 //  - 能量门：强单窗与宽证据都要求当前 1.5s 模型窗内麦克风峰值达到
-//    kEnergyGatePeak（静音实测 23~132，真人说话 795~3651），
-//    防止纯静音/底噪在低门限下误触。能量窗与模型窗对齐，避免概率峰滞后
-//    于发音时较短的能量历史已经把有效语音丢掉。
-// 音乐/电视误触风险靠 0.95/0.65 直通与证据双门限、能量门与 2.5s 冷却兜底；
-// 继续用 cand 日志观察实机误触率后再定。
-constexpr float kEvidenceThreshold = 0.45f;
-constexpr float kEvidencePeakThreshold = 0.55f;
-constexpr float kStrongWindowThreshold = 0.65f;
+//    kEnergyGatePeak。2026-08-16 实测：设备放到合适距离后，播放能量
+//    峰值仅 94~140，而模型分数高达 0.50~0.92 —— 旧门限 100 把全部
+//    触发栏掉（连续 11 次“证据满足但能量过低”）。静音噪声分数从未
+//    超过 0.30，p 门已经能把底噪拦住，能量门降为 60 只充当最后一道
+//    防线（VAD 噪声底 10~13，安静瞬态 ≤132）。
+// 误触风险靠 0.95 直通、双命中证据、2.5s 冷却兜底；
+// cand 日志带 energy 字段，若开始误醒把日志发回再收紧。
+constexpr float kEvidenceThreshold = 0.35f;
+constexpr float kEvidencePeakThreshold = 0.45f;
+constexpr float kStrongWindowThreshold = 0.50f;
+// 响度兜底档（v6/v7）：远场真实语音分数低（0.25~0.38），与安静底噪分数
+// （0.25~0.30）重叠，只能靠能量维度分开：安静底噪峰值 23~132，
+// 实测说话 453~905。临时兜底，真人实距离录音重训后应移除。
+constexpr float kLoudWindowThreshold = 0.25f;
+constexpr int16_t kLoudEnergyGate = 200;
 constexpr float kDirectTriggerThreshold = 0.95f;
-constexpr int kEvidenceWindow = 8;
+constexpr int kEvidenceWindow = 12;
 constexpr int kEvidenceRequiredHits = 2;
 constexpr uint32_t kCooldownMs = 2500;
-// 证据路径的麦克风能量门：最近 48 个 32ms 采集块（≈1.536s）内的峰值。
+// 证据/强单窗路径的麦克风能量门：最近 48 个 32ms 采集块（≈1.536s）内的峰值。
+// v8 下调到 60：合适距离下播放能量峰值实测 94~140（分数 0.50~0.92 全部被
+// 旧门限 100 拦住）；安静底噪瞬态 ≤132 但底噪分数从未过 0.30，p 门足够。
 constexpr int kEnergyHistoryChunks = 48;
-constexpr int16_t kEnergyGatePeak = 100;
+constexpr int16_t kEnergyGatePeak = 60;
 // 重武装诊断：记录重新武装后前 16 个 32ms 块（≈512ms）的麦克风峰值，用于
 // 验证“TTS 尾音/房间混响是否污染重武装后的首个特征窗”（静音基线 <60）。
 constexpr int kArmHeadChunks = 16;
@@ -482,15 +497,18 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
           continue;
         }
         const float current = probabilities[0];
+        const int16_t energy_peak = recent_chunk_peak();
         if (kDebugLogCandidates && current >= kDebugLogFloor) {
           if (s_first_window_after_arm) {
             Serial.printf(
-                "[KWS] cand p=%.4f head_peak=%d, inference=%lu us\n",
+                "[KWS] cand p=%.4f head_peak=%d energy=%d, inference=%lu us\n",
                 current, static_cast<int>(s_arm_head_peak),
+                static_cast<int>(energy_peak),
                 static_cast<unsigned long>(s_last_inference_us));
             s_first_window_after_arm = false;
           } else {
-            Serial.printf("[KWS] cand p=%.4f, inference=%lu us\n", current,
+            Serial.printf("[KWS] cand p=%.4f energy=%d, inference=%lu us\n",
+                          current, static_cast<int>(energy_peak),
                           static_cast<unsigned long>(s_last_inference_us));
           }
         }
@@ -500,16 +518,19 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
                                                       &evidence_peak);
         const bool direct = current >= kDirectTriggerThreshold;
         const bool strong = current >= kStrongWindowThreshold;
-        const int16_t energy_peak = recent_chunk_peak();
-        if (direct || ((strong || detected) && energy_peak >= kEnergyGatePeak)) {
+        const bool loud = current >= kLoudWindowThreshold &&
+                          energy_peak >= kLoudEnergyGate;
+        if (direct || ((strong || detected) && energy_peak >= kEnergyGatePeak) ||
+            loud) {
           s_cooldown_until_ms = now + kCooldownMs;
           clear_detection_history();
           woken = true;
           Serial.printf(
-              "[KWS] wake-word p=%.4f%s%s, evidence=%d/%d peak=%.4f, "
+              "[KWS] wake-word p=%.4f%s%s%s, evidence=%d/%d peak=%.4f, "
               "energy=%d, inference=%lu us\n",
                         current, direct ? " (direct)" : "",
                         strong ? " (strong)" : "",
+                        loud ? " (loud)" : "",
                         evidence_hits, kEvidenceWindow, evidence_peak,
                         static_cast<int>(energy_peak),
                         static_cast<unsigned long>(s_last_inference_us));
