@@ -29,18 +29,19 @@ constexpr int kFeatureValues = kFeatureFrames * kMelBins;
 // leaves no CPU budget for I2S and the frontend, so use a 100 ms cadence.
 constexpr int kInferenceFrameStride = 10;  // 100 ms at a 10 ms feature hop.
 // 真人语音实测分两档：清晰发音单窗可冲到 0.93~0.98（直通兑住）；随意或连续
-// 重复说时分数是 0.30~0.70 的平台（常见峰值 0.59~0.70），远低于 TTS 语料
-// （全部 ≥0.976）。门限据此按实机数据校准：最近 4 个 100ms 滑窗中至少 3 个
-// p >= 0.40 且峰值 p >= 0.60；任一窗口 p >= 0.95 直接触发（同时缩短
-// 100~200ms 触发延迟）。证据路径额外要求最近约 512ms 麦克风峰值达到
-// kEnergyGatePeak（实测静音峰值 <240），防止纯静音/底噪在低门限下误触。
-// 音乐/电视误触风险靠 0.95 直通高门限、3/4 宽证据与 2.5s 冷却兑底；
+// 重复说时是 0.30~0.70 的平台，轻一些的重复尝试常见“双峰”形态（两个
+// 0.62~0.65 的峰夹着 0.30 左右的谷，单峰下 4 窗内只有 2 窗过 0.40）。
+// 门限据此按实机数据校准：最近 4 个 100ms 滑窗中至少 2 个 p >= 0.40 且峰值
+// p >= 0.60；任一窗口 p >= 0.95 直接触发（同时缩短 100~200ms 触发延迟）。
+// 证据路径额外要求最近约 512ms 麦克风峰值达到 kEnergyGatePeak（实测静音
+// 峰值 <240），防止纯静音/底噪在低门限下误触。
+// 音乐/电视误触风险靠 0.95 直通高门限、双窗宽证据与 2.5s 冷却兑底；
 // 继续用 cand 日志观察实机误触率后再定。
 constexpr float kEvidenceThreshold = 0.40f;
 constexpr float kEvidencePeakThreshold = 0.60f;
 constexpr float kDirectTriggerThreshold = 0.95f;
 constexpr int kEvidenceWindow = 4;
-constexpr int kEvidenceRequiredHits = 3;
+constexpr int kEvidenceRequiredHits = 2;
 constexpr uint32_t kCooldownMs = 2500;
 // 证据路径的麦克风能量门：最近 16 个 32ms 采集块（≈512ms）内的峰值。
 constexpr int kEnergyHistoryChunks = 16;
