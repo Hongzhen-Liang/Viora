@@ -196,9 +196,13 @@ void net_loop() {
     }
     if (prov_active()) {
       prov_loop();  // 配网网页服务（AP 与 STA 共存，网页保持在线）
-      // 配网模式下也照常推进 STA 连接尝试：保存新网络后无需重启，
-      // 后台持续等待目标网络（如 iPhone 热点）出现。
-      if (millis() - s_wifi_retry_ms > 5000) {
+      // 有手机连在配网热点上时暂停后台 STA 尝试：ESP32 单射频，
+      // STA 全信道扫描会短暂中断 SoftAP 信标，iPhone 关联握手
+      // 撞上扫描窗口就报 "Unable to join the network"。
+      // 手机离开热点（station=0）后再恢复尝试，兼容 iPhone
+      // 个人热点"保存后离开、停留热点页等待连接"的流程。
+      if (WiFi.softAPgetStationNum() == 0 &&
+          millis() - s_wifi_retry_ms > 15000) {
         s_wifi_retry_ms = millis();
         wifi_connect();
       }
