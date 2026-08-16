@@ -89,12 +89,12 @@
 #define VOICE_THRESHOLD_MIN     500   // 自适应阈值下限（高于环境噪声尖峰~265）
 #define VOICE_THRESHOLD_MAX     2500  // 自适应阈值上限
 #define VOICE_RMS_MIN           220   // 能量兜底还需满足 RMS，过滤点击/单点尖峰
-// 自然断句参数：短回答多等一会儿；正常句约 0.85 秒静音即回复；
+// 自然断句参数：短回答多等一会儿；正常句约 0.65 秒静音即回复；
 // 用户曾在句内停顿后继续说时，会自动学习其节奏并放宽，最多 1.8 秒。
 #define VAD_FRAME_MS              32
 #define ENDPOINT_SHORT_SPEECH_MS  640
 #define ENDPOINT_SHORT_MS         1200
-#define ENDPOINT_NORMAL_MS        850
+#define ENDPOINT_NORMAL_MS        650
 #define ENDPOINT_LONG_TURN_MS     5000
 #define ENDPOINT_LONG_MS          750
 #define ENDPOINT_MAX_MS           1800
