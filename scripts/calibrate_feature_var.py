@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""校准唤醒特征窗 log-mel 方差阈值（kMinFeatureVariance）。
+"""校准唤醒特征窗 log-mel 方差与时间方差门。
 
 复刻 wake_word.cpp 的特征管线（hann → 512 FFT → 40 mel → log），
 对固件 golden 语料、真人录音与背景噪声样本计算滑窗（148 帧 ≈1.5s）
-方差分布，用于选择"纯静音/背景噪声"与"真实语音"的分界阈值。
+两种方差：
+
+* ``var``: 所有时间帧和 mel 频带的全局方差；
+* ``tvar``: 每个 mel 频带沿时间的方差再取均值，排除静态噪声
+  频谱着色的影响，对应固件 ``kMinTemporalVariance``。
 
 用法：VioraServer/.venv/bin/python scripts/calibrate_feature_var.py
 """
@@ -16,6 +20,7 @@ import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
 FRAME, STEP, FFT, MEL, NF = 480, 160, 512, 40, 148
+TEMPORAL_GATE = 0.75
 
 
 def parse_int_array(path: Path, name: str) -> np.ndarray:
@@ -69,17 +74,19 @@ class FeatureExtractor:
         return out
 
     @staticmethod
-    def window_vars(logmel: np.ndarray) -> np.ndarray:
-        """滑窗（148 帧）方差，公式与固件 quantize_feature_window 一致。"""
+    def window_stats(logmel: np.ndarray) -> np.ndarray:
+        """返回滑窗 ``[var, tvar]``，公式与固件一致。"""
         n = logmel.shape[0]
         if n < NF:
-            return np.array([])
+            return np.empty((0, 2))
         step = max(1, (n - NF) // 300)
         result = []
         for start in range(0, n - NF + 1, step):
             w = logmel[start:start + NF]
             mean = w.mean()
-            result.append(float((w * w).mean() - mean * mean))
+            variance = float((w * w).mean() - mean * mean)
+            temporal_variance = float(np.var(w, axis=0).mean())
+            result.append((variance, temporal_variance))
         return np.array(result)
 
 
@@ -90,12 +97,19 @@ def main() -> None:
     )
 
     def report(name: str, pcm: np.ndarray) -> None:
-        v = ext.window_vars(ext.logmel(pcm))
-        if v.size == 0:
+        stats = ext.window_stats(ext.logmel(pcm))
+        if stats.size == 0:
             print(f"{name:24s} 帧数不足")
             return
-        print(f"{name:24s} var min={v.min():.3f} med={np.median(v):.3f} "
-              f"max={v.max():.3f}")
+        variance = stats[:, 0]
+        temporal = stats[:, 1]
+        gate = "voice" if temporal.max() >= TEMPORAL_GATE else "background"
+        print(
+            f"{name:24s} "
+            f"var={variance.min():.3f}/{np.median(variance):.3f}/{variance.max():.3f} "
+            f"tvar={temporal.min():.3f}/{np.median(temporal):.3f}/{temporal.max():.3f} "
+            f"=> {gate}"
+        )
 
     # 固件 golden 语料（真实唤醒词语音）
     report("golden(TTS 唤醒词)",

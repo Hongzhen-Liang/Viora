@@ -2,6 +2,7 @@
 
 #include <Arduino.h>
 #include <esp_heap_caps.h>
+#include <esp_vad.h>
 #include <math.h>
 #include <new>
 #include <string.h>
@@ -35,24 +36,26 @@ constexpr int kInferenceFrameStride = 10;  // 100 ms at a 10 ms feature hop.
 // 数字调大麦克风增益不会抬高远场分数，真正掉分的是距离带来的信噪比
 // 与房间混响。阈值只能迁就，根治要靠真人实距离录音重训（见
 // wake_word_training/README：现有 wake 数据 365 条 TTS + 仅 6 条真人）。
-// 触发策略 v13（直通档也受方差游程门约束）：
-//  - 静音方差门：log-mel 特征窗方差 < kMinFeatureVariance 的窗按 p=0
-//    处理。实测纯静音窗因逐窗均值/方差归一化把噪声底放大成结构化图案，
-//    模型能打出 0.45~0.60；真实语音方差大数个量级；
-//  - 方差游程门：静止背景的窗方差几乎不变（实测 1.20~1.34，漂移仅
-//    0.03~0.06），而语音起音会让方差在数百毫秒内明显爬升。直通/强单
-//    窗/证据路径都要求最近 8 窗方差游程 >= 0.3，或当前窗方差已大到
-//    明显是语音（>= 4）；历史不足 2 窗时放行（刚武装的盲区）；
-//  - 直通：任一窗口 p >= 0.95 且游程门通过即触发；
-//  - 强单窗：任一窗口 p >= 0.50 且游程门通过且能量门通过即触发；
+// 触发策略 v14（独立语音活动门）：
+//  - 不再用整个 log-mel 窗的总方差漂移当语音证据。白噪声的频带
+//    着色会让总方差稳定在 1.2~1.4，缓慢漂移累计后也会误过旧的
+//    max-min 游程门；
+//  - 固件复用 ESP-SR 内置 VAD，最近 1.5s 至少 3 个 30ms 语音帧才算
+//    有人声。同时计算“每个 mel 频带沿时间的方差”（tvar）作为小声
+//    语音的非神经网络兜底；现有语料中静态白/粉噪声 tvar <= 0.34，
+//    真人唤醒词 >= 8.6，门限保守取 0.75；
+//  - 直通/强单窗/多窗证据的模型分数先经语音活动门。空调底噪即使
+//    p 瞬间冲到 0.95+ 也只会被记为背景，不会进入概率证据历史；
+//  - 直通：任一窗口 p >= 0.95 且语音活动门通过即触发；
+//  - 强单窗：任一窗口 p >= 0.50 且语音活动/能量门通过即触发；
 //  - 较宽证据：最近 12 个 100ms 窗（≈1.2s）中至少 2 个 p >= 0.35 且峰值
-//    p >= 0.45 且游程门通过（接住远场低分平台）；
-//  - 响度档双窗：最近 12 个窗中至少 2 个 p >= 0.25 且各自能量 >= 200。
-//    单窗瞬态（开机爆音/磕碰）不再触发；
+//    p >= 0.45（接住远场低分平台）；
+//  - 响度档双窗：除原有分数/能量条件外必须有 VAD 人声，避免一次
+//    磕碰因 1.5s 滑窗重叠而被重复计为两窗；
 //  - 能量门：直通/强单窗/证据要求 kEnergyGatePeak=20（≈“麦克风还活着”
-//    检查）；静音与静止背景误醒已由方差门/游程门拦截。
+//    检查）；静音与静止背景误醒由语音活动门拦截。
 // 误触风险靠 0.95 直通、双命中证据、2.5s 冷却兜底；
-// cand 日志带 var/exc/energy 字段，若开始误醒或真人漏醒把日志发回再收紧。
+// cand 日志带 var/tvar/vad/energy 字段，若开始漏醒可临时开启。
 constexpr float kEvidenceThreshold = 0.35f;
 constexpr float kEvidencePeakThreshold = 0.45f;
 constexpr float kStrongWindowThreshold = 0.50f;
@@ -63,22 +66,15 @@ constexpr float kStrongWindowThreshold = 0.50f;
 constexpr float kLoudWindowThreshold = 0.25f;
 constexpr int16_t kLoudEnergyGate = 200;
 constexpr int kLoudRequiredHits = 2;
-// 静音方差门：纯静音窗 log-mel 方差极小，逐窗均值/方差归一化会把
-// 噪声底放大成结构化图案，模型对静音也能打出 0.45~0.60（实测 energy
-// 仅 25~27）。真实语音窗方差大数个量级；方差低于该值的窗按 p=0 处理。
-constexpr float kMinFeatureVariance = 1.0f;
-// 方差游程门（v12/v13）：静止背景噪声的窗方差几乎不变（实测 1.20~1.34，
-// 漂移仅 0.03~0.06），而语音起音会在数百毫秒内让方差明显爬升（静音
-// ~0.1 → 词首 1+）。实测背景平台模型能一路爬到 p=0.9766 撞直通档，
-// 故直通/强单窗/证据路径都要求最近 kVarHistoryWindow 窗内方差有至少
-// kMinVarExcursion 的爬升，或当前窗方差本身已大（≥4，明显语音），或
-// 历史不足 2 窗（刚武装盲区）时放行；响度档不受影响。v10 小声说话
-// （能量 23~34）方差只有 0.7~1.2，与背景音 1.27 完全重叠，固定门限
-// 无法分开——只有“方差是否在爬升”这个时间维度能分。根治仍需把该
-// 背景录进训练负样本重训。
-constexpr int kVarHistoryWindow = 8;    // ≈800ms
-constexpr float kMinVarExcursion = 0.3f;
-constexpr float kClearlySpeechVariance = 4.0f;
+// 静态宽带噪声的总方差主要来自 mel 频带间的固定颜色；tvar 先对
+// 每个 mel 频带求 148 帧时间方差再取均值，只衡量 1.5s 内的调制。
+// 离线现有语料：white/pink noise 最大 0.34，真人 wake 最小 8.65。
+constexpr float kMinTemporalVariance = 0.75f;
+// ESP-SR VAD 使用 30ms/16kHz 帧。1.5s 环中至少三帧（90ms）可排除
+// 单帧爆音和零星 VAD 误报，对正常双词唤醒的裕量仍很大。
+constexpr int kVadFrameSamples = 480;
+constexpr int kVadHistoryFrames = 50;
+constexpr int kMinVadSpeechFrames = 3;
 constexpr float kDirectTriggerThreshold = 0.95f;
 constexpr int kEvidenceWindow = 12;
 constexpr int kEvidenceRequiredHits = 2;
@@ -91,10 +87,9 @@ constexpr int16_t kEnergyGatePeak = 20;
 // 重武装诊断：记录重新武装后前 16 个 32ms 块（≈512ms）的麦克风峰值，用于
 // 验证“TTS 尾音/房间混响是否污染重武装后的首个特征窗”（静音基线 <60）。
 constexpr int kArmHeadChunks = 16;
-// 候选分数诊断：打印所有 p >= 0.25 的滑窗，用于实机收集真人/噪声分数分布。
-// 嘈杂环境下会持续刷屏；数据收够后可把 kDebugLogCandidates 置为 false 关闭，
-// 或调高 kDebugLogFloor 只看高分窗。
-constexpr bool kDebugLogCandidates = true;
+// 逐窗 cand 会把“模型打了高分”误看成“固件已唤醒”，默认关闭。
+// 背景高分仍有 2s 节流日志；需要校准时再临时开启逐窗日志。
+constexpr bool kDebugLogCandidates = false;
 constexpr float kDebugLogFloor = 0.25f;
 constexpr size_t kTensorArenaBytes = 144 * 1024;
 
@@ -105,6 +100,8 @@ static_assert(kWindowSamples == HI_VESPER_GOLDEN_PCM_SAMPLES,
               "golden PCM size mismatch");
 static_assert(kFeatureValues == HI_VESPER_GOLDEN_FEATURE_VALUES,
               "golden input size mismatch");
+static_assert(kVadFrameSamples * 1000 / kSampleRate == 30,
+              "ESP-SR VAD requires 30 ms frames");
 
 alignas(16) float s_fft[kFftLength * 2];
 alignas(16) int16_t s_audio_ring[kFrameLength];
@@ -140,11 +137,16 @@ bool s_first_window_after_arm = false;
 uint32_t s_cooldown_until_ms = 0;
 uint32_t s_last_inference_us = 0;
 float s_last_probability = 0.0f;
-float s_feature_variance = 0.0f;  // 当前特征窗的 log-mel 方差（静音门）
-float s_var_history[kVarHistoryWindow] = {};
-int s_var_history_head = 0;
-int s_var_history_count = 0;
-uint32_t s_last_suppress_log_ms = 0;  // “静止背景”日志节流
+float s_feature_variance = 0.0f;  // 当前特征窗的全局 log-mel 方差
+float s_temporal_variance = 0.0f;  // 各 mel 频带时间方差的均值
+vad_handle_t s_kws_vad = nullptr;
+int16_t s_vad_frame[kVadFrameSamples] = {};
+int s_vad_frame_fill = 0;
+bool s_vad_history[kVadHistoryFrames] = {};
+int s_vad_history_head = 0;
+int s_vad_history_count = 0;
+int s_vad_speech_frames = 0;
+uint32_t s_last_suppress_log_ms = 0;  // “背景抑制”日志节流
 bool s_ready = false;
 bool s_was_enabled = false;
 
@@ -220,9 +222,45 @@ void clear_detection_history() {
   memset(s_energy_history, 0, sizeof(s_energy_history));
   s_energy_history_head = 0;
   s_energy_history_count = 0;
-  memset(s_var_history, 0, sizeof(s_var_history));
-  s_var_history_head = 0;
-  s_var_history_count = 0;
+}
+
+void clear_vad_history() {
+  memset(s_vad_frame, 0, sizeof(s_vad_frame));
+  s_vad_frame_fill = 0;
+  memset(s_vad_history, 0, sizeof(s_vad_history));
+  s_vad_history_head = 0;
+  s_vad_history_count = 0;
+  s_vad_speech_frames = 0;
+}
+
+void push_vad_result(bool speech) {
+  if (s_vad_history_count == kVadHistoryFrames &&
+      s_vad_history[s_vad_history_head]) {
+    --s_vad_speech_frames;
+  }
+  s_vad_history[s_vad_history_head] = speech;
+  if (speech) ++s_vad_speech_frames;
+  s_vad_history_head = (s_vad_history_head + 1) % kVadHistoryFrames;
+  if (s_vad_history_count < kVadHistoryFrames) ++s_vad_history_count;
+}
+
+void observe_vad_pcm(const int16_t *pcm, int samples) {
+  if (s_kws_vad == nullptr) return;
+  int source = 0;
+  while (source < samples) {
+    int copy = kVadFrameSamples - s_vad_frame_fill;
+    if (copy > samples - source) copy = samples - source;
+    memcpy(s_vad_frame + s_vad_frame_fill, pcm + source,
+           copy * sizeof(int16_t));
+    s_vad_frame_fill += copy;
+    source += copy;
+    if (s_vad_frame_fill == kVadFrameSamples) {
+      const bool speech =
+          vad_process(s_kws_vad, s_vad_frame, kSampleRate, 30) == VAD_SPEECH;
+      push_vad_result(speech);
+      s_vad_frame_fill = 0;
+    }
+  }
 }
 
 void push_chunk_peak(int16_t peak) {
@@ -237,19 +275,6 @@ int16_t recent_chunk_peak() {
     if (s_chunk_peaks[index] > maximum) maximum = s_chunk_peaks[index];
   }
   return maximum;
-}
-
-// 最近数个特征窗的方差游程（max-min）：语音起音会显著爬升，
-// 静止背景几乎不变。
-float variance_excursion() {
-  if (s_var_history_count < 2) return 0.0f;
-  float lo = s_var_history[0];
-  float hi = s_var_history[0];
-  for (int index = 1; index < s_var_history_count; ++index) {
-    if (s_var_history[index] < lo) lo = s_var_history[index];
-    if (s_var_history[index] > hi) hi = s_var_history[index];
-  }
-  return hi - lo;
 }
 
 bool has_detection_evidence(float probability, int16_t energy,
@@ -321,18 +346,35 @@ void compute_logmel_frame(const int16_t *pcm, float *output) {
 void quantize_feature_window() {
   double sum = 0.0;
   double square_sum = 0.0;
+  double mel_sum[kMelBins] = {};
+  double mel_square_sum[kMelBins] = {};
   for (int frame = 0; frame < kFeatureFrames; ++frame) {
     const int source_frame = (s_feature_head + frame) % kFeatureFrames;
     const float *source = s_features + source_frame * kMelBins;
     for (int mel = 0; mel < kMelBins; ++mel) {
       sum += source[mel];
       square_sum += static_cast<double>(source[mel]) * source[mel];
+      mel_sum[mel] += source[mel];
+      mel_square_sum[mel] +=
+          static_cast<double>(source[mel]) * source[mel];
     }
   }
   const float mean = static_cast<float>(sum / kFeatureValues);
   float variance = static_cast<float>(square_sum / kFeatureValues) - mean * mean;
   if (variance < 0.0f) variance = 0.0f;
-  s_feature_variance = variance;  // 静音门：纯静音窗方差极小，归一化会放大噪声
+  s_feature_variance = variance;
+
+  double temporal_variance_sum = 0.0;
+  for (int mel = 0; mel < kMelBins; ++mel) {
+    const double mel_mean = mel_sum[mel] / kFeatureFrames;
+    double mel_variance =
+        mel_square_sum[mel] / kFeatureFrames - mel_mean * mel_mean;
+    if (mel_variance < 0.0) mel_variance = 0.0;
+    temporal_variance_sum += mel_variance;
+  }
+  s_temporal_variance =
+      static_cast<float>(temporal_variance_sum / kMelBins);
+
   const float inverse_std = 1.0f / (sqrtf(variance) + 1.0e-6f);
   const float inverse_scale = 1.0f / s_input->params.scale;
   int8_t *destination = s_input->data.int8;
@@ -490,6 +532,14 @@ bool wake_word_init() {
     return false;
   }
   Serial.println("[KWS] Golden vector 自检通过");
+  s_kws_vad = vad_create(VAD_MODE_3);
+  if (s_kws_vad == nullptr) {
+    Serial.println("[KWS] 警告：独立 VAD 创建失败，仅使用 tvar 语音活动门");
+  } else {
+    Serial.printf("[KWS] 语音活动门就绪：VAD mode=3, %d/%d 帧，tvar>=%.2f\n",
+                  kMinVadSpeechFrames, kVadHistoryFrames,
+                  kMinTemporalVariance);
+  }
   s_ready = true;
   wake_word_reset();
   return true;
@@ -510,6 +560,8 @@ void wake_word_reset() {
   s_first_window_after_arm = true;
   s_last_probability = 0.0f;
   s_feature_variance = 0.0f;
+  s_temporal_variance = 0.0f;
+  clear_vad_history();
   memset(s_audio_ring, 0, sizeof(s_audio_ring));
 }
 
@@ -539,6 +591,7 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
     if (chunk_peak > s_arm_head_peak) s_arm_head_peak = chunk_peak;
     ++s_chunks_since_arm;
   }
+  observe_vad_pcm(pcm, samples);
 
   bool woken = false;
   for (int index = 0; index < samples; ++index) {
@@ -560,41 +613,34 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
         }
         const float raw_current = probabilities[0];
         const int16_t energy_peak = recent_chunk_peak();
-        // 静音门：纯静音窗的 log-mel 方差极小，归一化会把噪声放大成
-        // 结构化图案，模型对静音也能打出 0.45~0.60（实测 energy 仅
-        // 25~27）。方差不足的窗按 p=0 参与所有触发判定；cand 日志
-        // 仍打印原始分数与方差供阈值校准。
-        const bool has_dynamics = s_feature_variance >= kMinFeatureVariance;
-        const float current = has_dynamics ? raw_current : 0.0f;
-        // 方差游程门：强单窗/证据路径要求近期方差有明显爬升（语音起音）
-        // 或当前窗方差已大到明显是语音，拦截分数不低的静止背景平台。
-        s_var_history[s_var_history_head] = s_feature_variance;
-        s_var_history_head = (s_var_history_head + 1) % kVarHistoryWindow;
-        if (s_var_history_count < kVarHistoryWindow) {
-          ++s_var_history_count;
-        }
-        const float var_excursion = variance_excursion();
-        const bool has_excursion =
-            s_var_history_count < 2 ||
-            var_excursion >= kMinVarExcursion ||
-            s_feature_variance >= kClearlySpeechVariance;
+        // 模型分数只在独立语音活动证据存在时才进入触发历史。
+        // VAD 主门抗稳态白噪声，tvar 兜底极小声但时间调制明显的语音。
+        const bool vad_speech =
+            s_vad_speech_frames >= kMinVadSpeechFrames;
+        const bool temporal_speech =
+            s_temporal_variance >= kMinTemporalVariance;
+        const bool has_speech_activity = vad_speech || temporal_speech;
+        const float current = has_speech_activity ? raw_current : 0.0f;
+        const bool first_window = s_first_window_after_arm;
+        s_first_window_after_arm = false;
         if (kDebugLogCandidates && raw_current >= kDebugLogFloor) {
-          if (s_first_window_after_arm) {
+          if (first_window) {
             Serial.printf(
-                "[KWS] cand p=%.4f var=%.3f exc=%.3f%s head_peak=%d "
-                "energy=%d, inference=%lu us\n",
-                raw_current, s_feature_variance, var_excursion,
-                has_dynamics ? "" : " (silence)",
+                "[KWS] cand p=%.4f var=%.3f tvar=%.3f vad=%d/%d%s "
+                "head_peak=%d energy=%d, inference=%lu us\n",
+                raw_current, s_feature_variance, s_temporal_variance,
+                s_vad_speech_frames, s_vad_history_count,
+                has_speech_activity ? "" : " (background)",
                 static_cast<int>(s_arm_head_peak),
                 static_cast<int>(energy_peak),
                 static_cast<unsigned long>(s_last_inference_us));
-            s_first_window_after_arm = false;
           } else {
             Serial.printf(
-                "[KWS] cand p=%.4f var=%.3f exc=%.3f%s energy=%d, "
-                "inference=%lu us\n",
-                raw_current, s_feature_variance, var_excursion,
-                has_dynamics ? "" : " (silence)",
+                "[KWS] cand p=%.4f var=%.3f tvar=%.3f vad=%d/%d%s "
+                "energy=%d, inference=%lu us\n",
+                raw_current, s_feature_variance, s_temporal_variance,
+                s_vad_speech_frames, s_vad_history_count,
+                has_speech_activity ? "" : " (background)",
                 static_cast<int>(energy_peak),
                 static_cast<unsigned long>(s_last_inference_us));
           }
@@ -605,38 +651,47 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
         const bool detected =
             has_detection_evidence(current, energy_peak, &evidence_hits,
                                    &evidence_peak, &loud_hits);
-        const bool direct = current >= kDirectTriggerThreshold && has_excursion;
-        const bool strong = current >= kStrongWindowThreshold && has_excursion;
-        const bool evidence = detected && has_excursion;
-        const bool loud = loud_hits >= kLoudRequiredHits;
-        if (direct || ((strong || evidence) && energy_peak >= kEnergyGatePeak) ||
-            loud) {
+        const bool direct = current >= kDirectTriggerThreshold;
+        const bool strong = current >= kStrongWindowThreshold;
+        const bool evidence = detected;
+        // 响度档禁止只靠 tvar 通过：磕碰会在多个重叠窗里都留下
+        // 高 tvar/高能量，但激进档 VAD 不应连续判成人声。
+        const bool loud =
+            loud_hits >= kLoudRequiredHits && vad_speech;
+        if (((direct || strong || evidence) &&
+             energy_peak >= kEnergyGatePeak) || loud) {
           s_cooldown_until_ms = now + kCooldownMs;
           clear_detection_history();
           woken = true;
           Serial.printf(
               "[KWS] wake-word p=%.4f%s%s%s, evidence=%d/%d peak=%.4f, "
-              "loud=%d/%d, energy=%d, var=%.3f exc=%.3f, inference=%lu us\n",
+              "loud=%d/%d, energy=%d, var=%.3f tvar=%.3f vad=%d/%d, "
+              "inference=%lu us\n",
                         current, direct ? " (direct)" : "",
                         strong ? " (strong)" : "",
                         loud ? " (loud)" : "",
                         evidence_hits, kEvidenceWindow, evidence_peak,
                         loud_hits, kLoudRequiredHits,
                         static_cast<int>(energy_peak),
-                        s_feature_variance, var_excursion,
+                        s_feature_variance, s_temporal_variance,
+                        s_vad_speech_frames, s_vad_history_count,
                         static_cast<unsigned long>(s_last_inference_us));
           break;
         }
-        if (!has_excursion && raw_current >= kStrongWindowThreshold) {
-          // 静止背景上模型会持续打高分，提示按 2s 节流避免刷屏。
+        if (!has_speech_activity &&
+            raw_current >= kStrongWindowThreshold) {
+          // 背景上模型可能持续打高分，提示按 2s 节流避免刷屏。
           if (static_cast<int32_t>(now - s_last_suppress_log_ms) >= 2000) {
             s_last_suppress_log_ms = now;
             Serial.printf(
-                "[KWS] 静止背景：p=%.4f 但 var=%.3f exc=%.3f 无语音爬升，忽略\n",
-                raw_current, s_feature_variance, var_excursion);
+                "[KWS] 背景抑制：p=%.4f var=%.3f tvar=%.3f "
+                "vad=%d/%d 无语音活动，忽略\n",
+                raw_current, s_feature_variance, s_temporal_variance,
+                s_vad_speech_frames, s_vad_history_count);
           }
         }
-        if ((strong || evidence) && energy_peak < kEnergyGatePeak) {
+        if ((direct || strong || evidence) &&
+            energy_peak < kEnergyGatePeak) {
           Serial.printf("[KWS] 证据满足但能量过低 energy=%d，忽略\n",
                         static_cast<int>(energy_peak));
           clear_detection_history();
