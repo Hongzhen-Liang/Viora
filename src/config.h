@@ -67,7 +67,7 @@
 // ============================================================
 #define PROV_AP_SSID      "Viora-Setup"  // 配网热点名称
 #define PROV_AP_PASS      "viora1234"    // 配网热点密码（留空则开放热点）
-#define PROV_TIMEOUT_MS   90000          // 连不上 WiFi 多久后进入配网模式
+#define PROV_TIMEOUT_MS   30000          // 连不上 WiFi 多久后进入配网模式（快速提醒）
 #define WIFI_ATTEMPT_MS   8000           // 每个候选 WiFi 的尝试时长
 #define PROV_MAX_NETWORKS 4              // NVS 最多保存的 WiFi 数量
 

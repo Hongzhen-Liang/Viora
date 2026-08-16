@@ -49,7 +49,9 @@ static void wifi_connect() {
   s_wifi_cand = (s_wifi_cand + 1) % static_cast<int>(cands.size());
   s_cand_start_ms = now;
   WiFi.disconnect();
-  WiFi.mode(WIFI_STA);
+  // 配网模式下保持 AP+STA 共存：SoftAP 继续服务配网页，STA 后台尝试连接。
+  // 不能切纯 STA（会杀掉配网热点），disconnect 也不能带 eraseap 参数。
+  WiFi.mode(prov_active() ? WIFI_AP_STA : WIFI_STA);
   WiFi.begin(cands[s_wifi_cand].ssid, cands[s_wifi_cand].pass);
   Serial.printf("[WiFi] 尝试 %d/%d: %s ...\n", s_wifi_cand + 1,
                 static_cast<int>(cands.size()), cands[s_wifi_cand].ssid);
@@ -159,8 +161,16 @@ static void start_websocket() {
 void net_init(const NetCallbacks &cb) {
   s_cb = cb;
   prov_setup();  // 加载 NVS 里保存过的 WiFi（出门配网用）
+  s_wifi_down_since = millis();  // 配网超时从开机算起，而不是从首次断网算起
   wifi_connect();
   s_ws.onEvent(on_ws_event);
+}
+
+// 配网页保存新 WiFi 后调用：游标归零（新网络在候选首位）并立即开始尝试。
+void net_wifi_retry_now() {
+  s_wifi_cand = -1;
+  s_cand_start_ms = 0;
+  wifi_connect();
 }
 
 void net_loop() {
@@ -185,15 +195,26 @@ void net_loop() {
       s_wifi_down_since = millis();
     }
     if (prov_active()) {
-      prov_loop();  // 配网网页服务
+      prov_loop();  // 配网网页服务（AP 与 STA 共存，网页保持在线）
+      // 配网模式下也照常推进 STA 连接尝试：保存新网络后无需重启，
+      // 后台持续等待目标网络（如 iPhone 热点）出现。
+      if (millis() - s_wifi_retry_ms > 5000) {
+        s_wifi_retry_ms = millis();
+        wifi_connect();
+      }
     } else {
       // 每 5 秒推进一次候选网络轮询
       if (millis() - s_wifi_retry_ms > 5000) {
         s_wifi_retry_ms = millis();
         wifi_connect();
       }
+      // 一个候选都没有（没配过网、secrets.h 也没有默认网络）：
+      // 立即进入配网模式提醒用户，而不是干等超时。
+      if (prov_candidates().empty()) {
+        prov_begin();
+      }
       // 连续断网超时 → 开启配网热点
-      if (millis() - s_wifi_down_since > PROV_TIMEOUT_MS) {
+      else if (millis() - s_wifi_down_since > PROV_TIMEOUT_MS) {
         prov_begin();
       }
     }

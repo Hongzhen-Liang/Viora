@@ -2,6 +2,8 @@
 // WiFi 配网模块实现
 // 连不上 WiFi 时：ESP32 开启热点 Viora-Setup + 网页（DNS 劫持），
 // 手机连上热点用浏览器即可修改 WiFi，无需电脑。
+// 配网期间 AP+STA 共存：保存新网络后不重启，STA 后台持续尝试连接，
+// 解决 iPhone 个人热点场景的"重启 vs 热点广播"时机竞争。
 // ============================================================
 #include <Arduino.h>
 #include <WiFi.h>
@@ -11,6 +13,7 @@
 #include <vector>
 
 #include "config.h"
+#include "net.h"
 #include "provisioning.h"
 
 static WebServer s_web(80);
@@ -20,8 +23,7 @@ static Preferences s_prefs;
 static std::vector<WifiCred> s_saved;      // NVS 里保存的网络（新存的在前）
 static std::vector<WifiCred> s_candidates; // 候选列表 = 已保存 + 编译期默认
 static bool s_active = false;
-static bool s_restart_pending = false;
-static uint32_t s_restart_ms = 0;
+static char s_waiting_ssid[33];            // 保存后正在后台等待连接的目标 SSID
 
 // ---------- NVS 持久化 ----------
 static void save_all_to_nvs() {
@@ -149,6 +151,8 @@ static String page_head(const char *title) {
   h += F("ul{list-style:none;margin:0;padding:0}li{display:flex;justify-content:space-between;align-items:center;padding:9px 0;border-bottom:1px solid #22304a;font-size:15px}");
   h += F("a{color:#f87171;text-decoration:none;font-size:13px}");
   h += F(".tip{font-size:12px;color:#7d8da8;line-height:1.6}");
+  h += F(".steps{list-style:decimal;padding-left:20px;margin:6px 0 0}");
+  h += F(".steps li{display:list-item;border-bottom:0;padding:4px 0;font-size:14px;line-height:1.7;color:#e8ecf4;text-align:left}");
   h += F("</style></head><body>");
   return h;
 }
@@ -156,11 +160,16 @@ static String page_head(const char *title) {
 static String portal_page() {
   String h = page_head("Viora WiFi 配网");
   h += F("<h1>Viora WiFi 配网</h1>");
-  h += F("<p class=\"tip\">设备连不上网络，已进入配网模式。填写新 WiFi，保存后设备会自动重启并连接。</p>");
+  h += F("<p class=\"tip\">设备连不上网络，已进入配网模式。填写新 WiFi 保存后，设备会立即在后台尝试连接（不重启），本页面保持在线。</p>");
   h += F("<form class=\"card\" method=\"post\" action=\"/save\">");
   h += F("<label>WiFi 名称（SSID）</label><input name=\"ssid\" required autofocus autocapitalize=\"off\" autocorrect=\"off\">");
   h += F("<label>WiFi 密码</label><input name=\"pass\" type=\"password\" placeholder=\"开放网络可留空\">");
-  h += F("<button type=\"submit\">保存并重启</button></form>");
+  h += F("<button type=\"submit\">保存并连接</button></form>");
+  if (s_waiting_ssid[0] != '\0') {
+    h += F("<div class=\"card\"><h2>正在后台尝试连接</h2><p>目标网络：<b>");
+    h += html_escape(s_waiting_ssid);
+    h += F("</b></p><p class=\"tip\">白色脉冲灯 = 等待网络出现。可随时离开本页面；未成功时重新连回本热点即可修改。</p></div>");
+  }
   h += F("<div class=\"card\"><h2>已保存的网络（按顺序尝试）</h2><ul>");
   if (s_saved.empty()) {
     h += F("<li><span>暂无（只有默认网络）</span></li>");
@@ -178,12 +187,18 @@ static String portal_page() {
   return h;
 }
 
-static String saved_page(const char *ssid) {
-  String h = page_head("已保存");
-  h += F("<h1>已保存</h1><p>WiFi <b>");
+static String waiting_page(const char *ssid) {
+  String h = page_head("已保存，正在连接");
+  h += F("<h1>已保存，正在连接</h1><p>WiFi <b>");
   h += html_escape(ssid);
-  h += F("</b> 已保存，设备正在重启…</p>");
-  h += F("<p class=\"tip\">重启后设备会自动连接该网络。连接成功后热点自动关闭、状态灯变蓝色呼吸；若连不上，90 秒后会再次进入配网模式。</p>");
+  h += F("</b> 已保存。设备已在后台开始尝试连接（不重启），本配网热点会保持在线。</p>");
+  h += F("<div class=\"card\"><h2>iPhone 个人热点用户请按以下步骤</h2><ol class=\"steps\">");
+  h += F("<li>确认\"设置 → 个人热点\"里的 <b>最大兼容性</b> 已开启（ESP32 只支持 2.4GHz）。</li>");
+  h += F("<li>断开本 WiFi（Viora-Setup），回到个人热点页面并 <b>停留在该页</b> 直到设备连上。</li>");
+  h += F("<li>连接成功后：状态灯蓝色呼吸，个人热点页会出现设备 \"Viora\"。</li>");
+  h += F("<li>一段时间未连上（如密码错误）：重新连回 Viora-Setup，在本页面修改。</li>");
+  h += F("</ol></div>");
+  h += F("<p class=\"tip\">离开本页面后反馈看指示灯：白色脉冲 = 等待网络；蓝色呼吸 = 已连接。</p>");
   h += F("</body></html>");
   return h;
 }
@@ -219,17 +234,21 @@ static void handle_save() {
     return;
   }
   save_cred(ssid.c_str(), pass.c_str());
-  Serial.printf("[Prov] 保存 WiFi: %s（密码 %d 位），准备重启\n", ssid.c_str(),
-                static_cast<int>(pass.length()));
-  s_web.send(200, "text/html", saved_page(ssid.c_str()));
-  s_restart_pending = true;
-  s_restart_ms = millis();
+  strlcpy(s_waiting_ssid, ssid.c_str(), sizeof(s_waiting_ssid));
+  Serial.printf("[Prov] 保存 WiFi: %s（密码 %d 位），开始后台连接（AP+STA 共存）\n",
+                ssid.c_str(), static_cast<int>(pass.length()));
+  s_web.send(200, "text/html", waiting_page(ssid.c_str()));
+  net_wifi_retry_now();  // 新网络在候选首位，立即开始尝试
 }
 
 static void handle_del() {
   const int i = atoi(s_web.arg("i").c_str());
-  if (i >= 0) {
+  if (i >= 0 && static_cast<size_t>(i) < s_saved.size()) {
+    // 删掉正在等待连接的目标网络时，同步清掉等待状态
+    const bool was_waiting =
+        strcmp(s_saved[static_cast<size_t>(i)].ssid, s_waiting_ssid) == 0;
     remove_cred(static_cast<size_t>(i));
+    if (was_waiting) s_waiting_ssid[0] = '\0';
     Serial.printf("[Prov] 删除已保存 WiFi #%d\n", i);
   }
   s_web.sendHeader("Location", "/", true);
@@ -245,8 +264,11 @@ void prov_begin() {
                 static_cast<unsigned long>(PROV_TIMEOUT_MS));
   Serial.printf("[Prov] 热点: %s（密码 %s），请用手机连接后访问 http://192.168.4.1\n",
                 PROV_AP_SSID, PROV_AP_PASS[0] ? PROV_AP_PASS : "无");
-  WiFi.disconnect(true);
-  WiFi.mode(WIFI_AP);
+  // AP+STA 共存：配网页保持在线，STA 后台继续尝试连接。iPhone 热点场景
+  // 下用户保存后离开本热点、再打开个人热点，设备持续等待即可，无需重启。
+  // disconnect 不能带 eraseap 参数（true），否则会清掉 STA 配置。
+  WiFi.disconnect();
+  WiFi.mode(WIFI_AP_STA);
   WiFi.softAPConfig(IPAddress(192, 168, 4, 1), IPAddress(192, 168, 4, 1),
                     IPAddress(255, 255, 255, 0));
   WiFi.softAP(PROV_AP_SSID, PROV_AP_PASS);
@@ -265,15 +287,13 @@ void prov_end() {
   s_web.stop();
   s_dns.stop();
   WiFi.softAPdisconnect(true);
+  WiFi.mode(WIFI_STA);  // STA 已连上，切回纯 STA 省电
   s_active = false;
+  s_waiting_ssid[0] = '\0';
   Serial.println("[Prov] 已退出配网模式");
 }
 
 void prov_loop() {
   s_dns.processNextRequest();
   s_web.handleClient();
-  if (s_restart_pending && millis() - s_restart_ms > 1500) {
-    Serial.println("[Prov] 重启设备以连接新 WiFi …");
-    ESP.restart();
-  }
 }
