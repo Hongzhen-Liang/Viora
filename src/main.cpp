@@ -15,9 +15,10 @@
 #include "speech.h"
 #include "turn_detector.h"
 #include "vad.h"
+#include "wake_ack_data.h"
 #include "wake_word.h"
 
-enum ConvState { ST_IDLE, ST_LISTENING, ST_PROCESSING, ST_PLAYING };
+enum ConvState { ST_IDLE, ST_WAKE_ACK, ST_LISTENING, ST_PROCESSING, ST_PLAYING };
 enum ListenOrigin { LISTEN_FROM_WAKE, LISTEN_FROM_FOLLOWUP, LISTEN_FROM_BARGE_IN };
 
 static const TurnDetectorConfig kTurnConfig = {
@@ -39,6 +40,8 @@ static uint32_t s_upload_failed_bytes = 0;
 static bool s_rearm_pending = false;
 static bool s_exit_pending = false;
 static int s_consec_errors = 0;
+static bool s_followup_keep_preroll = false;  // ack_done 后重开麦需保留前置音频
+static uint32_t s_wake_ack_start_ms = 0;      // 本地确认音开始播放的墙钟时刻
 
 // 播放中 AEC/VAD 打断状态。
 static bool s_accept_tts_audio = false;
@@ -86,7 +89,7 @@ static void send_ring_audio() {
 
 // 发 audio_start 并进入下一轮聆听。唤醒和打断会把缓存的前置音频先上传，
 // 从而保住紧跟唤醒词/打断发生前的首字；普通追问不携带扬声器尾音。
-static void enter_listening(ListenOrigin origin) {
+static void enter_listening(ListenOrigin origin, bool force_preroll = false) {
   if (!net_connected()) {
     s_state = ST_IDLE;
     audio_ring_clear();
@@ -97,7 +100,7 @@ static void enter_listening(ListenOrigin origin) {
   // 发送实时 PCM 前关闭 modem sleep，避免首包被 DTIM 等待拖延。
   net_set_idle_power_save(false);
 
-  const bool keep_preroll =
+  const bool keep_preroll = force_preroll ||
       origin == LISTEN_FROM_WAKE || origin == LISTEN_FROM_BARGE_IN;
   if (!keep_preroll) audio_ring_clear();
 
@@ -141,6 +144,78 @@ static void enter_listening(ListenOrigin origin) {
   Serial.printf(">>> 正在聆听（%s，前置音频=%lums）...\n",
                 listen_source(origin),
                 static_cast<unsigned long>(s_preroll_ms));
+}
+
+// 唤醒命中 → 本地立即播放确认音（Siri 式即时回应），同时按唤醒轮流程
+// 上传前置音频。确认音期间 AEC 持续运行：
+//  - 用户紧跟指令 → 打断确认音，走 LISTEN_FROM_BARGE_IN；
+//  - 用户说完后沉默 → ack 结束补传 AEC 后音频并提交唤醒轮，服务端
+//    识别出指令则直接回复，识别为空则回 ack_done 让设备续听。
+static void start_wake_ack() {
+  if (!net_connected()) {
+    s_state = ST_IDLE;
+    audio_ring_clear();
+    Serial.println(">>> 服务器未连接，回到待唤醒");
+    return;
+  }
+  net_set_idle_power_save(false);
+  speech_async_reset();
+
+  s_state = ST_WAKE_ACK;
+  s_listen_origin = LISTEN_FROM_WAKE;
+  s_exit_pending = false;
+  s_accept_tts_audio = false;
+  s_barge_voice_frames = 0;
+  s_rec_max_vol = 0;
+  s_preroll_ms = 0;
+  s_uploaded_bytes = 0;
+  s_upload_failed_bytes = 0;
+  s_live_voice_seen = false;
+  s_wake_ack_start_ms = millis();
+  s_playback_start_ms = s_wake_ack_start_ms;
+
+  char start_frame[256];
+  snprintf(start_frame, sizeof(start_frame),
+           "{\"type\":\"audio_start\",\"source\":\"wake\","
+           "\"new_conversation\":true,\"wake_word\":\"%s\","
+           "\"local_ack\":true}", WAKE_WORD);
+  net_send_json(start_frame);
+  send_ring_audio();
+  audio_ring_clear();
+
+  // AEC 参考由独立播放任务按同一时间轴排队，确认音回声不会漏进麦克风。
+  audio_mark_tts_start();
+  audio_play_push(wake_ack_pcm_data,
+                  static_cast<uint32_t>(wake_ack_pcm_len));
+  audio_mark_tts_end();
+  Serial.printf(">>> 唤醒词命中：%s！本地确认音已开播（%uB）\n", WAKE_WORD,
+                static_cast<unsigned>(wake_ack_pcm_len));
+}
+
+// 确认音播完：把 AEC 处理后的确认音期间音频（若用户紧跟说话则含其首字）
+// 补上传并提交唤醒轮。服务端识别为空 → ack_done（继续聆听）；识别出
+// 指令 → 正常回复。裁剪由服务端唤醒词前缀剥离负责，这里不裁。
+static void commit_wake_ack_round(uint32_t now_ms) {
+  send_ring_audio();
+  const uint32_t pcm_ms = static_cast<uint32_t>(
+      s_uploaded_bytes * 1000ULL / (SR_SAMPLE_RATE * sizeof(int16_t)));
+  const uint32_t wall_audio_ms =
+      s_preroll_ms + (now_ms - s_wake_ack_start_ms);
+  char end_frame[256];
+  snprintf(end_frame, sizeof(end_frame),
+           "{\"type\":\"audio_end\",\"trim_start_ms\":0,"
+           "\"trim_end_ms\":0,\"endpoint_ms\":0,"
+           "\"pcm_ms\":%lu,\"wall_audio_ms\":%lu,"
+           "\"clock_drift_ms\":0}",
+           static_cast<unsigned long>(pcm_ms),
+           static_cast<unsigned long>(wall_audio_ms));
+  net_send_json(end_frame);
+  s_state = ST_PROCESSING;
+  Serial.printf(
+      ">>> 确认音结束：录音=%lums 上传=%luB/%lums，等待服务端判决\n",
+      static_cast<unsigned long>(now_ms - s_wake_ack_start_ms),
+      static_cast<unsigned long>(s_uploaded_bytes),
+      static_cast<unsigned long>(pcm_ms));
 }
 
 static void end_active_session(const char *reason) {
@@ -312,6 +387,12 @@ static void on_server_text(const char *type, const char *user,
   } else if (strcmp(type, "no_speech") == 0) {
     // 可能是背景音乐/无人说话：不提示、不报错，默默继续聆听。
     retry_listening_after_failure();
+  } else if (strcmp(type, "ack_done") == 0) {
+    // 本地确认音已播完且唤醒轮无指令：立即重开麦克风，并把确认音
+    // 结束后用户抢先说出的首字（PROCESSING 期间入环）作为前置上传。
+    s_consec_errors = 0;
+    s_followup_keep_preroll = true;
+    s_rearm_pending = true;
   }
 }
 
@@ -373,7 +454,9 @@ void loop() {
 
   if (s_rearm_pending) {
     s_rearm_pending = false;
-    enter_listening(LISTEN_FROM_FOLLOWUP);
+    const bool keep_preroll = s_followup_keep_preroll;
+    s_followup_keep_preroll = false;
+    enter_listening(LISTEN_FROM_FOLLOWUP, keep_preroll);
   }
 
   if (speech_feed_size() <= 0) {
@@ -394,7 +477,7 @@ void loop() {
 
   // 独立播放任务会把扬声器 PCM 及其 AEC 参考按相同时间轴排队；
   // 此处取出与刚完成的麦克风帧对应的一块。
-  if (s_state == ST_PLAYING) {
+  if (s_state == ST_PLAYING || s_state == ST_WAKE_ACK) {
     audio_play_reference(playback_ref, frames);
   }
   // 极低内存等异常情况下若播放任务创建失败，仍保留主循环兜底。
@@ -403,7 +486,11 @@ void loop() {
   // 待唤醒时持续保留最后 900ms；网络短暂抖动也不停止本地 KWS，避免
   // 每次 WS 重连后重新填充 1.5s 特征窗形成盲区。离线命中时
   // enter_listening() 会给出明确日志并安全留在 IDLE。
-  if (s_state == ST_IDLE) audio_ring_push(pcm, frames);
+  // 服务器处理中同样入环：本地确认音播完后用户抢先开口，首字也不会丢
+  // （ack_done → 以保留前置的方式重开聆听）。
+  if (s_state == ST_IDLE || s_state == ST_PROCESSING) {
+    audio_ring_push(pcm, frames);
+  }
 
   const bool kws_enabled = s_state == ST_IDLE;
   float wake_probability = 0.0f;
@@ -435,7 +522,7 @@ void loop() {
   static int16_t afe_out[512];
   bool is_speech = false;
   bool have_afe = false;
-  if (s_state == ST_PLAYING) {
+  if (s_state == ST_PLAYING || s_state == ST_WAKE_ACK) {
     speech_async_submit(pcm, playback_ref, frames);
     // 队列中若有多帧，优先跟上最新时间轴；每帧都用于
     // barge-in 连续证据，避免丢掉用户持续说话的信号。
@@ -474,6 +561,11 @@ void loop() {
   // 否则一次旧的 speech=true 可能永久拖住句尾。
   const bool neural_speech = s_state == ST_PLAYING && have_afe && is_speech;
   const bool turn_speech = neural_speech || energy_speech;
+
+  if (s_state == ST_WAKE_ACK && audio_playback_finished()) {
+    s_accept_tts_audio = false;
+    commit_wake_ack_round(millis());
+  }
 
   if (s_state == ST_PLAYING && audio_playback_finished()) {
     s_accept_tts_audio = false;
@@ -532,7 +624,11 @@ void loop() {
   }
 
   if (woken && s_state == ST_IDLE) {
+#if ENABLE_LOCAL_WAKE_ACK
+    start_wake_ack();
+#else
     Serial.printf(">>> 唤醒词命中：%s！\n", WAKE_WORD);
     enter_listening(LISTEN_FROM_WAKE);
+#endif
   }
 }
