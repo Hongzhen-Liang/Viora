@@ -69,16 +69,19 @@
 #define SERVER_PATH "/ws"
 
 // ============================================================
-// WiFi 配网（出门在外换网络，只需一部手机）
+// WiFi 配网与局域网管理页
 // 连不上 WiFi 超过 PROV_TIMEOUT_MS 后自动开启热点 PROV_AP_SSID，
-// 手机连接热点后用浏览器打开 http://192.168.4.1 填新网络并保存，
-// 设备自动重启连接。已保存网络写入 NVS，掉电不丢。
+// 手机连接热点后用浏览器打开 http://192.168.4.1 填新网络并保存。
+// 设备联网后同一网页常驻于设备局域网 IP（http://设备IP/），
+// 可随时增删已保存网络。已保存网络写入 NVS，掉电不丢。
 // ============================================================
 #define PROV_AP_SSID      "Viora-Setup"  // 配网热点名称
 #define PROV_AP_PASS      "viora1234"    // 配网热点密码（留空则开放热点）
 #define PROV_TIMEOUT_MS   30000          // 连不上 WiFi 多久后进入配网模式（快速提醒）
 #define WIFI_ATTEMPT_MS   8000           // 每个候选 WiFi 的尝试时长
 #define PROV_MAX_NETWORKS 4              // NVS 最多保存的 WiFi 数量
+#define WEB_ADMIN_PASS    "viora1234"   // 联网后管理页访问密码（配网热点页不设二次密码，利于 iPhone 弹窗；留空=免密）
+#define WEB_MDNS_HOST     "viora"       // 管理页 mDNS 主机名：iPhone Safari 访问 http://viora.local/ 免查 IP
 
 // 待唤醒也保持 WiFi 全性能。实机日志显示 modem sleep 打开后 WebSocket
 // 会间歇断线，而 KWS 只在服务器在线时可进入对话；稳定连接比这点功耗更重要。

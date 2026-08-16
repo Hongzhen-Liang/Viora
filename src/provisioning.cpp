@@ -2,6 +2,8 @@
 // WiFi 配网模块实现
 // 连不上 WiFi 时：ESP32 开启热点 Viora-Setup + 网页（DNS 劫持），
 // 手机连上热点用浏览器即可修改 WiFi，无需电脑。
+// 联网后：同一网页常驻于设备局域网 IP（http://设备IP/），
+// 可随时增删已保存的 WiFi。
 // 配网期间 AP+STA 共存：保存新网络后不重启，STA 后台持续尝试连接，
 // 解决 iPhone 个人热点场景的"重启 vs 热点广播"时机竞争。
 // ============================================================
@@ -23,6 +25,7 @@ static Preferences s_prefs;
 static std::vector<WifiCred> s_saved;      // NVS 里保存的网络（新存的在前）
 static std::vector<WifiCred> s_candidates; // 候选列表 = 已保存 + 编译期默认
 static bool s_active = false;
+static bool s_web_running = false;         // 网页服务是否已在监听（配网与联网共用）
 static char s_waiting_ssid[33];            // 保存后正在后台等待连接的目标 SSID
 
 // ---------- NVS 持久化 ----------
@@ -158,14 +161,23 @@ static String page_head(const char *title) {
 }
 
 static String portal_page() {
-  String h = page_head("Viora WiFi 配网");
-  h += F("<h1>Viora WiFi 配网</h1>");
-  h += F("<p class=\"tip\">设备连不上网络，已进入配网模式。填写新 WiFi 保存后，设备会立即在后台尝试连接（不重启），本页面保持在线。</p>");
+  String h = page_head("Viora WiFi 管理");
+  h += F("<h1>Viora WiFi 管理</h1>");
+  if (s_active) {
+    h += F("<p class=\"tip\">设备连不上网络，已进入配网模式。填写新 WiFi 保存后，设备会立即在后台尝试连接（不重启），本页面保持在线。</p>");
+  } else if (WiFi.status() == WL_CONNECTED) {
+    h += F("<p class=\"tip\">设备已联网。本页即局域网管理页，浏览器访问 <b>http://");
+    h += WiFi.localIP().toString();
+    h += F("/</b> 随时可打开；在下方增删已保存的 WiFi。页面受密码保护，浏览器会提示登录。</p>");
+  }
+  if (s_web.arg("saved") == "1") {
+    h += F("<div class=\"card\"><h2>已保存新网络</h2><p class=\"tip\">设备正在尝试连接。若目标网络不可用，会自动按顺序回连其他已保存网络。</p></div>");
+  }
   h += F("<form class=\"card\" method=\"post\" action=\"/save\">");
   h += F("<label>WiFi 名称（SSID）</label><input name=\"ssid\" required autofocus autocapitalize=\"off\" autocorrect=\"off\">");
   h += F("<label>WiFi 密码</label><input name=\"pass\" type=\"password\" placeholder=\"开放网络可留空\">");
   h += F("<button type=\"submit\">保存并连接</button></form>");
-  if (s_waiting_ssid[0] != '\0') {
+  if (s_active && s_waiting_ssid[0] != '\0') {
     h += F("<div class=\"card\"><h2>正在后台尝试连接</h2><p>目标网络：<b>");
     h += html_escape(s_waiting_ssid);
     h += F("</b></p><p class=\"tip\">白色脉冲灯 = 等待网络出现。可随时离开本页面；未成功时重新连回本热点即可修改。</p></div>");
@@ -182,7 +194,11 @@ static String portal_page() {
     h += F("\">删除</a></li>");
   }
   h += F("</ul></div>");
-  h += F("<p class=\"tip\">若此页面未自动弹出，请在浏览器地址栏输入 192.168.4.1。</p>");
+  if (s_active) {
+    h += F("<p class=\"tip\">若此页面未自动弹出，请在浏览器地址栏输入 192.168.4.1。</p>");
+  } else {
+    h += F("<p class=\"tip\">保存新网络后设备会立即切换连接；访问管理页的浏览器连接会随切网短暂中断。</p>");
+  }
   h += F("</body></html>");
   return h;
 }
@@ -214,12 +230,71 @@ static String message_page(const char *title, const char *msg) {
 }
 
 // ---------- 请求处理 ----------
+// ---------- HTTP Basic 鉴权 ----------
+// 联网模式下管理页整页受密码保护（浏览器自动弹登录框，用户名固定
+// admin，密码 = config.h 的 WEB_ADMIN_PASS）。浏览器记住凭据后，
+// 对同一主机的后续请求都会自动携带，表单 POST 与删除链接无需再传密码。
+// 配网热点模式下不二次鉴权（热点密码即门槛），见 page_access_ok()。
+static void send_unauthorized() {
+  s_web.sendHeader("WWW-Authenticate", "Basic realm=\"Viora\"", true);
+  s_web.send(401, "text/plain", "请输入管理密码");
+}
+
+// 极简 RFC4648 Base64 编码：把 "admin:密码" 编码后与浏览器发来的
+// Authorization 头比对，避免引入额外依赖。
+static String b64_encode(const char *s) {
+  static const char kTab[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  String out;
+  const size_t len = strlen(s);
+  out.reserve(((len + 2) / 3) * 4);
+  for (size_t i = 0; i < len; i += 3) {
+    const uint32_t v =
+        (static_cast<uint32_t>(static_cast<unsigned char>(s[i])) << 16) |
+        (i + 1 < len ? static_cast<uint32_t>(static_cast<unsigned char>(s[i + 1])) << 8 : 0) |
+        (i + 2 < len ? static_cast<uint32_t>(static_cast<unsigned char>(s[i + 2])) : 0);
+    out += kTab[(v >> 18) & 63];
+    out += kTab[(v >> 12) & 63];
+    out += (i + 1 < len) ? kTab[(v >> 6) & 63] : '=';
+    out += (i + 2 < len) ? kTab[v & 63] : '=';
+  }
+  return out;
+}
+
+static bool basic_auth_ok() {
+  if (WEB_ADMIN_PASS[0] == '\0') return true;  // 未设置密码 = 免密
+  if (!s_web.hasHeader("Authorization")) return false;
+  const String auth = s_web.header("Authorization");
+  if (!auth.startsWith("Basic ")) return false;
+  char expected[96];
+  snprintf(expected, sizeof(expected), "admin:%s", WEB_ADMIN_PASS);
+  return auth.substring(6) == b64_encode(expected);
+}
+
+// 页面访问策略（iPhone 友好）：
+// - 配网模式（SoftAP 热点）：连上 Viora-Setup 本身已需要热点密码，
+//   不再二次鉴权——iOS 系统 captive portal 不支持 Basic 401 弹窗，
+//   免密可保证 iPhone 连上热点后自动弹出配网页；
+// - 联网模式（局域网）：整页 Basic 鉴权，防止局域网内任何设备改 WiFi。
+static bool page_access_ok() {
+  if (s_active) return true;
+  return basic_auth_ok();
+}
+
 static void handle_portal() {
+  if (!page_access_ok()) {
+    send_unauthorized();
+    return;
+  }
   s_web.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
   s_web.send(200, "text/html", portal_page());
 }
 
 static void handle_save() {
+  if (!page_access_ok()) {
+    send_unauthorized();
+    return;
+  }
   String ssid = s_web.arg("ssid");
   String pass = s_web.arg("pass");
   ssid.trim();
@@ -237,11 +312,21 @@ static void handle_save() {
   strlcpy(s_waiting_ssid, ssid.c_str(), sizeof(s_waiting_ssid));
   Serial.printf("[Prov] 保存 WiFi: %s（密码 %d 位），开始后台连接（AP+STA 共存）\n",
                 ssid.c_str(), static_cast<int>(pass.length()));
-  s_web.send(200, "text/html", waiting_page(ssid.c_str()));
+  if (s_active) {
+    s_web.send(200, "text/html", waiting_page(ssid.c_str()));
+  } else {
+    // 联网状态下切网会中断当前浏览器连接，直接回管理页并提示
+    s_web.sendHeader("Location", "/?saved=1", true);
+    s_web.send(302, "text/plain", "");
+  }
   net_wifi_retry_now();  // 新网络在候选首位，立即开始尝试
 }
 
 static void handle_del() {
+  if (!page_access_ok()) {
+    send_unauthorized();
+    return;
+  }
   const int i = atoi(s_web.arg("i").c_str());
   if (i >= 0 && static_cast<size_t>(i) < s_saved.size()) {
     // 删掉正在等待连接的目标网络时，同步清掉等待状态
@@ -253,6 +338,24 @@ static void handle_del() {
   }
   s_web.sendHeader("Location", "/", true);
   s_web.send(302, "text/plain", "");
+}
+
+// ---------- 网页服务生命周期 ----------
+// 配网与联网两种状态共用同一个 80 端口网页：
+// 配网时经 192.168.4.1 访问；联网时经设备局域网 IP 访问，随时增删已保存 WiFi。
+static void web_start() {
+  if (s_web_running) return;
+  s_web.on("/save", HTTP_POST, handle_save);
+  s_web.on("/del", HTTP_GET, handle_del);
+  s_web.onNotFound(handle_portal);
+  s_web.begin();
+  s_web_running = true;
+}
+
+static void web_restart() {
+  s_web.stop();
+  s_web_running = false;
+  web_start();
 }
 
 // ---------- 对外接口 ----------
@@ -275,25 +378,28 @@ void prov_begin() {
   delay(100);
   s_dns.setErrorReplyCode(DNSReplyCode::NoError);
   s_dns.start(53, "*", WiFi.softAPIP());
-  s_web.on("/save", HTTP_POST, handle_save);
-  s_web.on("/del", HTTP_GET, handle_del);
-  s_web.onNotFound(handle_portal);
-  s_web.begin();
+  web_start();
   s_active = true;
 }
 
 void prov_end() {
   if (!s_active) return;
-  s_web.stop();
   s_dns.stop();
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);  // STA 已连上，切回纯 STA 省电
   s_active = false;
   s_waiting_ssid[0] = '\0';
+  web_restart();  // 模式切换会重建网络接口，重启监听让管理页在局域网继续可用
   Serial.println("[Prov] 已退出配网模式");
 }
 
+// WiFi 上线后调用：确保网页监听绑定到新网络接口，管理页经设备 IP 可达。
+void prov_web_refresh() {
+  if (s_web_running) web_restart();
+  else web_start();
+}
+
 void prov_loop() {
-  s_dns.processNextRequest();
+  if (s_active) s_dns.processNextRequest();
   s_web.handleClient();
 }

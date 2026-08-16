@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <ESPmDNS.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
 
@@ -188,8 +189,15 @@ void net_loop() {
       Serial.printf("[WiFi] 已连接! IP: %s DNS: %s\n",
                     WiFi.localIP().toString().c_str(),
                     WiFi.dnsIP(0).toString().c_str());
+      prov_web_refresh();  // 重建网页监听，WiFi 管理页经设备 IP 可达
+      // mDNS：iPhone Safari 直接访问 http://viora.local/，无需查 IP；
+      // 也保证浏览器记住的登录凭据不随 DHCP 换 IP 失效。
+      if (MDNS.begin(WEB_MDNS_HOST)) {
+        Serial.printf("[Web] 管理页: http://%s.local/\n", WEB_MDNS_HOST);
+      }
     }
     if (!s_target_ready) start_websocket();
+    prov_loop();  // 联网时网页服务常驻（http://设备IP/ 增删已保存 WiFi）
   } else {
     s_wifi_online = false;
     s_idle_power_save = false;
