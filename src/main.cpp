@@ -41,7 +41,9 @@ static bool s_rearm_pending = false;
 static bool s_exit_pending = false;
 static int s_consec_errors = 0;
 static bool s_followup_keep_preroll = false;  // ack_done 后重开麦需保留前置音频
-static uint32_t s_wake_ack_start_ms = 0;      // 本地确认音开始播放的墙钟时刻
+static uint32_t s_wake_ack_start_ms = 0;      // 唤醒决定窗开始时刻
+static bool s_ack_playing = false;            // 决定窗已过，确认音播放中
+static int s_ack_voice_frames = 0;            // 决定窗内连续人声帧数
 
 // 播放中 AEC/VAD 打断状态。
 static bool s_accept_tts_audio = false;
@@ -146,11 +148,12 @@ static void enter_listening(ListenOrigin origin, bool force_preroll = false) {
                 static_cast<unsigned long>(s_preroll_ms));
 }
 
-// 唤醒命中 → 本地立即播放确认音（Siri 式即时回应），同时按唤醒轮流程
-// 上传前置音频。确认音期间 AEC 持续运行：
-//  - 用户紧跟指令 → 打断确认音，走 LISTEN_FROM_BARGE_IN；
-//  - 用户说完后沉默 → ack 结束补传 AEC 后音频并提交唤醒轮，服务端
-//    识别出指令则直接回复，识别为空则回 ack_done 让设备续听。
+// 唤醒命中 → 先进入决定窗（暂不开播、不上传）：用能量 VAD 判断用户是否
+// 紧跟指令（一口气）。
+//  - 决定窗内连续人声 → enter_listening(WAKE) 走直接应答：上传前置音频、
+//    继续聆听，不播确认音，回复直达；
+//  - 决定窗内无人声 → 纯唤醒：本地播放确认音，唤醒轮零上传、零 ASR，
+//    播完直接进入连续聆听，不再等 ack_done。
 static void start_wake_ack() {
   if (!net_connected()) {
     s_state = ST_IDLE;
@@ -158,64 +161,15 @@ static void start_wake_ack() {
     Serial.println(">>> 服务器未连接，回到待唤醒");
     return;
   }
-  net_set_idle_power_save(false);
-  speech_async_reset();
-
   s_state = ST_WAKE_ACK;
-  s_listen_origin = LISTEN_FROM_WAKE;
+  s_ack_playing = false;
+  s_ack_voice_frames = 0;
   s_exit_pending = false;
   s_accept_tts_audio = false;
   s_barge_voice_frames = 0;
-  s_rec_max_vol = 0;
-  s_preroll_ms = 0;
-  s_uploaded_bytes = 0;
-  s_upload_failed_bytes = 0;
-  s_live_voice_seen = false;
   s_wake_ack_start_ms = millis();
-  s_playback_start_ms = s_wake_ack_start_ms;
-
-  char start_frame[256];
-  snprintf(start_frame, sizeof(start_frame),
-           "{\"type\":\"audio_start\",\"source\":\"wake\","
-           "\"new_conversation\":true,\"wake_word\":\"%s\","
-           "\"local_ack\":true}", WAKE_WORD);
-  net_send_json(start_frame);
-  send_ring_audio();
-  audio_ring_clear();
-
-  // AEC 参考由独立播放任务按同一时间轴排队，确认音回声不会漏进麦克风。
-  audio_mark_tts_start();
-  audio_play_push(wake_ack_pcm_data,
-                  static_cast<uint32_t>(wake_ack_pcm_len));
-  audio_mark_tts_end();
-  Serial.printf(">>> 唤醒词命中：%s！本地确认音已开播（%uB）\n", WAKE_WORD,
-                static_cast<unsigned>(wake_ack_pcm_len));
-}
-
-// 确认音播完：把 AEC 处理后的确认音期间音频（若用户紧跟说话则含其首字）
-// 补上传并提交唤醒轮。服务端识别为空 → ack_done（继续聆听）；识别出
-// 指令 → 正常回复。裁剪由服务端唤醒词前缀剥离负责，这里不裁。
-static void commit_wake_ack_round(uint32_t now_ms) {
-  send_ring_audio();
-  const uint32_t pcm_ms = static_cast<uint32_t>(
-      s_uploaded_bytes * 1000ULL / (SR_SAMPLE_RATE * sizeof(int16_t)));
-  const uint32_t wall_audio_ms =
-      s_preroll_ms + (now_ms - s_wake_ack_start_ms);
-  char end_frame[256];
-  snprintf(end_frame, sizeof(end_frame),
-           "{\"type\":\"audio_end\",\"trim_start_ms\":0,"
-           "\"trim_end_ms\":0,\"endpoint_ms\":0,"
-           "\"pcm_ms\":%lu,\"wall_audio_ms\":%lu,"
-           "\"clock_drift_ms\":0}",
-           static_cast<unsigned long>(pcm_ms),
-           static_cast<unsigned long>(wall_audio_ms));
-  net_send_json(end_frame);
-  s_state = ST_PROCESSING;
-  Serial.printf(
-      ">>> 确认音结束：录音=%lums 上传=%luB/%lums，等待服务端判决\n",
-      static_cast<unsigned long>(now_ms - s_wake_ack_start_ms),
-      static_cast<unsigned long>(s_uploaded_bytes),
-      static_cast<unsigned long>(pcm_ms));
+  Serial.printf(">>> 唤醒词命中：%s！决定窗 %dms 内判断是否紧跟指令\n",
+                WAKE_WORD, WAKE_ACK_DECIDE_MS);
 }
 
 static void end_active_session(const char *reason) {
@@ -477,7 +431,7 @@ void loop() {
 
   // 独立播放任务会把扬声器 PCM 及其 AEC 参考按相同时间轴排队；
   // 此处取出与刚完成的麦克风帧对应的一块。
-  if (s_state == ST_PLAYING || s_state == ST_WAKE_ACK) {
+  if (s_state == ST_PLAYING || (s_state == ST_WAKE_ACK && s_ack_playing)) {
     audio_play_reference(playback_ref, frames);
   }
   // 极低内存等异常情况下若播放任务创建失败，仍保留主循环兜底。
@@ -487,8 +441,10 @@ void loop() {
   // 每次 WS 重连后重新填充 1.5s 特征窗形成盲区。离线命中时
   // enter_listening() 会给出明确日志并安全留在 IDLE。
   // 服务器处理中同样入环：本地确认音播完后用户抢先开口，首字也不会丢
-  // （ack_done → 以保留前置的方式重开聆听）。
-  if (s_state == ST_IDLE || s_state == ST_PROCESSING) {
+  // （ack_done → 以保留前置的方式重开聆听）。唤醒决定窗（确认音未开播
+  // 阶段）也要入环：紧跟指令的原始音频由这里保留。
+  if (s_state == ST_IDLE || s_state == ST_PROCESSING ||
+      (s_state == ST_WAKE_ACK && !s_ack_playing)) {
     audio_ring_push(pcm, frames);
   }
 
@@ -522,7 +478,7 @@ void loop() {
   static int16_t afe_out[512];
   bool is_speech = false;
   bool have_afe = false;
-  if (s_state == ST_PLAYING || s_state == ST_WAKE_ACK) {
+  if (s_state == ST_PLAYING || (s_state == ST_WAKE_ACK && s_ack_playing)) {
     speech_async_submit(pcm, playback_ref, frames);
     // 队列中若有多帧，优先跟上最新时间轴；每帧都用于
     // barge-in 连续证据，避免丢掉用户持续说话的信号。
@@ -547,7 +503,7 @@ void loop() {
     }
   }
 
-  if (s_state == ST_IDLE ||
+  if (s_state == ST_IDLE || s_state == ST_WAKE_ACK ||
       (s_state == ST_LISTENING && !s_turn.speech_started())) {
     vad_observe(vol_l);
   }
@@ -562,9 +518,37 @@ void loop() {
   const bool neural_speech = s_state == ST_PLAYING && have_afe && is_speech;
   const bool turn_speech = neural_speech || energy_speech;
 
-  if (s_state == ST_WAKE_ACK && audio_playback_finished()) {
+  if (s_state == ST_WAKE_ACK && !s_ack_playing) {
+    // 决定窗：连续人声 → 一口气指令，直接进入聆听并上传前置；
+    // 无人声且窗满 → 纯唤醒，开播本地确认音，唤醒轮零上传零 ASR。
+    if (energy_speech) {
+      if (++s_ack_voice_frames >= WAKE_ACK_VOICE_FRAMES) {
+        Serial.println(">>> 决定窗内检测到人声：紧跟指令，直接进入聆听");
+        enter_listening(LISTEN_FROM_WAKE);
+      }
+    } else {
+      s_ack_voice_frames = 0;
+    }
+    if (s_state == ST_WAKE_ACK && !s_ack_playing &&
+        static_cast<int32_t>(millis() - s_wake_ack_start_ms) >=
+            WAKE_ACK_DECIDE_MS) {
+      s_ack_playing = true;
+      s_playback_start_ms = millis();
+      audio_ring_clear();      // 决定窗原始音频不再需要
+      speech_async_reset();    // 使旧会话 AFE 结果失效，AEC 参考从零开始
+      audio_mark_tts_start();
+      audio_play_push(wake_ack_pcm_data,
+                      static_cast<uint32_t>(wake_ack_pcm_len));
+      audio_mark_tts_end();
+      Serial.printf(">>> 纯唤醒：本地确认音已开播（%uB），零上传零 ASR\n",
+                    static_cast<unsigned>(wake_ack_pcm_len));
+    }
+  }
+
+  if (s_state == ST_WAKE_ACK && s_ack_playing && audio_playback_finished()) {
     s_accept_tts_audio = false;
-    commit_wake_ack_round(millis());
+    Serial.println(">>> 确认音结束，直接进入连续聆听（无需服务端判决）");
+    enter_listening(LISTEN_FROM_FOLLOWUP);
   }
 
   if (s_state == ST_PLAYING && audio_playback_finished()) {

@@ -11,10 +11,14 @@
 //       训练完成会自动同步到这里并重新编译固件。
 // ============================================================
 #define WAKE_WORD "Hi Vesper"
-// 本地唤醒确认音：KWS 命中后立刻播放内置确认音（scripts/gen_wake_ack.py
-// 生成，Siri 式即时回应），不再等服务端合成 ack。设为 0 回退到旧流程
-// （服务端 WAKE_ACK_REPLY 下发 TTS ack）。
+// 本地唤醒确认音：KWS 命中后先进入决定窗（WAKE_ACK_DECIDE_MS，期间不
+// 开播不上传），窗内检测到连续人声说明用户紧跟指令 → 直接应答；无人声
+// 才判定纯唤醒：本地播放确认音（scripts/gen_wake_ack.py 生成），唤醒轮
+// 零上传、零 ASR，播完直接进入连续聆听。设为 0 回退到旧流程（上传唤醒
+// 轮，服务端 WAKE_ACK_REPLY 下发 TTS ack）。
 #define ENABLE_LOCAL_WAKE_ACK 1
+#define WAKE_ACK_DECIDE_MS     350  // 唤醒决定窗时长
+#define WAKE_ACK_VOICE_FRAMES  2    // 约 64ms 连续人声即判定"紧跟指令"
 // 唤醒轮提交前，整段录音（含 900ms 前置）的峰值低于此值视为“没人说话”，
 // 不提交也不上传，继续聆听等待。按原始实机日志换算，取 I2S 高 16 bit 后
 // 静音峰值预期 <60，正常说话通常 >250。
