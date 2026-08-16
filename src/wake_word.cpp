@@ -6,7 +6,6 @@
 #include <new>
 #include <string.h>
 
-#include "dsps_fft2r.h"
 #include "hi_vesper_frontend_data.h"
 #include "hi_vesper_golden_data.h"
 #include "hi_vesper_model_data.h"
@@ -30,21 +29,26 @@ constexpr int kFeatureValues = kFeatureFrames * kMelBins;
 // measured 46-51 C operating range leaves enough thermal headroom, while the
 // extra overlap materially improves casual/quiet wake-word recall.
 constexpr int kInferenceFrameStride = 10;  // 100 ms at a 10 ms feature hop.
-// 真人语音实测分两档：清晰发音单窗可冲到 0.93~0.98（直通兑住）；随意或连续
+// 真人语音实测分两档：清晰发音单窗可冲到 0.93~0.98（直通兜住）；随意或连续
 // 重复说时是 0.30~0.70 的平台，轻一些的重复尝试常见“双峰”形态（两个
 // 0.62~0.65 的峰夹着 0.30 左右的谷，单峰下 4 窗内只有 2 窗过 0.40）。
-// 门限据此按实机数据校准：最近 4 个 100ms 推理窗中至少 2 个 p >= 0.40 且峰值
-// p >= 0.60；任一窗口 p >= 0.95 直接触发（同时缩短 100~200ms 触发延迟）。
-// 证据路径额外要求当前 1.5s 模型窗口内的麦克风峰值达到
-// kEnergyGatePeak（旧标度实测静音峰值 <240，换算到高 16 bit 后 <60），
-// 防止纯静音/底噪在低门限下误触。能量窗与模型窗对齐，避免概率峰滞后于
-// 发音时，较短的能量历史已经把有效语音丢掉。
-// 音乐/电视误触风险靠 0.95 直通高门限、双窗宽证据与 2.5s 冷却兑底；
+// 触发策略 v3（按实机分数分布校准，不再粗暴下调全部阈值）：
+//  - 直通：任一窗口 p >= 0.95 直接触发（不需要能量门，几乎只出现在真唤醒词）；
+//  - 强单窗：任一窗口 p >= 0.70 且能量门通过即触发（接住单峰型发音，
+//    如 0.7266 那次开机命中与旧日志里的 0.8477）；
+//  - 较宽证据：最近 8 个 100ms 窗（≈800ms）中至少 2 个 p >= 0.45 且峰值
+//    p >= 0.60（接住“双峰夹谷”型，单看 4 窗凑不齐 2 次 0.40 的形态）；
+//  - 能量门：强单窗与宽证据都要求当前 1.5s 模型窗内麦克风峰值达到
+//    kEnergyGatePeak（旧标度实测静音峰值 <240，换算到高 16 bit 后 <60），
+//    防止纯静音/底噪在低门限下误触。能量窗与模型窗对齐，避免概率峰滞后
+//    于发音时较短的能量历史已经把有效语音丢掉。
+// 音乐/电视误触风险靠 0.95/0.70 直通与证据双门限、能量门与 2.5s 冷却兜底；
 // 继续用 cand 日志观察实机误触率后再定。
-constexpr float kEvidenceThreshold = 0.40f;
+constexpr float kEvidenceThreshold = 0.45f;
 constexpr float kEvidencePeakThreshold = 0.60f;
+constexpr float kStrongWindowThreshold = 0.70f;
 constexpr float kDirectTriggerThreshold = 0.95f;
-constexpr int kEvidenceWindow = 4;
+constexpr int kEvidenceWindow = 8;
 constexpr int kEvidenceRequiredHits = 2;
 constexpr uint32_t kCooldownMs = 2500;
 // 证据路径的麦克风能量门：最近 48 个 32ms 采集块（≈1.536s）内的峰值。
@@ -99,6 +103,71 @@ uint32_t s_last_inference_us = 0;
 float s_last_probability = 0.0f;
 bool s_ready = false;
 bool s_was_enabled = false;
+
+// ------------------------------------------------------------------
+// 私有 512 点复 FFT（完全独立于 esp-dsp 全局表）。
+// 教训：esp-sr 的 AFE 特征模块（mfcc_fbank / speech_features）在会话中会
+// deinit/init 共享的 dsps_fft2r 全局 twiddle/位反转表，而且它的 size 约定
+// 是 N/2。第一段 TTS 跑过 AFE 之后，KWS 的 512 点 FFT 拿到的就是按 esp-sr
+// 约定生成的表，频谱全部失真，模型输出恒为 0 —— 现象就是“开机第一次
+// 唤醒正常，对话之后再怎么叫都叫不醒”。这里自建表，不再共享任何状态。
+// ------------------------------------------------------------------
+alignas(16) float s_kws_fft_w[kFftLength];          // N/2 个复数 twiddle
+alignas(16) uint16_t s_kws_fft_rev[kFftLength];     // 位反转排列
+bool s_kws_fft_ready = false;
+
+void kws_fft_init() {
+  if (s_kws_fft_ready) return;
+  for (int i = 0; i < kFftLength / 2; ++i) {
+    const float angle = 2.0f * PI * static_cast<float>(i) / kFftLength;
+    s_kws_fft_w[i * 2] = cosf(angle);
+    s_kws_fft_w[i * 2 + 1] = -sinf(angle);
+  }
+  for (int i = 0; i < kFftLength; ++i) {
+    int reversed = 0;
+    for (int bit = 0; bit < 9; ++bit) {
+      reversed = (reversed << 1) | ((i >> bit) & 1);
+    }
+    s_kws_fft_rev[i] = static_cast<uint16_t>(reversed);
+  }
+  s_kws_fft_ready = true;
+}
+
+// 就地 DIT 基-2 FFT：输入先按位反转，输出自然序，供 mel 谱直接取 bin。
+void kws_fft(float *data) {
+  for (int i = 0; i < kFftLength; ++i) {
+    const int j = s_kws_fft_rev[i];
+    if (j > i) {
+      float t = data[i * 2];
+      data[i * 2] = data[j * 2];
+      data[j * 2] = t;
+      t = data[i * 2 + 1];
+      data[i * 2 + 1] = data[j * 2 + 1];
+      data[j * 2 + 1] = t;
+    }
+  }
+  for (int len = 2; len <= kFftLength; len <<= 1) {
+    const int half = len >> 1;
+    const int step = kFftLength / len;
+    for (int base = 0; base < kFftLength; base += len) {
+      for (int j = 0; j < half; ++j) {
+        const int w_index = (j * step) * 2;
+        const float wr = s_kws_fft_w[w_index];
+        const float wi = s_kws_fft_w[w_index + 1];
+        const int p = base + j;
+        const int q = p + half;
+        const float qr = data[q * 2];
+        const float qi = data[q * 2 + 1];
+        const float tr = qr * wr - qi * wi;
+        const float ti = qr * wi + qi * wr;
+        data[q * 2] = data[p * 2] - tr;
+        data[q * 2 + 1] = data[p * 2 + 1] - ti;
+        data[p * 2] += tr;
+        data[p * 2 + 1] += ti;
+      }
+    }
+  }
+}
 
 void clear_detection_history() {
   memset(s_probability_history, 0, sizeof(s_probability_history));
@@ -160,8 +229,7 @@ void compute_logmel_frame(const int16_t *pcm, float *output) {
     s_fft[index * 2 + 1] = 0.0f;
   }
 
-  dsps_fft2r_fc32(s_fft, kFftLength);
-  dsps_bit_rev_fc32(s_fft, kFftLength);
+  kws_fft(s_fft);
 
   for (int mel = 0; mel < kMelBins; ++mel) {
     float energy = 0.0f;
@@ -277,10 +345,7 @@ void append_feature_from_ring() {
 
 bool wake_word_init() {
   if (s_ready) return true;
-  if (dsps_fft2r_init_fc32(nullptr, kFftLength) != ESP_OK) {
-    Serial.println("[KWS] 错误：ESP-DSP FFT 初始化失败");
-    return false;
-  }
+  kws_fft_init();
 
   s_features = static_cast<float *>(
       heap_caps_malloc(kFeatureValues * sizeof(float), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -398,7 +463,7 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
     ++s_chunks_since_arm;
   }
 
-  bool detected = false;
+  bool woken = false;
   for (int index = 0; index < samples; ++index) {
     s_audio_ring[s_audio_head] = pcm[index];
     s_audio_head = (s_audio_head + 1) % kFrameLength;
@@ -431,33 +496,35 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
         }
         int evidence_hits = 0;
         float evidence_peak = 0.0f;
-        detected = has_detection_evidence(current, &evidence_hits,
-                                          &evidence_peak);
+        const bool detected = has_detection_evidence(current, &evidence_hits,
+                                                      &evidence_peak);
         const bool direct = current >= kDirectTriggerThreshold;
+        const bool strong = current >= kStrongWindowThreshold;
         const int16_t energy_peak = recent_chunk_peak();
-        if (direct || (detected && energy_peak >= kEnergyGatePeak)) {
+        if (direct || ((strong || detected) && energy_peak >= kEnergyGatePeak)) {
           s_cooldown_until_ms = now + kCooldownMs;
           clear_detection_history();
+          woken = true;
           Serial.printf(
-              "[KWS] wake-word p=%.4f%s, evidence=%d/%d peak=%.4f, "
+              "[KWS] wake-word p=%.4f%s%s, evidence=%d/%d peak=%.4f, "
               "energy=%d, inference=%lu us\n",
                         current, direct ? " (direct)" : "",
+                        strong ? " (strong)" : "",
                         evidence_hits, kEvidenceWindow, evidence_peak,
                         static_cast<int>(energy_peak),
                         static_cast<unsigned long>(s_last_inference_us));
           break;
         }
-        if (detected && energy_peak < kEnergyGatePeak) {
+        if ((strong || detected) && energy_peak < kEnergyGatePeak) {
           Serial.printf("[KWS] 证据满足但能量过低 energy=%d，忽略\n",
                         static_cast<int>(energy_peak));
           clear_detection_history();
-          detected = false;
         }
       }
     }
   }
   if (probability != nullptr) *probability = s_last_probability;
-  return detected;
+  return woken;
 }
 
 uint32_t wake_word_last_inference_us() { return s_last_inference_us; }
