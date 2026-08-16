@@ -48,10 +48,13 @@ static uint16_t s_barge_voice_frames = 0;
 
 // 周期健康日志：monitor 无需碰巧赶上启动阶段，也能确认固件、麦克风、
 // KWS 与温度是否正常。峰值/RMS 取最近一个日志窗口的最大值。
+// 开关见 config.h 的 ENABLE_HEALTH_LOG。
+#if ENABLE_HEALTH_LOG
 static uint32_t s_health_last_ms = 0;
 static int16_t s_health_peak = 0;
 static uint16_t s_health_rms = 0;
 static float s_health_wake_probability = 0.0f;
+#endif
 
 static const char *listen_source(ListenOrigin origin) {
   if (origin == LISTEN_FROM_WAKE) return "wake";
@@ -383,9 +386,11 @@ void loop() {
   int16_t vol_l = 0;
   const int frames = audio_capture(pcm, 512, &vol_l);
   if (frames <= 0) return;
+#if ENABLE_HEALTH_LOG
   if (vol_l > s_health_peak) s_health_peak = vol_l;
   const uint16_t capture_rms = audio_capture_rms();
   if (capture_rms > s_health_rms) s_health_rms = capture_rms;
+#endif
 
   // 独立播放任务会把扬声器 PCM 及其 AEC 参考按相同时间轴排队；
   // 此处取出与刚完成的麦克风帧对应的一块。
@@ -404,6 +409,7 @@ void loop() {
   float wake_probability = 0.0f;
   const bool woken =
       wake_word_process(pcm, frames, kws_enabled, &wake_probability);
+#if ENABLE_HEALTH_LOG
   s_health_wake_probability = wake_probability;
 
   const uint32_t health_now = millis();
@@ -421,6 +427,7 @@ void loop() {
     s_health_peak = 0;
     s_health_rms = 0;
   }
+#endif
 
   // 播放时将麦克风与扬声器参考非阻塞地提交给独立
   // AFE 工作任务。主循环只轮询已完成的结果，所以即使
