@@ -29,24 +29,24 @@ constexpr int kFeatureValues = kFeatureFrames * kMelBins;
 // measured 46-51 C operating range leaves enough thermal headroom, while the
 // extra overlap materially improves casual/quiet wake-word recall.
 constexpr int kInferenceFrameStride = 10;  // 100 ms at a 10 ms feature hop.
-// 真人语音实测分两档：清晰发音单窗可冲到 0.93~0.98（直通兜住）；随意或连续
-// 重复说时是 0.30~0.70 的平台，轻一些的重复尝试常见“双峰”形态（两个
-// 0.62~0.65 的峰夹着 0.30 左右的谷，单峰下 4 窗内只有 2 窗过 0.40）。
-// 触发策略 v3（按实机分数分布校准，不再粗暴下调全部阈值）：
+// 真人语音实测分两档：清晰发音单窗可冲到 0.81~0.98（直通/强单窗兜住）；
+// 随意或连续重复说时是 0.30~0.68 的平台，轻一些的重复尝试常见“双峰”形态。
+// 触发策略 v4（按两轮实机分数分布校准）：
 //  - 直通：任一窗口 p >= 0.95 直接触发（不需要能量门，几乎只出现在真唤醒词）；
-//  - 强单窗：任一窗口 p >= 0.70 且能量门通过即触发（接住单峰型发音，
-//    如 0.7266 那次开机命中与旧日志里的 0.8477）；
+//  - 强单窗：任一窗口 p >= 0.65 且能量门通过即触发（接住单峰型发音，
+//    如 0.8125 / 0.7266 / 0.8477，以及 0.6758 这类略弱的单峰）；
 //  - 较宽证据：最近 8 个 100ms 窗（≈800ms）中至少 2 个 p >= 0.45 且峰值
-//    p >= 0.60（接住“双峰夹谷”型，单看 4 窗凑不齐 2 次 0.40 的形态）；
+//    p >= 0.55（实机复测中两次没叫醒都是“4~5 窗过 0.45 但峰值只有
+//    0.5625 / 0.5898”，卡在旧峰值门 0.60 上；0.30 以下的弱尝试仍不触发）；
 //  - 能量门：强单窗与宽证据都要求当前 1.5s 模型窗内麦克风峰值达到
-//    kEnergyGatePeak（旧标度实测静音峰值 <240，换算到高 16 bit 后 <60），
+//    kEnergyGatePeak（静音实测 23~132，真人说话 795~3651），
 //    防止纯静音/底噪在低门限下误触。能量窗与模型窗对齐，避免概率峰滞后
 //    于发音时较短的能量历史已经把有效语音丢掉。
-// 音乐/电视误触风险靠 0.95/0.70 直通与证据双门限、能量门与 2.5s 冷却兜底；
+// 音乐/电视误触风险靠 0.95/0.65 直通与证据双门限、能量门与 2.5s 冷却兜底；
 // 继续用 cand 日志观察实机误触率后再定。
 constexpr float kEvidenceThreshold = 0.45f;
-constexpr float kEvidencePeakThreshold = 0.60f;
-constexpr float kStrongWindowThreshold = 0.70f;
+constexpr float kEvidencePeakThreshold = 0.55f;
+constexpr float kStrongWindowThreshold = 0.65f;
 constexpr float kDirectTriggerThreshold = 0.95f;
 constexpr int kEvidenceWindow = 8;
 constexpr int kEvidenceRequiredHits = 2;
