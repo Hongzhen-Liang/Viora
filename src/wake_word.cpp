@@ -25,19 +25,33 @@ constexpr int kSpectrumBins = kFftLength / 2 + 1;
 constexpr int kMelBins = 40;
 constexpr int kFeatureFrames = 148;
 constexpr int kFeatureValues = kFeatureFrames * kMelBins;
-// One inference takes about 49 ms on this ESP32-S3. Running it every 50 ms
+// One inference takes about 49-59 ms on this ESP32-S3. Running it every 50 ms
 // leaves no CPU budget for I2S and the frontend, so use a 100 ms cadence.
 constexpr int kInferenceFrameStride = 10;  // 100 ms at a 10 ms feature hop.
-// Music often depresses one or two adjacent window scores without erasing the
-// complete temporal pattern. Require broad evidence instead of one very high
-// (and potentially spurious) score: 3 of the last 4 windows must be above the
-// evidence floor, with at least one strong window. These values were selected
-// against the existing clean/music/noise streaming evaluation corpus.
-constexpr float kEvidenceThreshold = 0.675f;
-constexpr float kEvidencePeakThreshold = 0.85f;
+// 真人语音实测分两档：清晰发音单窗可冲到 0.93~0.98（直通兑住）；随意或连续
+// 重复说时分数是 0.30~0.70 的平台（常见峰值 0.59~0.70），远低于 TTS 语料
+// （全部 ≥0.976）。门限据此按实机数据校准：最近 4 个 100ms 滑窗中至少 3 个
+// p >= 0.40 且峰值 p >= 0.60；任一窗口 p >= 0.95 直接触发（同时缩短
+// 100~200ms 触发延迟）。证据路径额外要求最近约 512ms 麦克风峰值达到
+// kEnergyGatePeak（实测静音峰值 <240），防止纯静音/底噪在低门限下误触。
+// 音乐/电视误触风险靠 0.95 直通高门限、3/4 宽证据与 2.5s 冷却兑底；
+// 继续用 cand 日志观察实机误触率后再定。
+constexpr float kEvidenceThreshold = 0.40f;
+constexpr float kEvidencePeakThreshold = 0.60f;
+constexpr float kDirectTriggerThreshold = 0.95f;
 constexpr int kEvidenceWindow = 4;
 constexpr int kEvidenceRequiredHits = 3;
 constexpr uint32_t kCooldownMs = 2500;
+// 证据路径的麦克风能量门：最近 16 个 32ms 采集块（≈512ms）内的峰值。
+constexpr int kEnergyHistoryChunks = 16;
+constexpr int16_t kEnergyGatePeak = 400;
+// 重武装诊断：记录重新武装后前 16 个 32ms 块（≈512ms）的麦克风峰值，用于
+// 验证“TTS 尾音/房间混响是否污染重武装后的首个特征窗”（静音基线 <240）。
+constexpr int kArmHeadChunks = 16;
+// 候选分数诊断：打印所有 p >= 0.25 的滑窗，用于实机收集真人/噪声分数分布；
+// 收集够数据后可把 kDebugLogCandidates 置为 false 关闭。
+constexpr bool kDebugLogCandidates = true;
+constexpr float kDebugLogFloor = 0.25f;
 constexpr size_t kTensorArenaBytes = 144 * 1024;
 
 static_assert(kSpectrumBins == HI_VESPER_MEL_SPECTRUM_BINS,
@@ -69,6 +83,12 @@ int s_frames_since_inference = 0;
 float s_probability_history[kEvidenceWindow] = {};
 int s_probability_history_head = 0;
 int s_probability_history_count = 0;
+int16_t s_chunk_peaks[kEnergyHistoryChunks] = {};
+int s_chunk_peak_head = 0;
+int s_chunk_peak_count = 0;
+int16_t s_arm_head_peak = 0;
+int s_chunks_since_arm = 0;
+bool s_first_window_after_arm = false;
 uint32_t s_cooldown_until_ms = 0;
 uint32_t s_last_inference_us = 0;
 float s_last_probability = 0.0f;
@@ -79,6 +99,20 @@ void clear_detection_history() {
   memset(s_probability_history, 0, sizeof(s_probability_history));
   s_probability_history_head = 0;
   s_probability_history_count = 0;
+}
+
+void push_chunk_peak(int16_t peak) {
+  s_chunk_peaks[s_chunk_peak_head] = peak;
+  s_chunk_peak_head = (s_chunk_peak_head + 1) % kEnergyHistoryChunks;
+  if (s_chunk_peak_count < kEnergyHistoryChunks) ++s_chunk_peak_count;
+}
+
+int16_t recent_chunk_peak() {
+  int16_t maximum = 0;
+  for (int index = 0; index < s_chunk_peak_count; ++index) {
+    if (s_chunk_peaks[index] > maximum) maximum = s_chunk_peaks[index];
+  }
+  return maximum;
 }
 
 bool has_detection_evidence(float probability, int *hit_count, float *peak) {
@@ -322,6 +356,12 @@ void wake_word_reset() {
   s_feature_head = 0;
   s_frames_since_inference = 0;
   clear_detection_history();
+  memset(s_chunk_peaks, 0, sizeof(s_chunk_peaks));
+  s_chunk_peak_head = 0;
+  s_chunk_peak_count = 0;
+  s_arm_head_peak = 0;
+  s_chunks_since_arm = 0;
+  s_first_window_after_arm = true;
   s_last_probability = 0.0f;
   memset(s_audio_ring, 0, sizeof(s_audio_ring));
 }
@@ -337,6 +377,20 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
   if (!s_was_enabled) {
     wake_word_reset();
     s_was_enabled = true;
+    Serial.printf("[KWS] armed @%lu ms\n",
+                  static_cast<unsigned long>(millis()));
+  }
+
+  int chunk_peak = 0;
+  for (int index = 0; index < samples; ++index) {
+    const int magnitude = pcm[index] < 0 ? -static_cast<int>(pcm[index])
+                                         : static_cast<int>(pcm[index]);
+    if (magnitude > chunk_peak) chunk_peak = magnitude;
+  }
+  push_chunk_peak(chunk_peak > 32767 ? 32767 : static_cast<int16_t>(chunk_peak));
+  if (s_chunks_since_arm < kArmHeadChunks) {
+    if (chunk_peak > s_arm_head_peak) s_arm_head_peak = chunk_peak;
+    ++s_chunks_since_arm;
   }
 
   bool detected = false;
@@ -357,20 +411,42 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
           clear_detection_history();
           continue;
         }
+        const float current = probabilities[0];
+        if (kDebugLogCandidates && current >= kDebugLogFloor) {
+          if (s_first_window_after_arm) {
+            Serial.printf(
+                "[KWS] cand p=%.4f head_peak=%d, inference=%lu us\n",
+                current, static_cast<int>(s_arm_head_peak),
+                static_cast<unsigned long>(s_last_inference_us));
+            s_first_window_after_arm = false;
+          } else {
+            Serial.printf("[KWS] cand p=%.4f, inference=%lu us\n", current,
+                          static_cast<unsigned long>(s_last_inference_us));
+          }
+        }
         int evidence_hits = 0;
         float evidence_peak = 0.0f;
-        detected = has_detection_evidence(probabilities[0], &evidence_hits,
+        detected = has_detection_evidence(current, &evidence_hits,
                                           &evidence_peak);
-        if (detected) {
+        const bool direct = current >= kDirectTriggerThreshold;
+        const int16_t energy_peak = recent_chunk_peak();
+        if (direct || (detected && energy_peak >= kEnergyGatePeak)) {
           s_cooldown_until_ms = now + kCooldownMs;
           clear_detection_history();
           Serial.printf(
-              "[KWS] wake-word p=%.4f, evidence=%d/%d peak=%.4f, "
-              "inference=%lu us\n",
-                        probabilities[0], evidence_hits, kEvidenceWindow,
-                        evidence_peak,
+              "[KWS] wake-word p=%.4f%s, evidence=%d/%d peak=%.4f, "
+              "energy=%d, inference=%lu us\n",
+                        current, direct ? " (direct)" : "",
+                        evidence_hits, kEvidenceWindow, evidence_peak,
+                        static_cast<int>(energy_peak),
                         static_cast<unsigned long>(s_last_inference_us));
           break;
+        }
+        if (detected && energy_peak < kEnergyGatePeak) {
+          Serial.printf("[KWS] 证据满足但能量过低 energy=%d，忽略\n",
+                        static_cast<int>(energy_peak));
+          clear_detection_history();
+          detected = false;
         }
       }
     }
