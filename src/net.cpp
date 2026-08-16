@@ -26,6 +26,7 @@ static constexpr uint8_t WS_LOOP_PUMP_PASSES = 12;
 static uint32_t s_wifi_retry_ms = 0;
 static bool s_wifi_online = false;
 static bool s_target_ready = false;
+static bool s_idle_power_save = false;
 
 // 多网络轮询：候选列表 = NVS 已保存网络 + secrets.h 默认网络
 static int s_wifi_cand = -1;        // 当前尝试的候选下标
@@ -183,6 +184,7 @@ void net_loop() {
       // 关闭 WiFi 省电：调制解调器睡眠会在长 TTS 流接收时造成
       // 周期性的收包停顿，表现为播放欠载甚至心跳误判断连。
       esp_wifi_set_ps(WIFI_PS_NONE);
+      s_idle_power_save = false;
       Serial.printf("[WiFi] 已连接! IP: %s DNS: %s\n",
                     WiFi.localIP().toString().c_str(),
                     WiFi.dnsIP(0).toString().c_str());
@@ -190,6 +192,7 @@ void net_loop() {
     if (!s_target_ready) start_websocket();
   } else {
     s_wifi_online = false;
+    s_idle_power_save = false;
     if (s_wifi_was_up) {
       s_wifi_was_up = false;
       s_wifi_down_since = millis();
@@ -238,6 +241,18 @@ bool net_connected() {
 
 bool net_provisioning_active() {
   return prov_active();
+}
+
+void net_set_idle_power_save(bool enabled) {
+  if (WiFi.status() != WL_CONNECTED || enabled == s_idle_power_save) return;
+  const wifi_ps_type_t mode = enabled ? WIFI_PS_MIN_MODEM : WIFI_PS_NONE;
+  const esp_err_t err = esp_wifi_set_ps(mode);
+  if (err == ESP_OK) {
+    s_idle_power_save = enabled;
+    Serial.printf("[WiFi] 省电模式: %s\n", enabled ? "IDLE" : "OFF");
+  } else {
+    Serial.printf("[WiFi] 切换省电模式失败: %s\n", esp_err_to_name(err));
+  }
 }
 
 bool net_send_audio(const uint8_t *data, size_t len) {

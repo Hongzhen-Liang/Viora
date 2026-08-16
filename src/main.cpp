@@ -46,6 +46,13 @@ static uint32_t s_playback_start_ms = 0;
 static uint32_t s_tts_received_bytes = 0;
 static uint16_t s_barge_voice_frames = 0;
 
+// 周期健康日志：monitor 无需碰巧赶上启动阶段，也能确认固件、麦克风、
+// KWS 与温度是否正常。峰值/RMS 取最近一个日志窗口的最大值。
+static uint32_t s_health_last_ms = 0;
+static int16_t s_health_peak = 0;
+static uint16_t s_health_rms = 0;
+static float s_health_wake_probability = 0.0f;
+
 static const char *listen_source(ListenOrigin origin) {
   if (origin == LISTEN_FROM_WAKE) return "wake";
   if (origin == LISTEN_FROM_BARGE_IN) return "barge_in";
@@ -83,6 +90,9 @@ static void enter_listening(ListenOrigin origin) {
     Serial.println(">>> 服务器未连接，回到待唤醒");
     return;
   }
+
+  // 发送实时 PCM 前关闭 modem sleep，避免首包被 DTIM 等待拖延。
+  net_set_idle_power_save(false);
 
   const bool keep_preroll =
       origin == LISTEN_FROM_WAKE || origin == LISTEN_FROM_BARGE_IN;
@@ -343,6 +353,9 @@ void setup() {
 void loop() {
   net_loop();
 
+  // 只有纯待唤醒阶段允许 modem sleep；流式录放音保持全性能。
+  net_set_idle_power_save(s_state == ST_IDLE && net_connected());
+
   LedMode led_mode;
   if (net_provisioning_active()) led_mode = LED_MODE_PROVISIONING;
   else if (!net_connected()) led_mode = LED_MODE_ERROR;
@@ -368,6 +381,9 @@ void loop() {
   int16_t vol_l = 0;
   const int frames = audio_capture(pcm, 512, &vol_l);
   if (frames <= 0) return;
+  if (vol_l > s_health_peak) s_health_peak = vol_l;
+  const uint16_t capture_rms = audio_capture_rms();
+  if (capture_rms > s_health_rms) s_health_rms = capture_rms;
 
   // 独立播放任务会把扬声器 PCM 及其 AEC 参考按相同时间轴排队；
   // 此处取出与刚完成的麦克风帧对应的一块。
@@ -384,6 +400,23 @@ void loop() {
   float wake_probability = 0.0f;
   const bool woken =
       wake_word_process(pcm, frames, kws_enabled, &wake_probability);
+  s_health_wake_probability = wake_probability;
+
+  const uint32_t health_now = millis();
+  if (health_now - s_health_last_ms >= 5000) {
+    s_health_last_ms = health_now;
+    Serial.printf(
+        "[HEALTH] uptime=%lus state=%d ws=%d mic_peak=%d mic_rms=%u "
+        "kws_p=%.4f infer=%.1fms temp=%.1fC heap=%u\n",
+        static_cast<unsigned long>(health_now / 1000),
+        static_cast<int>(s_state), net_connected() ? 1 : 0,
+        static_cast<int>(s_health_peak), static_cast<unsigned>(s_health_rms),
+        s_health_wake_probability,
+        wake_word_last_inference_us() / 1000.0f,
+        temperatureRead(), static_cast<unsigned>(ESP.getFreeHeap()));
+    s_health_peak = 0;
+    s_health_rms = 0;
+  }
 
   // 播放时将麦克风与扬声器参考非阻塞地提交给独立
   // AFE 工作任务。主循环只轮询已完成的结果，所以即使

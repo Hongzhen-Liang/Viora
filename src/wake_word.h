@@ -12,5 +12,8 @@ bool wake_word_init();
 bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
                        float *probability = nullptr);
 
+// 供周期健康日志使用，不触发额外推理。
+uint32_t wake_word_last_inference_us();
+
 // Drop all live frontend history and temporal evidence state.
 void wake_word_reset();

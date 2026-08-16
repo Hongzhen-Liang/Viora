@@ -25,13 +25,15 @@ constexpr int kSpectrumBins = kFftLength / 2 + 1;
 constexpr int kMelBins = 40;
 constexpr int kFeatureFrames = 148;
 constexpr int kFeatureValues = kFeatureFrames * kMelBins;
-// One inference takes about 49-59 ms on this ESP32-S3. Running it every 50 ms
-// leaves no CPU budget for I2S and the frontend, so use a 100 ms cadence.
-constexpr int kInferenceFrameStride = 10;  // 100 ms at a 10 ms feature hop.
+// One inference takes about 49-59 ms on this ESP32-S3. A 100 ms cadence keeps
+// one core near 50% even while idle and makes the module unnecessarily hot.
+// A 150 ms cadence still gives several overlapping 1.5 s windows per wake-word
+// utterance while cutting steady-state KWS compute and heat by about one third.
+constexpr int kInferenceFrameStride = 15;  // 150 ms at a 10 ms feature hop.
 // 真人语音实测分两档：清晰发音单窗可冲到 0.93~0.98（直通兑住）；随意或连续
 // 重复说时是 0.30~0.70 的平台，轻一些的重复尝试常见“双峰”形态（两个
 // 0.62~0.65 的峰夹着 0.30 左右的谷，单峰下 4 窗内只有 2 窗过 0.40）。
-// 门限据此按实机数据校准：最近 4 个 100ms 滑窗中至少 2 个 p >= 0.40 且峰值
+// 门限据此按实机数据校准：最近 4 个推理窗中至少 2 个 p >= 0.40 且峰值
 // p >= 0.60；任一窗口 p >= 0.95 直接触发（同时缩短 100~200ms 触发延迟）。
 // 证据路径额外要求最近约 512ms 麦克风峰值达到 kEnergyGatePeak（实测静音
 // 峰值 <240），防止纯静音/底噪在低门限下误触。
@@ -455,3 +457,5 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
   if (probability != nullptr) *probability = s_last_probability;
   return detected;
 }
+
+uint32_t wake_word_last_inference_us() { return s_last_inference_us; }
