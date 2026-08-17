@@ -1,170 +1,458 @@
 {
-  "test_files": 520,
+  "model_path": "models/hi_vesper.keras",
+  "tflite_path": "models/hi_vesper_int8.tflite",
+  "test_files": 642,
   "class_counts": {
-    "wake": 60,
-    "unknown": 415,
-    "noise": 45
+    "wake": 75,
+    "unknown": 520,
+    "noise": 47
   },
-  "fp32_accuracy": 0.9615384615384616,
-  "int8_accuracy": 0.9615384615384616,
-  "fp32_int8_class_agreement": 1.0,
-  "fp32_int8_max_probability_delta": 0.19277161359786987,
+  "fp32_accuracy": 0.9034267912772586,
+  "int8_accuracy": 0.8909657320872274,
+  "fp32_int8_class_agreement": 0.9797507788161994,
+  "fp32_int8_max_probability_delta": 0.10433089733123779,
   "fp32_confusion_matrix": [
     [
-      60,
-      0,
-      0
+      62,
+      12,
+      1
     ],
     [
-      3,
-      410,
-      2
+      35,
+      477,
+      8
     ],
     [
       0,
-      15,
-      30
+      6,
+      41
     ]
   ],
   "int8_confusion_matrix": [
     [
-      60,
-      0,
+      61,
+      14,
       0
     ],
     [
-      3,
-      410,
-      2
+      34,
+      479,
+      7
     ],
     [
       0,
       15,
-      30
+      32
     ]
   ],
   "fp32_classification": {
     "wake": {
-      "precision": 0.9523809523809523,
-      "recall": 1.0,
-      "f1-score": 0.975609756097561,
-      "support": 60.0
+      "precision": 0.6391752577319587,
+      "recall": 0.8266666666666667,
+      "f1-score": 0.7209302325581395,
+      "support": 75.0
     },
     "unknown": {
-      "precision": 0.9647058823529412,
-      "recall": 0.9879518072289156,
-      "f1-score": 0.9761904761904762,
-      "support": 415.0
+      "precision": 0.9636363636363636,
+      "recall": 0.9173076923076923,
+      "f1-score": 0.9399014778325123,
+      "support": 520.0
     },
     "noise": {
-      "precision": 0.9375,
-      "recall": 0.6666666666666666,
-      "f1-score": 0.7792207792207793,
-      "support": 45.0
+      "precision": 0.82,
+      "recall": 0.8723404255319149,
+      "f1-score": 0.845360824742268,
+      "support": 47.0
     },
-    "accuracy": 0.9615384615384616,
+    "accuracy": 0.9034267912772586,
     "macro avg": {
-      "precision": 0.9515289449112978,
-      "recall": 0.8848728246318607,
-      "f1-score": 0.9103403371696054,
-      "support": 520.0
+      "precision": 0.8076038737894408,
+      "recall": 0.872104928168758,
+      "f1-score": 0.8353975117109732,
+      "support": 642.0
     },
     "weighted avg": {
-      "precision": 0.960929419844861,
-      "recall": 0.9615384615384616,
-      "f1-score": 0.9590780154804543,
-      "support": 520.0
+      "precision": 0.915216594113405,
+      "recall": 0.9034267912772586,
+      "f1-score": 0.9073995244200211,
+      "support": 642.0
     }
   },
   "int8_classification": {
     "wake": {
-      "precision": 0.9523809523809523,
-      "recall": 1.0,
-      "f1-score": 0.975609756097561,
-      "support": 60.0
+      "precision": 0.6421052631578947,
+      "recall": 0.8133333333333334,
+      "f1-score": 0.7176470588235294,
+      "support": 75.0
     },
     "unknown": {
-      "precision": 0.9647058823529412,
-      "recall": 0.9879518072289156,
-      "f1-score": 0.9761904761904762,
-      "support": 415.0
+      "precision": 0.9429133858267716,
+      "recall": 0.9211538461538461,
+      "f1-score": 0.9319066147859922,
+      "support": 520.0
     },
     "noise": {
-      "precision": 0.9375,
-      "recall": 0.6666666666666666,
-      "f1-score": 0.7792207792207793,
-      "support": 45.0
+      "precision": 0.8205128205128205,
+      "recall": 0.6808510638297872,
+      "f1-score": 0.7441860465116279,
+      "support": 47.0
     },
-    "accuracy": 0.9615384615384616,
+    "accuracy": 0.8909657320872274,
     "macro avg": {
-      "precision": 0.9515289449112978,
-      "recall": 0.8848728246318607,
-      "f1-score": 0.9103403371696054,
-      "support": 520.0
+      "precision": 0.801843823165829,
+      "recall": 0.8051127477723222,
+      "f1-score": 0.7979132400403831,
+      "support": 642.0
     },
     "weighted avg": {
-      "precision": 0.960929419844861,
-      "recall": 0.9615384615384616,
-      "f1-score": 0.9590780154804543,
-      "support": 520.0
+      "precision": 0.8988114609515045,
+      "recall": 0.8909657320872274,
+      "f1-score": 0.8931335097920984,
+      "support": 642.0
     }
   },
   "fp32_thresholds": [
     {
+      "threshold": 0.25,
+      "wake_recall": 0.9466666666666667,
+      "false_accept_rate": 0.09700176366843033,
+      "false_accept_count": 55,
+      "negative_count": 567
+    },
+    {
+      "threshold": 0.35,
+      "wake_recall": 0.9066666666666666,
+      "false_accept_rate": 0.07936507936507936,
+      "false_accept_count": 45,
+      "negative_count": 567
+    },
+    {
+      "threshold": 0.45,
+      "wake_recall": 0.84,
+      "false_accept_rate": 0.06349206349206349,
+      "false_accept_count": 36,
+      "negative_count": 567
+    },
+    {
+      "threshold": 0.5,
+      "wake_recall": 0.8266666666666667,
+      "false_accept_rate": 0.06172839506172839,
+      "false_accept_count": 35,
+      "negative_count": 567
+    },
+    {
+      "threshold": 0.6,
+      "wake_recall": 0.8133333333333334,
+      "false_accept_rate": 0.047619047619047616,
+      "false_accept_count": 27,
+      "negative_count": 567
+    },
+    {
       "threshold": 0.9,
-      "wake_recall": 1.0,
-      "false_accept_rate": 0.0,
-      "false_accept_count": 0,
-      "negative_count": 460
+      "wake_recall": 0.3333333333333333,
+      "false_accept_rate": 0.01763668430335097,
+      "false_accept_count": 10,
+      "negative_count": 567
+    },
+    {
+      "threshold": 0.95,
+      "wake_recall": 0.14666666666666667,
+      "false_accept_rate": 0.007054673721340388,
+      "false_accept_count": 4,
+      "negative_count": 567
     },
     {
       "threshold": 0.97,
-      "wake_recall": 1.0,
-      "false_accept_rate": 0.0,
-      "false_accept_count": 0,
-      "negative_count": 460
+      "wake_recall": 0.05333333333333334,
+      "false_accept_rate": 0.003527336860670194,
+      "false_accept_count": 2,
+      "negative_count": 567
     }
   ],
   "int8_thresholds": [
     {
+      "threshold": 0.25,
+      "wake_recall": 0.9466666666666667,
+      "false_accept_rate": 0.09347442680776014,
+      "false_accept_count": 53,
+      "negative_count": 567
+    },
+    {
+      "threshold": 0.35,
+      "wake_recall": 0.92,
+      "false_accept_rate": 0.07407407407407407,
+      "false_accept_count": 42,
+      "negative_count": 567
+    },
+    {
+      "threshold": 0.45,
+      "wake_recall": 0.84,
+      "false_accept_rate": 0.06525573192239859,
+      "false_accept_count": 37,
+      "negative_count": 567
+    },
+    {
+      "threshold": 0.5,
+      "wake_recall": 0.8133333333333334,
+      "false_accept_rate": 0.059964726631393295,
+      "false_accept_count": 34,
+      "negative_count": 567
+    },
+    {
+      "threshold": 0.6,
+      "wake_recall": 0.7866666666666666,
+      "false_accept_rate": 0.04938271604938271,
+      "false_accept_count": 28,
+      "negative_count": 567
+    },
+    {
       "threshold": 0.9,
-      "wake_recall": 1.0,
-      "false_accept_rate": 0.0,
-      "false_accept_count": 0,
-      "negative_count": 460
+      "wake_recall": 0.3333333333333333,
+      "false_accept_rate": 0.014109347442680775,
+      "false_accept_count": 8,
+      "negative_count": 567
+    },
+    {
+      "threshold": 0.95,
+      "wake_recall": 0.12,
+      "false_accept_rate": 0.007054673721340388,
+      "false_accept_count": 4,
+      "negative_count": 567
     },
     {
       "threshold": 0.97,
-      "wake_recall": 1.0,
-      "false_accept_rate": 0.0,
-      "false_accept_count": 0,
-      "negative_count": 460
+      "wake_recall": 0.04,
+      "false_accept_rate": 0.003527336860670194,
+      "false_accept_count": 2,
+      "negative_count": 567
     }
   ],
   "input_quantization": {
-    "scale": 0.031313441693782806,
-    "zero_point": -23
+    "scale": 0.02856513299047947,
+    "zero_point": -15
   },
   "output_quantization": {
     "scale": 0.00390625,
     "zero_point": -128
   },
   "limitations": [
-    "6 personal human wake files are train-only; test wake positives remain TTS-only",
-    "the corpus contains zero Hi-Vesper hard negatives"
+    "6 personal human wake files are train-only; test wake positives remain TTS-only"
+  ],
+  "test_hard_negative_files": 102,
+  "int8_hard_negative_thresholds": [
+    {
+      "threshold": 0.25,
+      "false_accept_rate": 0.4019607843137255,
+      "false_accept_count": 41,
+      "negative_count": 102
+    },
+    {
+      "threshold": 0.35,
+      "false_accept_rate": 0.3333333333333333,
+      "false_accept_count": 34,
+      "negative_count": 102
+    },
+    {
+      "threshold": 0.45,
+      "false_accept_rate": 0.3137254901960784,
+      "false_accept_count": 32,
+      "negative_count": 102
+    },
+    {
+      "threshold": 0.5,
+      "false_accept_rate": 0.29411764705882354,
+      "false_accept_count": 30,
+      "negative_count": 102
+    },
+    {
+      "threshold": 0.6,
+      "false_accept_rate": 0.23529411764705882,
+      "false_accept_count": 24,
+      "negative_count": 102
+    },
+    {
+      "threshold": 0.9,
+      "false_accept_rate": 0.0784313725490196,
+      "false_accept_count": 8,
+      "negative_count": 102
+    },
+    {
+      "threshold": 0.95,
+      "false_accept_rate": 0.0392156862745098,
+      "false_accept_count": 4,
+      "negative_count": 102
+    },
+    {
+      "threshold": 0.97,
+      "false_accept_rate": 0.0196078431372549,
+      "false_accept_count": 2,
+      "negative_count": 102
+    }
   ],
   "train_human_wake_files": 6,
   "train_human_wake_diagnostic": {
     "note": "training-set diagnostic; not an independent test metric",
-    "minimum_probability": 0.9765625,
-    "mean_probability": 0.9921875,
-    "at_or_above_0_97": 6,
+    "minimum_probability": 0.703125,
+    "mean_probability": 0.9401041865348816,
+    "at_or_above_0_97": 4,
     "count": 6
   },
-  "golden_wake_path": "/Volumes/T7_APFS/Github/ESP32Projects/PlantTalk/PlantTalkServer/wake_word_training/data/wake_word/tts/en-AU-WilliamNeural_m15_m10_329.wav",
+  "streaming_firmware_proxy": {
+    "note": "desktop proxy: temporal-variance activity gate only; ESP-SR VAD and the VAD-only loud path require board replay validation",
+    "stride_ms": 100,
+    "files": 642,
+    "windows": 18525,
+    "wake_file_recall": 0.9733333333333334,
+    "wake_files_triggered": 73,
+    "wake_files": 75,
+    "negative_files_triggered": 115,
+    "negative_files": 567,
+    "false_accepts": 115,
+    "negative_audio_hours": 0.20882699652777736,
+    "false_accepts_per_hour": 550.6950821116807,
+    "phrase_end_latency_ms": {
+      "count": 73,
+      "p50": -388.5625,
+      "p95": -83.73750305175781
+    },
+    "false_examples": [
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-11379f4d/legacy/sc_five_11379f4d_nohash_0.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.54296875,
+        "max_activity_probability": 0.54296875
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-131e738d/legacy/sc_go_131e738d_nohash_2.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.83203125,
+        "max_activity_probability": 0.87890625
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-131e738d/legacy/sc_off_131e738d_nohash_2.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.69921875,
+        "max_activity_probability": 0.69921875
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-179a61b7/legacy/sc_house_179a61b7_nohash_0.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.63671875,
+        "max_activity_probability": 0.78515625
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-1cec8d71/legacy/sc_house_1cec8d71_nohash_0.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.41796875,
+        "max_activity_probability": 0.68359375
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-41dce6f5/legacy/sc_marvin_41dce6f5_nohash_1.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.74609375,
+        "max_activity_probability": 0.74609375
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-4bba14ce/legacy/sc_seven_4bba14ce_nohash_1.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.54296875,
+        "max_activity_probability": 0.6875
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-7ea032f3/legacy/sc_two_7ea032f3_nohash_4.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.5859375,
+        "max_activity_probability": 0.5859375
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-b66f4f93/legacy/sc_five_b66f4f93_nohash_4.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.4765625,
+        "max_activity_probability": 0.4921875
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-b8874962/legacy/sc_four_b8874962_nohash_1.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.6640625,
+        "max_activity_probability": 0.6640625
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-d0faf7e4/legacy/sc_left_d0faf7e4_nohash_0.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.45703125,
+        "max_activity_probability": 0.45703125
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-d1dd03ed/legacy/sc_forward_d1dd03ed_nohash_0.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.5,
+        "max_activity_probability": 0.5
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-dc7ec25b/legacy/sc_four_dc7ec25b_nohash_0.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.5859375,
+        "max_activity_probability": 0.5859375
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-eeaf97c3/legacy/sc_right_eeaf97c3_nohash_3.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.37890625,
+        "max_activity_probability": 0.49609375
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-f6a380e7/legacy/sc_happy_f6a380e7_nohash_0.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.47265625,
+        "max_activity_probability": 0.47265625
+      },
+      {
+        "path": "dataset/test/unknown/legacy-tts-en-au-natashaneural/legacy/hard_negative/en-AU-NatashaNeural_hn_bye-vesper_r+0_p+10_003.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.51953125,
+        "max_activity_probability": 0.62890625
+      },
+      {
+        "path": "dataset/test/unknown/legacy-tts-en-au-natashaneural/legacy/hard_negative/en-AU-NatashaNeural_hn_bye-vesper_r+5_p+20_004.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.3515625,
+        "max_activity_probability": 0.5
+      },
+      {
+        "path": "dataset/test/unknown/legacy-tts-en-au-natashaneural/legacy/hard_negative/en-AU-NatashaNeural_hn_bye-vesper_r-12_p-10_001.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.6875,
+        "max_activity_probability": 0.6875
+      },
+      {
+        "path": "dataset/test/unknown/legacy-tts-en-au-natashaneural/legacy/hard_negative/en-AU-NatashaNeural_hn_context_006_r-20_p+10.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.515625,
+        "max_activity_probability": 0.92578125
+      },
+      {
+        "path": "dataset/test/unknown/legacy-tts-en-au-natashaneural/legacy/hard_negative/en-AU-NatashaNeural_hn_context_008_r-5_p-20.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.53515625,
+        "max_activity_probability": 0.53515625
+      }
+    ],
+    "rule": {
+      "direct": 0.95,
+      "strong": 0.5,
+      "evidence_threshold": 0.35,
+      "evidence_peak": 0.45,
+      "evidence_hits": 2,
+      "evidence_windows": 12,
+      "energy_gate": 20,
+      "temporal_variance_gate": 0.75,
+      "cooldown_ms": 2500
+    }
+  },
+  "golden_wake_path": "dataset/test/wake/legacy-tts-en-au-natashaneural/legacy/en-AU-NatashaNeural_m8_p0_073.wav",
   "golden_wake_probabilities": [
-    0.99609375,
-    0.00390625,
+    0.9921875,
+    0.0078125,
     0.0
   ]
 }

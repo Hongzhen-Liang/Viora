@@ -35,6 +35,103 @@ static uint32_t s_cand_start_ms = 0;
 static bool s_wifi_was_up = false;  // 用于计算连续断网时长
 static uint32_t s_wifi_down_since = 0;
 
+// ------------------------------------------------------------
+// 上行发送队列：音频与 JSON 控制帧统一按序发送。
+// 实测（2026-08-18 早上）：sendBIN 直接写 TCP，NAS→Mac 链路抖时阻塞
+// 主循环（聆听态循环只有 32-44% 负荷，时钟差 2-3s，指令整段丢），
+// 还会在 TTS 期间断连。发送移入独立任务后，主循环只做非阻塞入队；
+// 队列满时丢弃最旧音频帧给 JSON 控制帧让路（JSON 永不丢）。
+// ------------------------------------------------------------
+struct TxFrame {
+  uint8_t kind;     // 0=音频 1=JSON
+  uint16_t len;
+  uint8_t data[1024];
+};
+static constexpr int kTxQueueFrames = 40;   // ≈41KB PSRAM，约 1.28s 音频
+static TxFrame *s_tx_queue = nullptr;
+static portMUX_TYPE s_tx_mux = portMUX_INITIALIZER_UNLOCKED;
+static int s_tx_head = 0;
+static int s_tx_tail = 0;
+static int s_tx_count = 0;
+static TaskHandle_t s_tx_task = nullptr;
+static uint32_t s_tx_sent_bytes = 0;
+static uint32_t s_tx_dropped_bytes = 0;
+static uint32_t s_tx_generation = 1;
+
+static bool tx_push(uint8_t kind, const uint8_t *data, size_t len) {
+  if (s_tx_queue == nullptr || data == nullptr ||
+      len == 0 || len > sizeof(s_tx_queue[0].data)) {
+    return false;
+  }
+  portENTER_CRITICAL(&s_tx_mux);
+  while (s_tx_count >= kTxQueueFrames) {
+    if (kind == 0) {
+      // 音频帧队列满：丢最旧（最旧帧离当前话语最远，损失最小）
+      s_tx_dropped_bytes += s_tx_queue[s_tx_tail].len;
+      s_tx_tail = (s_tx_tail + 1) % kTxQueueFrames;
+      --s_tx_count;
+    } else {
+      // JSON 控制帧不能丢：挤出最旧音频帧
+      int slot = s_tx_tail;
+      for (int i = 0; i < s_tx_count; ++i) {
+        int idx = (s_tx_tail + i) % kTxQueueFrames;
+        if (s_tx_queue[idx].kind == 0) { slot = idx; break; }
+      }
+      const int slot_idx = (slot + 0) % kTxQueueFrames;
+      if (s_tx_queue[slot_idx].kind == 0) {
+        s_tx_dropped_bytes += s_tx_queue[slot_idx].len;
+        for (int i = slot; i != s_tx_head;
+             i = (i + 1) % kTxQueueFrames) {
+          const int next = (i + 1) % kTxQueueFrames;
+          s_tx_queue[i] = s_tx_queue[next];
+        }
+        s_tx_head = (s_tx_head - 1 + kTxQueueFrames) % kTxQueueFrames;
+        --s_tx_count;
+      } else {
+        break;  // 全是 JSON（异常），直接退出避免死循环
+      }
+    }
+  }
+  TxFrame &f = s_tx_queue[s_tx_head];
+  f.kind = kind;
+  f.len = static_cast<uint16_t>(len);
+  memcpy(f.data, data, len);
+  s_tx_head = (s_tx_head + 1) % kTxQueueFrames;
+  ++s_tx_count;
+  portEXIT_CRITICAL(&s_tx_mux);
+  return true;
+}
+
+static void ws_tx_worker(void *) {
+  for (;;) {
+    bool got = false;
+    TxFrame frame;
+    uint32_t generation = 0;
+    portENTER_CRITICAL(&s_tx_mux);
+    if (s_tx_count > 0) {
+      frame = s_tx_queue[s_tx_tail];
+      s_tx_tail = (s_tx_tail + 1) % kTxQueueFrames;
+      --s_tx_count;
+      generation = s_tx_generation;
+      got = true;
+    }
+    portEXIT_CRITICAL(&s_tx_mux);
+    if (!got) {
+      vTaskDelay(pdMS_TO_TICKS(2));
+      continue;
+    }
+    const bool ok = frame.kind == 0
+                        ? s_ws.sendBIN(frame.data, frame.len)
+                        : s_ws.sendTXT(frame.data, frame.len);
+    portENTER_CRITICAL(&s_tx_mux);
+    if (generation == s_tx_generation) {
+      if (ok) s_tx_sent_bytes += frame.len;
+      else s_tx_dropped_bytes += frame.len;
+    }
+    portEXIT_CRITICAL(&s_tx_mux);
+  }
+}
+
 // ============================================================
 // WiFi（非阻塞，net_loop 里定时推进）
 // ============================================================
@@ -74,6 +171,7 @@ static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
       s_ws_connected = false;
       Serial.printf("[WS] 与 Mac 服务器断开（%.*s），回到待唤醒\n", (int)length,
                     payload ? reinterpret_cast<const char *>(payload) : "");
+      net_audio_flush();
       if (s_cb.on_disconnected) s_cb.on_disconnected();
       break;
 
@@ -166,6 +264,21 @@ void net_init(const NetCallbacks &cb) {
   s_wifi_down_since = millis();  // 配网超时从开机算起，而不是从首次断网算起
   wifi_connect();
   s_ws.onEvent(on_ws_event);
+
+  if (s_tx_queue == nullptr) {
+    s_tx_queue = static_cast<TxFrame *>(
+        ps_malloc(kTxQueueFrames * sizeof(TxFrame)));
+  }
+  if (s_tx_queue != nullptr && s_tx_task == nullptr) {
+    const BaseType_t created = xTaskCreatePinnedToCore(
+        ws_tx_worker, "ws_tx", 4096, nullptr, 2, &s_tx_task, 0);
+    if (created == pdPASS) {
+      Serial.println("[WS] 上行发送任务已启动（队列 40 帧）");
+    } else {
+      s_tx_task = nullptr;
+      Serial.println("[WS] 警告：上行发送任务创建失败，回退主循环直发");
+    }
+  }
 }
 
 // 配网页保存新 WiFi 后调用：游标归零（新网络在候选首位）并立即开始尝试。
@@ -264,10 +377,47 @@ void net_set_idle_power_save(bool enabled) {
 }
 
 bool net_send_audio(const uint8_t *data, size_t len) {
-  if (!s_ws_connected || data == nullptr || len == 0) return false;
-  return s_ws.sendBIN((uint8_t *)data, len);
+  if (!s_ws_connected || s_tx_task == nullptr) {
+    // 回退路径：无发送任务时仍直接发（极端低内存场景）
+    if (!s_ws_connected || data == nullptr || len == 0) return false;
+    return s_ws.sendBIN((uint8_t *)data, len);
+  }
+  return tx_push(0, data, len);
 }
 
 void net_send_json(const char *json) {
-  s_ws.sendTXT(json);
+  if (json == nullptr) return;
+  const size_t len = strlen(json);
+  if (s_tx_task == nullptr) {
+    s_ws.sendTXT(json);
+    return;
+  }
+  tx_push(1, reinterpret_cast<const uint8_t *>(json), len);
+}
+
+uint32_t net_audio_sent_bytes() {
+  uint32_t v;
+  portENTER_CRITICAL(&s_tx_mux);
+  v = s_tx_sent_bytes;
+  portEXIT_CRITICAL(&s_tx_mux);
+  return v;
+}
+
+uint32_t net_audio_dropped_bytes() {
+  uint32_t v;
+  portENTER_CRITICAL(&s_tx_mux);
+  v = s_tx_dropped_bytes;
+  portEXIT_CRITICAL(&s_tx_mux);
+  return v;
+}
+
+void net_audio_flush() {
+  portENTER_CRITICAL(&s_tx_mux);
+  s_tx_head = 0;
+  s_tx_tail = 0;
+  s_tx_count = 0;
+  s_tx_sent_bytes = 0;
+  s_tx_dropped_bytes = 0;
+  if (++s_tx_generation == 0) ++s_tx_generation;
+  portEXIT_CRITICAL(&s_tx_mux);
 }

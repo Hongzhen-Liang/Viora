@@ -7,8 +7,8 @@
     1
   ],
   "input_dtype": "<class 'numpy.int8'>",
-  "input_scale": 0.031313441693782806,
-  "input_zero_point": -23,
+  "input_scale": 0.02856513299047947,
+  "input_zero_point": -15,
   "output_shape": [
     1,
     3
@@ -33,5 +33,11 @@
     "SOFTMAX",
     "DELEGATE"
   ],
-  "representative_count": 300
+  "representative_count": 300,
+  "representative_strata": {
+    "hard_negative": 75,
+    "noise": 75,
+    "unknown": 75,
+    "wake": 75
+  }
 }

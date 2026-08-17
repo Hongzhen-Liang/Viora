@@ -19,7 +19,6 @@
 #include "wake_word.h"
 
 enum ConvState { ST_IDLE, ST_WAKE_ACK, ST_LISTENING, ST_PROCESSING, ST_PLAYING };
-enum ListenOrigin { LISTEN_FROM_WAKE, LISTEN_FROM_FOLLOWUP, LISTEN_FROM_BARGE_IN };
 
 static const TurnDetectorConfig kTurnConfig = {
     VAD_FRAME_MS, VOICE_START_FRAMES, MIN_VOICE_FRAMES, MIN_REC_MS,
@@ -28,9 +27,26 @@ static const TurnDetectorConfig kTurnConfig = {
     ENDPOINT_LONG_MS, ENDPOINT_MAX_MS, ENDPOINT_LEARN_GAP_MS,
 };
 
+static const SpeechEvidenceConfig kSpeechEvidenceConfig = {
+    AFE_NEURAL_HOLD_FRAMES,
+    AFE_ENERGY_FALLBACK_FRAMES,
+};
+
+static const WakeAckGateConfig kWakeAckGateConfig = {
+    WAKE_ACK_TAIL_GUARD_MS,
+    WAKE_ACK_CONT_GUARD_MS,
+    WAKE_ACK_TAIL_QUIET_FRAMES,
+    WAKE_ACK_VOICE_FRAMES,
+    WAKE_ACK_CONT_VOICE_FRAMES,
+};
+
 static ConvState s_state = ST_IDLE;
 static ListenOrigin s_listen_origin = LISTEN_FROM_WAKE;
 static TurnDetector s_turn(kTurnConfig);
+static SpeechEvidenceGate s_listen_speech(kSpeechEvidenceConfig);
+static SpeechEvidenceGate s_ack_speech(kSpeechEvidenceConfig);
+static WakeAckGate s_wake_ack_gate(kWakeAckGateConfig);
+static uint32_t s_state_since_ms = 0;
 static uint32_t s_listen_start_ms = 0;
 static uint32_t s_preroll_ms = 0;
 static int32_t s_rec_max_vol = 0;
@@ -43,13 +59,14 @@ static int s_consec_errors = 0;
 static bool s_followup_keep_preroll = false;  // ack_done 后重开麦需保留前置音频
 static uint32_t s_wake_ack_start_ms = 0;      // 唤醒决定窗开始时刻
 static bool s_ack_playing = false;            // 决定窗已过，确认音播放中
-static int s_ack_voice_frames = 0;            // 决定窗内连续人声帧数
 
 // 播放中 AEC/VAD 打断状态。
 static bool s_accept_tts_audio = false;
 static uint32_t s_playback_start_ms = 0;
 static uint32_t s_tts_received_bytes = 0;
 static uint16_t s_barge_voice_frames = 0;
+static uint32_t s_tts_last_activity_ms = 0;
+static bool s_tts_end_received = false;
 
 // 周期健康日志：monitor 无需碰巧赶上启动阶段，也能确认固件、麦克风、
 // KWS 与温度是否正常。峰值/RMS 取最近一个日志窗口的最大值。
@@ -61,25 +78,72 @@ static uint16_t s_health_rms = 0;
 static float s_health_wake_probability = 0.0f;
 #endif
 
-static const char *listen_source(ListenOrigin origin) {
-  if (origin == LISTEN_FROM_WAKE) return "wake";
-  if (origin == LISTEN_FROM_BARGE_IN) return "barge_in";
-  return "follow_up";
+// 聆听态 VAD 诊断计数（ENABLE_VAD_DEBUG）
+#if ENABLE_VAD_DEBUG
+static uint32_t s_vaddbg_frames = 0;
+static uint32_t s_vaddbg_have_afe = 0;
+static uint32_t s_vaddbg_neural = 0;
+static uint32_t s_vaddbg_fallback = 0;
+static uint32_t s_vaddbg_energy = 0;
+static uint32_t s_vaddbg_last_ms = 0;
+#endif
+
+// 独立 ESP-SR VAD 对真实语音的命中比较稀疏（帧间常有 100~300ms 空洞），
+// 3 连续帧的轮次开启条件会把短指令整段丢为噪声。施密特平滑：256ms 窗口内
+// ≥2 个 VAD 命中即视为人声，窗口内 0 命中才收回；单个孤立命中不会开轮
+// （轮次状态机的 min_voice_frames=5 帧兜底也会把孤立误报拒为短噪声）。
+static constexpr int kVadSmoothFrames = 8;  // 8 × 32ms ≈ 256ms
+static bool s_vad_smooth_ring[kVadSmoothFrames] = {};
+static int s_vad_smooth_head = 0;
+static bool s_vad_smoothed = false;
+
+static void vad_smooth_reset() {
+  memset(s_vad_smooth_ring, 0, sizeof(s_vad_smooth_ring));
+  s_vad_smooth_head = 0;
+  s_vad_smoothed = false;
 }
 
+static bool vad_smooth_update(bool hit) {
+  s_vad_smooth_ring[s_vad_smooth_head] = hit;
+  s_vad_smooth_head = (s_vad_smooth_head + 1) % kVadSmoothFrames;
+  int hits = 0;
+  for (int i = 0; i < kVadSmoothFrames; ++i) {
+    if (s_vad_smooth_ring[i]) ++hits;
+  }
+  if (hits >= 2) s_vad_smoothed = true;
+  else if (hits == 0) s_vad_smoothed = false;
+  return s_vad_smoothed;
+}
+
+static const char *state_name(ConvState state) {
+  if (state == ST_IDLE) return "IDLE";
+  if (state == ST_WAKE_ACK) return "WAKE_ACK";
+  if (state == ST_LISTENING) return "LISTENING";
+  if (state == ST_PROCESSING) return "PROCESSING";
+  return "PLAYING";
+}
+
+static void set_state(ConvState state) {
+  s_state = state;
+  s_state_since_ms = millis();
+}
+
+static int16_t s_ring_scratch[512];
+
 static void send_ring_audio() {
-  static int16_t chunk[512];
   int samples_sent = 0;
   while (audio_ring_size() > 0) {
     const int n = audio_ring_size() < 512 ? audio_ring_size() : 512;
-    if (!audio_ring_take(chunk, n)) break;
+    if (!audio_ring_take(s_ring_scratch, n)) break;
     for (int i = 0; i < n; ++i) {
-      const int16_t magnitude =
-          chunk[i] < 0 ? static_cast<int16_t>(-chunk[i]) : chunk[i];
+      const int32_t magnitude =
+          s_ring_scratch[i] < 0 ? -static_cast<int32_t>(s_ring_scratch[i])
+                                : s_ring_scratch[i];
       if (magnitude > s_rec_max_vol) s_rec_max_vol = magnitude;
     }
     const uint32_t bytes = n * sizeof(int16_t);
-    if (net_send_audio(reinterpret_cast<const uint8_t *>(chunk), bytes)) {
+    if (net_send_audio(reinterpret_cast<const uint8_t *>(s_ring_scratch),
+                       bytes)) {
       s_uploaded_bytes += bytes;
     } else {
       s_upload_failed_bytes += bytes;
@@ -89,11 +153,21 @@ static void send_ring_audio() {
   s_preroll_ms = static_cast<uint32_t>(samples_sent * 1000ULL / SR_SAMPLE_RATE);
 }
 
+static void keep_latest_ring_audio(uint32_t keep_ms) {
+  const uint32_t keep_samples = static_cast<uint32_t>(
+      static_cast<uint64_t>(keep_ms) * SR_SAMPLE_RATE / 1000U);
+  while (audio_ring_size() > static_cast<int>(keep_samples)) {
+    const int excess = audio_ring_size() - static_cast<int>(keep_samples);
+    const int n = excess < 512 ? excess : 512;
+    if (!audio_ring_take(s_ring_scratch, n)) break;
+  }
+}
+
 // 发 audio_start 并进入下一轮聆听。唤醒和打断会把缓存的前置音频先上传，
 // 从而保住紧跟唤醒词/打断发生前的首字；普通追问不携带扬声器尾音。
 static void enter_listening(ListenOrigin origin, bool force_preroll = false) {
   if (!net_connected()) {
-    s_state = ST_IDLE;
+    set_state(ST_IDLE);
     audio_ring_clear();
     Serial.println(">>> 服务器未连接，回到待唤醒");
     return;
@@ -101,6 +175,9 @@ static void enter_listening(ListenOrigin origin, bool force_preroll = false) {
 
   // 发送实时 PCM 前关闭 modem sleep，避免首包被 DTIM 等待拖延。
   net_set_idle_power_save(false);
+  // 清空上一轮残留的发送队列并归零发送统计：本轮的 PCM 时钟
+  // （audio_end 里的 pcm_ms）从零重新累计。
+  net_audio_flush();
 
   const bool keep_preroll = force_preroll ||
       origin == LISTEN_FROM_WAKE || origin == LISTEN_FROM_BARGE_IN;
@@ -109,10 +186,13 @@ static void enter_listening(ListenOrigin origin, bool force_preroll = false) {
   // 使上一轮尚未返回的 AFE 结果失效。该操作非阻塞，
   // 不会让聆听链路再次等待 esp-sr fetch。
   speech_async_reset();
-  s_state = ST_LISTENING;
+  set_state(ST_LISTENING);
   s_listen_origin = origin;
+  s_listen_speech.reset();
+  vad_smooth_reset();
   s_exit_pending = false;
   s_accept_tts_audio = false;
+  s_tts_end_received = false;
   s_barge_voice_frames = 0;
   s_rec_max_vol = 0;
   s_preroll_ms = 0;
@@ -120,8 +200,12 @@ static void enter_listening(ListenOrigin origin, bool force_preroll = false) {
   s_upload_failed_bytes = 0;
   s_listen_start_ms = millis();
   s_live_voice_seen = false;
-  const uint32_t guard_ms =
-      origin == LISTEN_FROM_FOLLOWUP ? FOLLOWUP_GUARD_MS : 0;
+  uint32_t guard_ms = 0;
+  if (origin == LISTEN_FROM_FOLLOWUP) {
+    guard_ms = FOLLOWUP_GUARD_MS;
+  } else if (origin == LISTEN_FROM_WAKE_ACK && !force_preroll) {
+    guard_ms = WAKE_ACK_FOLLOWUP_GUARD_MS;
+  }
   s_turn.reset(s_listen_start_ms, guard_ms);
   if (origin == LISTEN_FROM_WAKE) {
     // KWS 的多窗口证据会带来数百毫秒确认延迟；用户若把问题紧跟在
@@ -130,44 +214,50 @@ static void enter_listening(ListenOrigin origin, bool force_preroll = false) {
     s_turn.prime_speech(s_listen_start_ms, MIN_VOICE_FRAMES);
   } else if (origin == LISTEN_FROM_BARGE_IN) {
     s_turn.prime_speech(s_listen_start_ms, BARGE_IN_VOICE_FRAMES);
+  } else if (origin == LISTEN_FROM_WAKE_ACK && force_preroll) {
+    // 确认音播放中已经由 AFE 验证了用户开口，保留这份证据；普通确认音
+    // 自然结束则不 prime，仍需用户真正讲话才会形成一轮 ASR。
+    s_turn.prime_speech(s_listen_start_ms, MIN_VOICE_FRAMES);
   }
 
   char start_frame[256];
   snprintf(start_frame, sizeof(start_frame),
            "{\"type\":\"audio_start\",\"source\":\"%s\","
            "\"new_conversation\":%s,\"wake_word\":\"%s\"}",
-           listen_source(origin),
-           origin == LISTEN_FROM_WAKE ? "true" : "false",
+           listen_source_for(origin),
+           listen_starts_new_conversation(origin) ? "true" : "false",
            WAKE_WORD);
   net_send_json(start_frame);
   if (keep_preroll) send_ring_audio();
   audio_ring_clear();
 
   Serial.printf(">>> 正在聆听（%s，前置音频=%lums）...\n",
-                listen_source(origin),
+                listen_source_for(origin),
                 static_cast<unsigned long>(s_preroll_ms));
 }
 
-// 唤醒命中 → 先进入决定窗（暂不开播、不上传）：用能量 VAD 判断用户是否
-// 紧跟指令（一口气）。
+// 唤醒命中 → 先进入决定窗（暂不开播、不上传）：用 neural VAD 为主、
+// 受约束能量为降级路径，判断用户是否紧跟指令（一口气）。
 //  - 决定窗内连续人声 → enter_listening(WAKE) 走直接应答：上传前置音频、
 //    继续聆听，不播确认音，回复直达；
 //  - 决定窗内无人声 → 纯唤醒：本地播放确认音，唤醒轮零上传、零 ASR，
 //    播完直接进入连续聆听，不再等 ack_done。
 static void start_wake_ack() {
   if (!net_connected()) {
-    s_state = ST_IDLE;
+    set_state(ST_IDLE);
     audio_ring_clear();
     Serial.println(">>> 服务器未连接，回到待唤醒");
     return;
   }
-  s_state = ST_WAKE_ACK;
+  set_state(ST_WAKE_ACK);
   s_ack_playing = false;
-  s_ack_voice_frames = 0;
+  s_ack_speech.reset();
+  speech_async_reset();
   s_exit_pending = false;
   s_accept_tts_audio = false;
   s_barge_voice_frames = 0;
   s_wake_ack_start_ms = millis();
+  s_wake_ack_gate.reset(s_wake_ack_start_ms);
   Serial.printf(">>> 唤醒词命中：%s！决定窗 %dms 内判断是否紧跟指令\n",
                 WAKE_WORD, WAKE_ACK_DECIDE_MS);
 }
@@ -178,23 +268,17 @@ static void end_active_session(const char *reason) {
            "{\"type\":\"cancel\",\"reason\":\"%s\","
            "\"end_session\":true}", reason);
   net_send_json(frame);
-  s_state = ST_IDLE;
+  set_state(ST_IDLE);
   s_exit_pending = false;
   s_accept_tts_audio = false;
+  s_tts_end_received = false;
   audio_ring_clear();
 }
 
 static void commit_turn(uint32_t now_ms) {
-  if (s_listen_origin == LISTEN_FROM_WAKE &&
-      s_turn.voice_frames() <= MIN_VOICE_FRAMES &&
-      s_rec_max_vol < WAKE_MIN_SPEAK_PEAK) {
-    // 唤醒后没人真正开口（只有唤醒词证据的静音）：不提交、不上传，
-    // 重新计时继续聆听，避免 Whisper 把静音幻觉成符号串。
-    Serial.println(">>> 唤醒后未检测到有效语音，继续聆听");
-    s_turn.reset(now_ms, 0);
-    return;
-  }
-
+  // LISTEN_FROM_WAKE 只有在 WakeAckGate 已跨过尾音门限后才会到达这里。
+  // 不再用前置环峰值二次判定：环里必然含唤醒词，该峰值无法证明用户
+  // 说了指令；低音量时反而会让一个已开启的服务端音频轮长期悬空。
   uint32_t trim_start_ms = 0;
   if (s_listen_origin == LISTEN_FROM_BARGE_IN) {
     // 打断证据在切换状态前已经出现，保留最近 600ms AEC 输出。
@@ -223,9 +307,10 @@ static void commit_turn(uint32_t now_ms) {
 
   // 裁剪使用墙钟毫秒，而服务端拿到的是 PCM 样本。两条时间轴
   // 必须先相互印证：如果处理/网络阻塞造成采样丢帧，宁可不裁剪，
-  // 也不能用较长的墙钟静音去裁较短的 PCM。
+  // 也不能用较长的墙钟静音去裁较短的 PCM。发送已移入独立任务，
+  // 这里按“实际已发出的字节”核算 PCM 时钟。
   const uint32_t pcm_ms = static_cast<uint32_t>(
-      s_uploaded_bytes * 1000ULL / (SR_SAMPLE_RATE * sizeof(int16_t)));
+      net_audio_sent_bytes() * 1000ULL / (SR_SAMPLE_RATE * sizeof(int16_t)));
   const uint32_t wall_audio_ms =
       s_preroll_ms + (now_ms - s_listen_start_ms);
   const uint32_t clock_drift_ms =
@@ -248,12 +333,12 @@ static void commit_turn(uint32_t now_ms) {
            static_cast<unsigned long>(wall_audio_ms),
            static_cast<unsigned long>(clock_drift_ms));
   net_send_json(end_frame);
-  s_state = ST_PROCESSING;
+  set_state(ST_PROCESSING);
 
   Serial.printf(
       ">>> 自动断句：录音=%lums 人声帧=%lu 句尾静音=%lums "
       "动态阈值=%lums 句内最长停顿=%lums 峰值=%ld "
-      "上传=%luB/%lums 时钟差=%lums 裁剪=%s 失败=%luB\n",
+      "上传=%luB/%lums 时钟差=%lums 裁剪=%s 队列丢=%luB 失败=%luB\n",
       static_cast<unsigned long>(now_ms - s_turn.speech_start_ms()),
       static_cast<unsigned long>(s_turn.voice_frames()),
       static_cast<unsigned long>(trailing_ms),
@@ -264,6 +349,7 @@ static void commit_turn(uint32_t now_ms) {
       static_cast<unsigned long>(pcm_ms),
       static_cast<unsigned long>(clock_drift_ms),
       trim_clock_ok ? "on" : "off",
+      static_cast<unsigned long>(net_audio_dropped_bytes()),
       static_cast<unsigned long>(s_upload_failed_bytes));
 }
 
@@ -273,10 +359,11 @@ static void commit_turn(uint32_t now_ms) {
 static void on_net_connected() {}
 
 static void on_net_disconnected() {
-  s_state = ST_IDLE;
+  set_state(ST_IDLE);
   s_rearm_pending = false;
   s_exit_pending = false;
   s_accept_tts_audio = false;
+  s_tts_end_received = false;
   s_consec_errors = 0;
   speech_async_reset();
   audio_ring_clear();
@@ -288,6 +375,7 @@ static void on_net_disconnected() {
 static void retry_listening_after_failure() {
   s_exit_pending = false;
   s_accept_tts_audio = false;
+  s_tts_end_received = false;
   audio_play_discard();
   ++s_consec_errors;
   if (s_consec_errors >= MAX_CONSEC_ERRORS) {
@@ -296,14 +384,60 @@ static void retry_listening_after_failure() {
     end_active_session("consecutive_errors");
     Serial.println(">>> 连续多次未识别，回到待唤醒");
   } else {
+    // 先让当前服务端轮次失效；同一批 WS 数据里紧随 error/no_speech
+    // 到达的旧 tts_start/PCM 必须被状态门过滤，下一轮 loop 再重开麦。
+    set_state(ST_IDLE);
     s_rearm_pending = true;
   }
+}
+
+static bool handle_state_watchdog() {
+  const uint32_t now = millis();
+  if (s_state == ST_PROCESSING &&
+      elapsed_at_least(now, s_state_since_ms, PROCESSING_TIMEOUT_MS)) {
+    Serial.printf("[STATE] PROCESSING 超时 %lums，取消并恢复聆听\n",
+                  static_cast<unsigned long>(now - s_state_since_ms));
+    net_send_json("{\"type\":\"cancel\",\"reason\":\"processing_timeout\"}");
+    retry_listening_after_failure();
+    return true;
+  }
+
+  if (s_state == ST_PLAYING) {
+    const bool stalled =
+        !s_tts_end_received &&
+        elapsed_at_least(now, s_tts_last_activity_ms,
+                         PLAYING_STALL_TIMEOUT_MS);
+    const bool absolute_timeout =
+        elapsed_at_least(now, s_state_since_ms, PLAYING_MAX_MS);
+    if (stalled || absolute_timeout) {
+      Serial.printf(
+          "[STATE] PLAYING %s（state=%lums activity=%lums），取消并恢复聆听\n",
+          stalled ? "数据停滞" : "超过绝对上限",
+          static_cast<unsigned long>(now - s_state_since_ms),
+          static_cast<unsigned long>(now - s_tts_last_activity_ms));
+      net_send_json("{\"type\":\"cancel\",\"reason\":\"playback_timeout\"}");
+      retry_listening_after_failure();
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool accept_server_event(const char *type, bool allowed) {
+  if (allowed) return true;
+  Serial.printf("[STATE] 忽略迟到/不合状态事件 type=%s state=%s\n", type,
+                state_name(s_state));
+  return false;
 }
 
 static void on_server_text(const char *type, const char *user,
                            const char *reply, const char *msg,
                            const char *op) {
   if (strcmp(type, "text") == 0) {
+    if (!accept_server_event(type, s_state == ST_PROCESSING ||
+                                      s_state == ST_PLAYING)) {
+      return;
+    }
     Serial.printf(">>> 你说: %s\n", user);
     Serial.printf(">>> Vesper: %s\n", reply);
     s_consec_errors = 0;
@@ -320,15 +454,27 @@ static void on_server_text(const char *type, const char *user,
       Serial.printf(">>> [OP] 未知操作: %s（已忽略）\n", op);
     }
   } else if (strcmp(type, "tts_start") == 0) {
-    s_state = ST_PLAYING;
+    if (!accept_server_event(type, s_state == ST_PROCESSING)) return;
+    set_state(ST_PLAYING);
     s_accept_tts_audio = true;
     s_playback_start_ms = millis();
+    s_tts_last_activity_ms = s_playback_start_ms;
+    s_tts_end_received = false;
     s_tts_received_bytes = 0;
     s_barge_voice_frames = 0;
     speech_async_reset();
     audio_ring_clear();
     audio_mark_tts_start();
   } else if (strcmp(type, "tts_end") == 0) {
+    if (!accept_server_event(type,
+                             s_state == ST_PLAYING && s_accept_tts_audio)) {
+      return;
+    }
+    // WebSocket 有序；tts_end 之后再来的二进制帧必属异常/迟到数据。
+    // 播放缓冲仍会正常排空，但网络入口立即关门。
+    s_accept_tts_audio = false;
+    s_tts_end_received = true;
+    s_tts_last_activity_ms = millis();
     audio_mark_tts_end();
     Serial.printf(
         ">>> TTS 接收完成：%luB（%.2fs PCM），待播放=%luB\n",
@@ -336,24 +482,36 @@ static void on_server_text(const char *type, const char *user,
         s_tts_received_bytes / 32000.0f,
         static_cast<unsigned long>(audio_play_buffered_bytes()));
   } else if (strcmp(type, "error") == 0) {
+    if (!accept_server_event(type, s_state == ST_LISTENING ||
+                                      s_state == ST_PROCESSING ||
+                                      s_state == ST_PLAYING)) {
+      return;
+    }
     Serial.printf("[WS] 服务器错误: %s\n", msg);
     retry_listening_after_failure();
   } else if (strcmp(type, "no_speech") == 0) {
+    if (!accept_server_event(type, s_state == ST_PROCESSING)) return;
     // 可能是背景音乐/无人说话：不提示、不报错，默默继续聆听。
     retry_listening_after_failure();
   } else if (strcmp(type, "ack_done") == 0) {
+#if ENABLE_LOCAL_WAKE_ACK
+    accept_server_event(type, false);
+#else
+    if (!accept_server_event(type, s_state == ST_PROCESSING)) return;
     // 本地确认音已播完且唤醒轮无指令：立即重开麦克风，并把确认音
     // 结束后用户抢先说出的首字（PROCESSING 期间入环）作为前置上传。
     s_consec_errors = 0;
     s_followup_keep_preroll = true;
     s_rearm_pending = true;
+#endif
   }
 }
 
 static void on_net_audio(const uint8_t *data, size_t len) {
-  if (s_accept_tts_audio) {
+  if (s_state == ST_PLAYING && s_accept_tts_audio) {
     audio_play_push(data, len);
     s_tts_received_bytes += len;
+    s_tts_last_activity_ms = millis();
   }
 }
 
@@ -413,10 +571,7 @@ void loop() {
     enter_listening(LISTEN_FROM_FOLLOWUP, keep_preroll);
   }
 
-  if (speech_feed_size() <= 0) {
-    delay(100);
-    return;
-  }
+  if (handle_state_watchdog()) return;
 
   static int16_t pcm[512];
   static int16_t playback_ref[512];
@@ -431,8 +586,12 @@ void loop() {
 
   // 独立播放任务会把扬声器 PCM 及其 AEC 参考按相同时间轴排队；
   // 此处取出与刚完成的麦克风帧对应的一块。
-  if (s_state == ST_PLAYING || (s_state == ST_WAKE_ACK && s_ack_playing)) {
+  const bool playback_afe =
+      s_state == ST_PLAYING || (s_state == ST_WAKE_ACK && s_ack_playing);
+  if (playback_afe) {
     audio_play_reference(playback_ref, frames);
+  } else {
+    memset(playback_ref, 0, frames * sizeof(int16_t));
   }
   // 极低内存等异常情况下若播放任务创建失败，仍保留主循环兜底。
   if (!audio_play_task_running()) audio_play_drain();
@@ -472,31 +631,49 @@ void loop() {
   }
 #endif
 
-  // 播放时将麦克风与扬声器参考非阻塞地提交给独立
-  // AFE 工作任务。主循环只轮询已完成的结果，所以即使
-  // esp-sr fetch 卡住，WebSocket/TTS/Ping-Pong 仍会继续运行。
+  // 播放态提交真实扬声器参考，聆听态提交零参考；两者都由独立 AFE
+  // 工作任务处理。主循环只轮询结果，所以 esp-sr fetch 不会阻塞
+  // WebSocket/TTS。聆听仍上传原始 PCM，保持样本时钟完整；AFE 输出
+  // 仅负责神经 VAD，后续可在带时间戳/尾帧 flush 后再切增强 PCM 上传。
   static int16_t afe_out[512];
   bool is_speech = false;
   bool have_afe = false;
-  if (s_state == ST_PLAYING || (s_state == ST_WAKE_ACK && s_ack_playing)) {
+  const bool listening_afe = s_state == ST_LISTENING;
+  const bool wake_decision_afe =
+      s_state == ST_WAKE_ACK && !s_ack_playing;
+  if (playback_afe || listening_afe || wake_decision_afe) {
     speech_async_submit(pcm, playback_ref, frames);
-    // 队列中若有多帧，优先跟上最新时间轴；每帧都用于
-    // barge-in 连续证据，避免丢掉用户持续说话的信号。
+    // 队列中若有多帧，聆听态采用最新判定；播放态每帧都推进打断
+    // 连续证据，避免丢掉用户持续说话的信号。
     while (speech_async_poll(afe_out, &is_speech)) {
       have_afe = true;
 #if ENABLE_BARGE_IN
+      if (!playback_afe) continue;
       audio_ring_push(afe_out, speech_fetch_size());
+      const bool local_ack = s_state == ST_WAKE_ACK;
+      const uint32_t guard_ms =
+          local_ack ? WAKE_ACK_BARGE_GUARD_MS : BARGE_IN_GUARD_MS;
+      const uint16_t required_frames =
+          local_ack ? WAKE_ACK_BARGE_VOICE_FRAMES : BARGE_IN_VOICE_FRAMES;
       const uint32_t now = millis();
-      if (now - s_playback_start_ms >= BARGE_IN_GUARD_MS) {
+      if (elapsed_at_least(now, s_playback_start_ms, guard_ms)) {
         if (is_speech) ++s_barge_voice_frames;
         else s_barge_voice_frames = 0;
-        if (s_barge_voice_frames >= BARGE_IN_VOICE_FRAMES) {
-          Serial.println(">>> 检测到用户打断，立即停止当前回复");
+        if (s_barge_voice_frames >= required_frames) {
           s_accept_tts_audio = false;
           audio_play_discard();
-          net_send_json("{\"type\":\"cancel\",\"reason\":\"barge_in\"}");
-          enter_listening(LISTEN_FROM_BARGE_IN);
-          break;
+          if (local_ack) {
+            Serial.println(">>> 用户抢话：停止本地确认音并保留开头");
+            // 纯本地确认音没有服务端任务可取消；这仍是新唤醒会话。
+            enter_listening(LISTEN_FROM_WAKE_ACK, true);
+          } else {
+            Serial.println(">>> 检测到用户打断，立即停止当前回复");
+            net_send_json("{\"type\":\"cancel\",\"reason\":\"barge_in\"}");
+            enter_listening(LISTEN_FROM_BARGE_IN);
+          }
+          // enter_listening 已发送 AEC 前置；本帧不能再按新 LISTENING
+          // 重复上传，也不能复用旧世代 AFE 结果。
+          return;
         }
       }
 #endif
@@ -508,33 +685,66 @@ void loop() {
     vad_observe(vol_l);
   }
 
-  // 神经 VAD 在特定腔体、距离或 AEC 零参考阶段可能漏报。能量兜底同时
-  // 要求自适应峰值与 RMS，之后仍需 TurnDetector 的连续 3 帧确认，既能
-  // 接住真实人声，也不会让单次碰撞/爆音直接形成一轮对话。
+  // 新鲜的 AFE neural=silence 明确否决能量；能量只在 AFE 连续无结果时
+  // 以更高 peak/RMS 和更长连续帧门限接管，作为可控的故障降级路径。
   const bool energy_speech =
       vad_is_voice(vol_l) && audio_capture_rms() >= VOICE_RMS_MIN;
-  // is_speech 在没有新 fetch 时是 AFE 的旧状态，不能拿它继续推进轮次，
-  // 否则一次旧的 speech=true 可能永久拖住句尾。
-  const bool neural_speech = s_state == ST_PLAYING && have_afe && is_speech;
-  const bool turn_speech = neural_speech || energy_speech;
+  const bool fallback_energy =
+      energy_speech && vol_l >= ENERGY_FALLBACK_PEAK_MIN &&
+      audio_capture_rms() >= ENERGY_FALLBACK_RMS_MIN;
+  // 独立 ESP-SR VAD（任意状态持续喂入）是聆听态主门：AFE 内置 VAD 对
+  // 远场/扬声器语音不敏感且输出稀疏，实测会压制整个聆听门。两者都不可用
+  // 时能量降级路径才接管；AFE 新鲜静音对能量路径的否决保持不变。
+  const bool kws_vad_ready = wake_word_vad_ready();
+  const bool kws_vad_speech = kws_vad_ready && wake_word_vad_speech_now();
+  const bool any_vad_available = have_afe || kws_vad_ready;
+  const bool neural_speech = (have_afe && is_speech) || kws_vad_speech;
+#if ENABLE_VAD_DEBUG
+  if (s_state == ST_LISTENING ||
+      (s_state == ST_WAKE_ACK && !s_ack_playing)) {
+    ++s_vaddbg_frames;
+    if (have_afe) ++s_vaddbg_have_afe;
+    if (neural_speech) ++s_vaddbg_neural;
+    if (fallback_energy) ++s_vaddbg_fallback;
+    if (energy_speech) ++s_vaddbg_energy;
+  }
+#endif
+  const bool turn_speech =
+      s_state == ST_LISTENING
+          ? s_listen_speech.update(any_vad_available, neural_speech,
+                                   fallback_energy)
+          : false;
+  const bool ack_speech =
+      s_state == ST_WAKE_ACK && !s_ack_playing
+          ? s_ack_speech.update(any_vad_available, neural_speech,
+                                fallback_energy)
+          : false;
 
   if (s_state == ST_WAKE_ACK && !s_ack_playing) {
-    // 决定窗：连续人声 → 一口气指令，直接进入聆听并上传前置；
-    // 无人声且窗满 → 纯唤醒，开播本地确认音，唤醒轮零上传零 ASR。
-    if (energy_speech) {
-      if (++s_ack_voice_frames >= WAKE_ACK_VOICE_FRAMES) {
-        Serial.println(">>> 决定窗内检测到人声：紧跟指令，直接进入聆听");
-        enter_listening(LISTEN_FROM_WAKE);
-      }
-    } else {
-      s_ack_voice_frames = 0;
+    // 先越过 KWS 命中时残留的唤醒词尾音。若已看到明确静音，后续 2 帧
+    // 即视作新开口；若用户一口气说完整句而没有静音，则需更长的持续语音
+    // 才直进聆听，避免仅凭 "Vesper" 尾音误上传一个空唤醒轮。
+    const uint32_t ack_now = millis();
+    const uint32_t ack_elapsed = ack_now - s_wake_ack_start_ms;
+    // 异步 AFE 尚未产出且原始能量仍高时只是“未知”，不能误当成
+    // 唤醒词后的静音分隔；有新鲜 neural=silence 或明确低能量才放行。
+    const bool trusted_quiet = have_afe ? !neural_speech : !energy_speech;
+    if (s_wake_ack_gate.update(ack_now, ack_speech, trusted_quiet)) {
+      Serial.printf(
+          ">>> 决定窗检测到后续人声（tail_released=%d）：直接进入聆听\n",
+          s_wake_ack_gate.tail_released() ? 1 : 0);
+      enter_listening(LISTEN_FROM_WAKE);
+      // 当前原始帧已包含在前置环中并由 enter_listening 发出，避免重复上传。
+      return;
     }
     if (s_state == ST_WAKE_ACK && !s_ack_playing &&
-        static_cast<int32_t>(millis() - s_wake_ack_start_ms) >=
-            WAKE_ACK_DECIDE_MS) {
+        ack_elapsed >= WAKE_ACK_DECIDE_MS) {
       s_ack_playing = true;
       s_playback_start_ms = millis();
-      audio_ring_clear();      // 决定窗原始音频不再需要
+      s_barge_voice_frames = 0;
+      // 只保留决定窗末端：覆盖用户在 350ms 边界抢先开口的首字，同时
+      // 丢掉更早的唤醒词。后续上传使用 source=follow_up，不会误剥前缀。
+      keep_latest_ring_audio(WAKE_ACK_BOUNDARY_PREROLL_MS);
       speech_async_reset();    // 使旧会话 AFE 结果失效，AEC 参考从零开始
       audio_mark_tts_start();
       audio_play_push(wake_ack_pcm_data,
@@ -548,15 +758,20 @@ void loop() {
   if (s_state == ST_WAKE_ACK && s_ack_playing && audio_playback_finished()) {
     s_accept_tts_audio = false;
     Serial.println(">>> 确认音结束，直接进入连续聆听（无需服务端判决）");
-    enter_listening(LISTEN_FROM_FOLLOWUP);
+    // 协议语义是 source=follow_up + new_conversation=true：确认音已经
+    // 本地完成，服务端无需再剥唤醒前缀/重复确认，但要开启新会话上下文。
+    // 无人抢话时不携带唤醒词/确认音残留，也不预置 speech 证据。
+    audio_ring_clear();
+    enter_listening(LISTEN_FROM_WAKE_ACK);
   }
 
   if (s_state == ST_PLAYING && audio_playback_finished()) {
     s_accept_tts_audio = false;
+    s_tts_end_received = false;
     audio_ring_clear();
     if (s_exit_pending) {
       s_exit_pending = false;
-      s_state = ST_IDLE;
+      set_state(ST_IDLE);
       Serial.println(">>> 已退出对话，回到待唤醒");
     } else {
       // 回复播完立刻重开麦克风；不需要再次说唤醒词。
@@ -566,7 +781,7 @@ void loop() {
 
   if (s_state == ST_LISTENING) {
     if (!net_connected()) {
-      s_state = ST_IDLE;
+      set_state(ST_IDLE);
       Serial.println(">>> 录音中断（服务器断开）");
     } else {
       // 聆听阶段不跑阻塞的 AFE fetch，每个 32ms 帧原样上传。
@@ -581,21 +796,43 @@ void loop() {
       }
       if (vol_l > s_rec_max_vol) s_rec_max_vol = vol_l;
 
+#if ENABLE_VAD_DEBUG
+      const uint32_t vaddbg_now = millis();
+      if (vaddbg_now - s_vaddbg_last_ms >= 1000) {
+        s_vaddbg_last_ms = vaddbg_now;
+        Serial.printf(
+            "[VADDBG] frames=%lu have_afe=%lu neural=%lu fallback=%lu "
+            "energy=%lu turn_speech=%d peak=%d rms=%u voice_frames=%u\n",
+            static_cast<unsigned long>(s_vaddbg_frames),
+            static_cast<unsigned long>(s_vaddbg_have_afe),
+            static_cast<unsigned long>(s_vaddbg_neural),
+            static_cast<unsigned long>(s_vaddbg_fallback),
+            static_cast<unsigned long>(s_vaddbg_energy),
+            turn_speech ? 1 : 0, static_cast<int>(vol_l),
+            static_cast<unsigned>(audio_capture_rms()),
+            s_turn.voice_frames());
+        s_vaddbg_frames = s_vaddbg_have_afe = s_vaddbg_neural = 0;
+        s_vaddbg_fallback = s_vaddbg_energy = 0;
+      }
+#endif
+
       // 轮次状态机必须每个采音帧都推进，不能被 AFE fetch 频率绑住。
       const uint32_t now = millis();
       if (turn_speech && !s_live_voice_seen) {
         s_live_voice_seen = true;
         Serial.printf(
-            ">>> 现场人声命中（neural=%d energy=%d peak=%d rms=%u）\n",
-            neural_speech ? 1 : 0, energy_speech ? 1 : 0,
+            ">>> 现场人声命中（neural=%d fallback_energy=%d peak=%d rms=%u）\n",
+            neural_speech ? 1 : 0, fallback_energy ? 1 : 0,
             static_cast<int>(vol_l),
             static_cast<unsigned>(audio_capture_rms()));
       }
-      const TurnEvent event = s_turn.update(now, turn_speech);
+      // 轮次状态机吃平滑后的信号：VAD 命中稀疏时不会整段被丢成噪声。
+      const bool turn_speech_smoothed = vad_smooth_update(turn_speech);
+      const TurnEvent event = s_turn.update(now, turn_speech_smoothed);
       if (event == TURN_EVENT_SPEECH_STARTED) {
         Serial.printf(
-            ">>> 检测到人声（neural=%d energy=%d），等待自然句尾...\n",
-            neural_speech ? 1 : 0, energy_speech ? 1 : 0);
+            ">>> 检测到人声（neural=%d fallback_energy=%d），等待自然句尾...\n",
+            neural_speech ? 1 : 0, fallback_energy ? 1 : 0);
       } else if (event == TURN_EVENT_SHORT_NOISE) {
         Serial.println(">>> 忽略短促噪声，继续聆听");
       } else if (event == TURN_EVENT_ENDPOINT) {

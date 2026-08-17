@@ -7,6 +7,99 @@ uint32_t min_u32(uint32_t a, uint32_t b) { return a < b ? a : b; }
 
 }  // namespace
 
+bool elapsed_at_least(uint32_t now_ms, uint32_t since_ms,
+                      uint32_t duration_ms) {
+  return now_ms - since_ms >= duration_ms;
+}
+
+const char *listen_source_for(ListenOrigin origin) {
+  if (origin == LISTEN_FROM_WAKE) return "wake";
+  if (origin == LISTEN_FROM_BARGE_IN) return "barge_in";
+  // LISTEN_FROM_WAKE_ACK has already played the acknowledgement locally; its
+  // post-ack audio is semantically a follow-up even though it starts a new
+  // conversation context.
+  return "follow_up";
+}
+
+bool listen_starts_new_conversation(ListenOrigin origin) {
+  return origin == LISTEN_FROM_WAKE || origin == LISTEN_FROM_WAKE_ACK;
+}
+
+SpeechEvidenceGate::SpeechEvidenceGate(const SpeechEvidenceConfig &config)
+    : config_(config) {}
+
+void SpeechEvidenceGate::reset() {
+  missing_neural_frames_ = 0;
+  consecutive_energy_frames_ = 0;
+  last_neural_speech_ = false;
+}
+
+bool SpeechEvidenceGate::update(bool neural_available, bool neural_speech,
+                                bool energy_speech) {
+  if (neural_available) {
+    missing_neural_frames_ = 0;
+    consecutive_energy_frames_ = 0;
+    last_neural_speech_ = neural_speech;
+    return neural_speech;
+  }
+
+  if (missing_neural_frames_ != UINT16_MAX) ++missing_neural_frames_;
+  if (energy_speech) {
+    if (consecutive_energy_frames_ != UINT16_MAX) {
+      ++consecutive_energy_frames_;
+    }
+  } else {
+    consecutive_energy_frames_ = 0;
+  }
+
+  if (last_neural_speech_ &&
+      missing_neural_frames_ <= config_.neural_hold_frames) {
+    return true;
+  }
+  last_neural_speech_ = false;
+
+  return config_.energy_fallback_frames > 0 &&
+         consecutive_energy_frames_ >= config_.energy_fallback_frames;
+}
+
+WakeAckGate::WakeAckGate(const WakeAckGateConfig &config) : config_(config) {}
+
+void WakeAckGate::reset(uint32_t now_ms) {
+  start_ms_ = now_ms;
+  quiet_frames_ = 0;
+  voice_frames_ = 0;
+  tail_released_ = false;
+}
+
+bool WakeAckGate::update(uint32_t now_ms, bool is_speech,
+                         bool trusted_quiet) {
+  if (!is_speech) {
+    if (trusted_quiet) {
+      if (quiet_frames_ != UINT16_MAX) ++quiet_frames_;
+      if (quiet_frames_ >= config_.quiet_frames) tail_released_ = true;
+    } else {
+      // AFE unavailable while raw energy is still high means unknown, not a
+      // reliable silence boundary after the wake phrase.
+      quiet_frames_ = 0;
+    }
+    voice_frames_ = 0;
+    return false;
+  }
+
+  const uint32_t guard_ms = tail_released_ ? config_.separated_guard_ms
+                                           : config_.continuous_guard_ms;
+  if (!elapsed_at_least(now_ms, start_ms_, guard_ms)) {
+    voice_frames_ = 0;
+    return false;
+  }
+
+  if (voice_frames_ != UINT16_MAX) ++voice_frames_;
+  const uint16_t required =
+      tail_released_ ? config_.separated_voice_frames
+                     : config_.continuous_voice_frames;
+  return required > 0 && voice_frames_ >= required;
+}
+
 TurnDetector::TurnDetector(const TurnDetectorConfig &config) : config_(config) {}
 
 void TurnDetector::reset(uint32_t now_ms, uint32_t guard_ms) {

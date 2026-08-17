@@ -11,21 +11,76 @@ import numpy as np
 import tensorflow as tf
 
 from audio_features import load_waveform, waveform_to_logmel
-from hi_vesper_config import DATASET_ROOT, PROJECT_ROOT
+from hi_vesper_config import DATASET_ROOT, LABELS, PROJECT_ROOT
 
 
-def representative_features(dataset_root: Path, limit: int, seed: int) -> list[np.ndarray]:
+def representative_stratum(path: Path) -> str:
+    if "hard_negative" in path.parts:
+        return "hard_negative"
+    for label in LABELS:
+        if label in path.parts:
+            return label
+    return "unknown"
+
+
+def stratified_representative_paths(
+    dataset_root: Path, limit: int, seed: int
+) -> tuple[list[Path], dict[str, int]]:
     paths = sorted((dataset_root / "train").rglob("*.wav"))
     if not paths:
         raise RuntimeError("training split is empty")
+    if limit < 1:
+        raise ValueError("representative count must be >= 1")
+
     rng = np.random.default_rng(seed)
-    chosen = rng.choice(paths, size=min(limit, len(paths)), replace=False)
+    strata: dict[str, list[Path]] = {}
+    for path in paths:
+        strata.setdefault(representative_stratum(path), []).append(path)
+    for values in strata.values():
+        rng.shuffle(values)
+
+    target = min(limit, len(paths))
+    names = sorted(strata)
+    quota = max(1, target // len(names))
+    chosen: list[Path] = []
+    offsets: dict[str, int] = {}
+    for name in names:
+        take = min(quota, len(strata[name]), target - len(chosen))
+        chosen.extend(strata[name][:take])
+        offsets[name] = take
+
+    # Fill unused quota round-robin so a small hard-negative stratum does not
+    # reduce the requested representative count.
+    while len(chosen) < target:
+        progressed = False
+        for name in names:
+            offset = offsets[name]
+            if offset < len(strata[name]):
+                chosen.append(strata[name][offset])
+                offsets[name] += 1
+                progressed = True
+                if len(chosen) == target:
+                    break
+        if not progressed:
+            break
+    rng.shuffle(chosen)
+    counts = {
+        name: sum(representative_stratum(path) == name for path in chosen)
+        for name in names
+    }
+    return chosen, counts
+
+
+def representative_features(
+    dataset_root: Path, limit: int, seed: int
+) -> tuple[list[np.ndarray], dict[str, int]]:
+    chosen, counts = stratified_representative_paths(dataset_root, limit, seed)
     features = []
     for index, path in enumerate(chosen):
         features.append(waveform_to_logmel(load_waveform(Path(path))).astype(np.float32))
         if (index + 1) % 50 == 0 or index + 1 == len(chosen):
             print(f"  representative {index + 1}/{len(chosen)}")
-    return features
+    return features, counts
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -43,7 +98,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     model = tf.keras.models.load_model(args.model)
-    representative = representative_features(
+    representative, representative_counts = representative_features(
         args.dataset_root, args.representative_count, args.seed
     )
 
@@ -80,6 +135,7 @@ def main() -> int:
         "output_zero_point": int(output_detail["quantization"][1]),
         "operators": ops,
         "representative_count": len(representative),
+        "representative_strata": representative_counts,
     }
     (args.output.parent / "quantization_metadata.json").write_text(
         json.dumps(metadata, indent=2) + "\n", encoding="utf-8"

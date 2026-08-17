@@ -63,6 +63,25 @@ def repeat_human_wake(
     return expanded_paths, np.asarray(expanded_labels, dtype=np.int32), human_count
 
 
+def repeat_hard_negatives(
+    paths: list[Path], labels: np.ndarray, repeat: int
+) -> tuple[list[Path], np.ndarray, int]:
+    """Give phonetic/context hard negatives explicit weight within unknown."""
+
+    if repeat < 1:
+        raise ValueError("hard negative repeat must be >= 1")
+    expanded_paths: list[Path] = []
+    expanded_labels: list[int] = []
+    hard_count = 0
+    for path, label in zip(paths, labels.tolist(), strict=True):
+        is_hard = label == LABELS["unknown"] and "hard_negative" in path.parts
+        copies = repeat if is_hard else 1
+        hard_count += int(is_hard)
+        expanded_paths.extend([path] * copies)
+        expanded_labels.extend([label] * copies)
+    return expanded_paths, np.asarray(expanded_labels, dtype=np.int32), hard_count
+
+
 def make_dataset(
     waves: np.ndarray,
     labels: np.ndarray,
@@ -107,6 +126,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=8,
         help="train split 中每条真人 wake 样本的重复权重，默认 8",
     )
+    parser.add_argument(
+        "--hard-negative-repeat",
+        type=int,
+        default=4,
+        help="train split 中近音/连续 hard negative 的重复权重，默认 4",
+    )
     parser.add_argument("--model", type=Path, default=PROJECT_ROOT / "models" / "hi_vesper.keras")
     return parser
 
@@ -118,6 +143,7 @@ def main() -> int:
     splits = {}
     train_source_files = 0
     train_human_files = 0
+    train_hard_negative_files = 0
     for split in ("train", "val"):
         paths, labels = discover_split(args.dataset_root, split)
         if split == "train":
@@ -130,8 +156,20 @@ def main() -> int:
                     f"train human wake: {train_human_files} source files x "
                     f"{args.human_wake_repeat} weighting"
                 )
+            paths, labels, train_hard_negative_files = repeat_hard_negatives(
+                paths, labels, args.hard_negative_repeat
+            )
+            if train_hard_negative_files:
+                print(
+                    f"train hard negatives: {train_hard_negative_files} source files x "
+                    f"{args.hard_negative_repeat} weighting"
+                )
         print(f"{split}: {len(paths)} {dict(Counter(labels.tolist()))}")
-        splits[split] = (paths, labels, load_waveforms(paths))
+        splits[split] = (
+            paths,
+            labels,
+            load_waveforms(paths, vary_repeated_crops=split == "train"),
+        )
 
     train_paths, train_labels, train_waves = splits["train"]
     _, val_labels, val_waves = splits["val"]
@@ -160,6 +198,9 @@ def main() -> int:
     )
     model.summary()
     args.model.parent.mkdir(parents=True, exist_ok=True)
+    best_checkpoint = args.model.with_name(args.model.stem + ".best.keras")
+    if best_checkpoint.exists():
+        best_checkpoint.unlink()
     callbacks = [
         tf.keras.callbacks.EarlyStopping(
             monitor="val_loss", patience=8, restore_best_weights=True
@@ -168,8 +209,9 @@ def main() -> int:
             monitor="val_loss", patience=3, factor=0.5, min_lr=1e-5
         ),
         tf.keras.callbacks.ModelCheckpoint(
-            args.model, monitor="val_loss", save_best_only=True
+            best_checkpoint, monitor="val_loss", save_best_only=True
         ),
+        tf.keras.callbacks.TerminateOnNaN(),
     ]
     history = model.fit(
         train_ds,
@@ -178,7 +220,14 @@ def main() -> int:
         callbacks=callbacks,
         verbose=2,
     )
-    model.save(args.model)
+    # ModelCheckpoint is the source of truth. Saving the in-memory final epoch
+    # here used to overwrite the lowest-val-loss checkpoint whenever training
+    # reached the requested epoch without triggering EarlyStopping.
+    if not best_checkpoint.is_file():
+        raise RuntimeError("training produced no finite validation checkpoint")
+    best_checkpoint.replace(args.model)
+    model = tf.keras.models.load_model(args.model)
+    best_epoch = int(np.argmin(history.history["val_loss"])) + 1
     metadata = {
         "seed": args.seed,
         "epochs_requested": args.epochs,
@@ -188,10 +237,13 @@ def main() -> int:
         "train_source_files": train_source_files,
         "train_human_wake_files": train_human_files,
         "human_wake_repeat": args.human_wake_repeat,
+        "train_hard_negative_files": train_hard_negative_files,
+        "hard_negative_repeat": args.hard_negative_repeat,
         "train_balanced_examples_per_epoch": len(balanced_indices(train_labels, args.seed)),
         "val_files": len(val_labels),
         "best_val_loss": float(min(history.history["val_loss"])),
         "best_val_accuracy": float(max(history.history["val_accuracy"])),
+        "best_epoch": best_epoch,
     }
     (args.model.parent / "training_metadata.json").write_text(
         json.dumps(metadata, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"

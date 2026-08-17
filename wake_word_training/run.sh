@@ -31,14 +31,18 @@ WAKE_WORD="${WAKE_WORD:-Hi Vesper}"
 EPOCHS="${HI_VESPER_EPOCHS:-${EPOCHS:-40}}"
 BATCH_SIZE="${HI_VESPER_BATCH_SIZE:-${BATCH_SIZE:-32}}"
 HUMAN_REPEAT="${HI_VESPER_HUMAN_REPEAT:-${HUMAN_REPEAT:-8}}"
+HARD_NEGATIVE_REPEAT="${HI_VESPER_HARD_NEGATIVE_REPEAT:-${HARD_NEGATIVE_REPEAT:-4}}"
 SPEAKER="${HI_VESPER_SPEAKER:-${SPEAKER:-hongzhenliang}}"
 SESSION="${HI_VESPER_SESSION:-${SESSION:-personal-20260815}}"
 TTS_WAKE_VOICES="${TTS_WAKE_VOICES:-en-US-BrianNeural,en-US-AriaNeural,en-US-JennyNeural,en-US-GuyNeural,en-GB-RyanNeural}"
 TTS_UNKNOWN_VOICES="${TTS_UNKNOWN_VOICES:-en-US-BrianNeural,en-US-AriaNeural,en-GB-SoniaNeural}"
+TTS_HARD_VOICES="${TTS_HARD_VOICES:-en-US-BrianNeural,en-US-AriaNeural,en-US-JennyNeural,en-US-GuyNeural,en-GB-RyanNeural,en-GB-SoniaNeural,en-AU-NatashaNeural,en-IN-PrabhatNeural}"
 TTS_SAMPLES_PER_VOICE="${TTS_SAMPLES_PER_VOICE:-24}"
-TTS_RATE_VARIANTS="${TTS_RATE_VARIANTS:--15,-5,0,5,15}"
-TTS_PITCH_VARIANTS="${TTS_PITCH_VARIANTS:--10,0,10}"
-HARD_NEGATIVE_PHRASES="${HARD_NEGATIVE_PHRASES:-Hey Vesper,Hi Jasper,Hi Casper}"
+TTS_RATE_VARIANTS="${TTS_RATE_VARIANTS:--20,-12,-5,0,5,12,20}"
+TTS_PITCH_VARIANTS="${TTS_PITCH_VARIANTS:--20,-10,0,10,20}"
+HARD_NEGATIVE_PHRASES="${HARD_NEGATIVE_PHRASES:-Hey Vesper,Hi Jasper,Hi Casper,Hi Vespa,Hi Esther,Hi Chester,Hi Lester,Hi Hector,Hi Victor,Hi Whisper,My Vesper,Bye Vesper,Hey Whisper,High Jasper,Hi Best Friend}"
+HARD_SAMPLES_PER_PHRASE="${HARD_SAMPLES_PER_PHRASE:-6}"
+HARD_CONTEXT_SENTENCES_PER_VOICE="${HARD_CONTEXT_SENTENCES_PER_VOICE:-12}"
 TTS_UNKNOWN_SENTENCES_PER_VOICE="${TTS_UNKNOWN_SENTENCES_PER_VOICE:-12}"
 SYNTH_NOISE_IF_EMPTY="${SYNTH_NOISE_IF_EMPTY:-1}"
 AUTO_BUILD="${AUTO_BUILD:-1}"
@@ -89,6 +93,7 @@ else
   HUMAN_DIR="$SCRIPT_DIR/data/wake_word/human_$WAKE_SLUG"
   LEGACY_EXTRA_ARGS=(--wake-tts-dir "$WAKE_TTS_DIR" --human-dir "$HUMAN_DIR" --skip-validation)
 fi
+HARD_DIR="$SCRIPT_DIR/data/not_wake_word/hard/$WAKE_SLUG"
 
 # 真人录音：命令行参数优先；否则尝试复用本机 human_source 旧录音（仅限同唤醒词）
 if [[ $# -gt 0 ]]; then
@@ -101,7 +106,7 @@ else
   done
   shopt -u nullglob
   if [[ "$WAKE_SLUG" != "hi-vesper" && ${#RECORDINGS[@]} -gt 0 ]]; then
-    echo "跳过 human_source 旧录音（不属于当前唤醒词 $WAKE_WORD），改用纯 TTS 训练"
+    echo "跳过 human_source 旧录音（不属于当前唤醒词 ${WAKE_WORD}），改用纯 TTS 训练"
     RECORDINGS=()
   fi
 fi
@@ -114,17 +119,21 @@ done
 
 cd "$SCRIPT_DIR"
 
-echo "[1/9] edge-tts 生成训练数据（唤醒词: $WAKE_WORD, slug: $WAKE_SLUG）"
+echo "[1/9] edge-tts 生成训练数据（唤醒词: ${WAKE_WORD}, slug: ${WAKE_SLUG}）"
 TTS_ARGS=(
   --wake-word "$WAKE_WORD"
   --wake-voices "$TTS_WAKE_VOICES"
   --samples-per-voice "$TTS_SAMPLES_PER_VOICE"
-  --rate-variants "$TTS_RATE_VARIANTS"
-  --pitch-variants "$TTS_PITCH_VARIANTS"
+  --rate-variants="$TTS_RATE_VARIANTS"
+  --pitch-variants="$TTS_PITCH_VARIANTS"
   --unknown-voices "$TTS_UNKNOWN_VOICES"
   --unknown-sentences-per-voice "$TTS_UNKNOWN_SENTENCES_PER_VOICE"
+  --hard-voices "$TTS_HARD_VOICES"
   --hard-negatives "$HARD_NEGATIVE_PHRASES"
+  --hard-samples-per-phrase "$HARD_SAMPLES_PER_PHRASE"
+  --hard-context-sentences-per-voice "$HARD_CONTEXT_SENTENCES_PER_VOICE"
   --wake-out "$WAKE_TTS_DIR"
+  --hard-out "$HARD_DIR"
 )
 if [[ "$SYNTH_NOISE_IF_EMPTY" == "1" ]]; then
   TTS_ARGS+=(--synth-noise-if-empty)
@@ -132,7 +141,7 @@ fi
 "$PYTHON_BIN" -B scripts/generate_tts_data.py "${TTS_ARGS[@]}"
 
 if [[ ${#RECORDINGS[@]} -gt 0 ]]; then
-  echo "[2/9] 导入真人录音（speaker=$SPEAKER session=$SESSION）"
+  echo "[2/9] 导入真人录音（speaker=${SPEAKER} session=${SESSION}）"
   "$PYTHON_BIN" -B scripts/import_human_wake.py \
     --speaker "$SPEAKER" \
     --session "$SESSION" \
@@ -143,7 +152,10 @@ else
 fi
 
 echo "[3/9] 重建 data -> dataset/raw 映射"
-"$PYTHON_BIN" -B scripts/import_legacy_data.py "${LEGACY_EXTRA_ARGS[@]}"
+"$PYTHON_BIN" -B scripts/import_legacy_data.py \
+  --hard-dir "$HARD_DIR" \
+  --rebuild \
+  "${LEGACY_EXTRA_ARGS[@]+"${LEGACY_EXTRA_ARGS[@]}"}"
 
 echo "[4/9] 重建 speaker-safe train/val/test"
 SPLIT_ARGS=(--group-by speaker --allow-nonstandard-duration --overwrite)
@@ -160,7 +172,8 @@ echo "[6/9] 训练 DS-CNN"
   --epochs "$EPOCHS" \
   --batch-size "$BATCH_SIZE" \
   --seed 42 \
-  --human-wake-repeat "$HUMAN_REPEAT"
+  --human-wake-repeat "$HUMAN_REPEAT" \
+  --hard-negative-repeat "$HARD_NEGATIVE_REPEAT"
 
 echo "[7/9] 转换 full-INT8 TFLite"
 "$PYTHON_BIN" -B scripts/convert_int8.py --representative-count 300 --seed 42

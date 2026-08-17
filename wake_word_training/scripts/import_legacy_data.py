@@ -17,6 +17,7 @@ import csv
 import os
 import re
 import shutil
+import tempfile
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -105,6 +106,7 @@ def discover_legacy(
     *,
     wake_tts_dir: Path | None = None,
     human_dir: Path | None = None,
+    hard_dir: Path | None = None,
     include_validation: bool = True,
 ) -> list[LegacyRecord]:
     if not legacy_root.is_dir():
@@ -169,7 +171,9 @@ def discover_legacy(
             origin="unknown_tts",
         )
 
-    hard_dir = legacy_root / "not_wake_word" / "hard"
+    if hard_dir is None:
+        namespaced = legacy_root / "not_wake_word" / "hard" / "hi-vesper"
+        hard_dir = namespaced if namespaced.is_dir() else legacy_root / "not_wake_word" / "hard"
     scanned_dirs.append(hard_dir)
     for path in sorted(hard_dir.glob("*.wav")):
         voice = _tts_voice(path.name)
@@ -223,11 +227,15 @@ def discover_legacy(
     if not records:
         raise DatasetError(f"{legacy_root} 中没有可导入的 WAV")
     mapped = {record.source for record in records}
+    # Every importer above intentionally consumes only direct children. In
+    # particular, hard negatives and custom wake words live in slug-namespaced
+    # subdirectories. Recursing here would incorrectly reject another wake
+    # word's isolated corpus as "unmapped".
     all_wavs = {
         path.resolve()
         for directory in scanned_dirs
         if directory.is_dir()
-        for path in directory.rglob("*.wav")
+        for path in directory.glob("*.wav")
     }
     unmapped = sorted(all_wavs - mapped)
     if unmapped:
@@ -253,9 +261,15 @@ def materialize_legacy(
     dataset_root: Path,
     mode: str = "symlink",
     dry_run: bool = False,
+    rebuild: bool = False,
 ) -> tuple[int, int]:
     if mode not in {"symlink", "copy"}:
         raise DatasetError(f"不支持的导入模式: {mode}")
+    if rebuild:
+        if dry_run:
+            return len(records), 0
+        return _rebuild_raw(records, dataset_root=dataset_root, mode=mode)
+
     created = 0
     reused = 0
     destinations: set[Path] = set()
@@ -281,40 +295,61 @@ def materialize_legacy(
         created += 1
 
     if not dry_run:
-        manifest = dataset_root / "legacy_import_manifest.csv"
-        with manifest.open("w", newline="", encoding="utf-8") as handle:
-            fieldnames = (
-                "raw_label",
-                "speaker",
-                "session",
-                "origin",
-                "sample_rate",
-                "channels",
-                "frames",
-                "duration_seconds",
-                "subtype",
-                "source_path",
-                "destination_path",
-            )
-            writer = csv.DictWriter(handle, fieldnames=fieldnames)
-            writer.writeheader()
-            for record in records:
-                writer.writerow(
-                    {
-                        "raw_label": record.raw_label,
-                        "speaker": record.speaker,
-                        "session": record.session,
-                        "origin": record.origin,
-                        "sample_rate": record.sample_rate,
-                        "channels": record.channels,
-                        "frames": record.frames,
-                        "duration_seconds": f"{record.frames / record.sample_rate:.6f}",
-                        "subtype": record.subtype,
-                        "source_path": str(record.source.relative_to(legacy_root_for(record.source))),
-                        "destination_path": str(destination_for(record, dataset_root).relative_to(dataset_root)),
-                    }
-                )
+        _write_manifest(records, dataset_root)
     return created, reused
+
+
+def _rebuild_raw(
+    records: list[LegacyRecord], *, dataset_root: Path, mode: str
+) -> tuple[int, int]:
+    """Atomically replace generated ``dataset/raw`` with exactly ``records``.
+
+    ``dataset/raw`` is a generated view over ``data/``. Building into a sibling
+    staging directory first prevents a failed import from leaving a partially
+    pruned corpus, while replacing the whole view removes stale wake-word and
+    hard-negative mappings when the configured wake slug changes.
+    """
+
+    dataset_root.mkdir(parents=True, exist_ok=True)
+    staging_root = Path(tempfile.mkdtemp(prefix=".raw-staging-", dir=dataset_root))
+    backup_root = Path(tempfile.mkdtemp(prefix=".raw-backup-", dir=dataset_root))
+    backup_root.rmdir()
+    raw_root = dataset_root / "raw"
+    swapped_old = False
+    try:
+        for raw_label in ("wake", "hard_negative", "unknown", "noise"):
+            (staging_root / raw_label).mkdir(parents=True, exist_ok=True)
+        destinations: set[Path] = set()
+        for record in records:
+            relative = destination_for(record, dataset_root).relative_to(raw_root)
+            destination = staging_root / relative
+            if destination in destinations:
+                raise DatasetError(f"legacy 导入目标冲突: {destination}")
+            destinations.add(destination)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            if mode == "symlink":
+                target = os.path.relpath(record.source, destination.parent.resolve())
+                destination.symlink_to(target)
+            else:
+                shutil.copy2(record.source, destination)
+
+        if raw_root.exists() or raw_root.is_symlink():
+            raw_root.rename(backup_root)
+            swapped_old = True
+        staging_root.rename(raw_root)
+        if swapped_old:
+            shutil.rmtree(backup_root)
+        _write_manifest(records, dataset_root)
+        return len(records), 0
+    except Exception:
+        if swapped_old and not raw_root.exists() and backup_root.exists():
+            backup_root.rename(raw_root)
+        raise
+    finally:
+        if staging_root.exists():
+            shutil.rmtree(staging_root)
+        if backup_root.exists():
+            shutil.rmtree(backup_root)
 
 
 def legacy_root_for(source: Path) -> Path:
@@ -324,6 +359,52 @@ def legacy_root_for(source: Path) -> Path:
         if parent.name == "data":
             return parent.parent
     return source.parent
+
+
+def _portable_source_path(source: Path) -> str:
+    root = legacy_root_for(source)
+    try:
+        return str(source.relative_to(root))
+    except ValueError:
+        return source.name
+
+
+def _write_manifest(records: list[LegacyRecord], dataset_root: Path) -> None:
+    manifest = dataset_root / "legacy_import_manifest.csv"
+    with manifest.open("w", newline="", encoding="utf-8") as handle:
+        fieldnames = (
+            "raw_label",
+            "speaker",
+            "session",
+            "origin",
+            "sample_rate",
+            "channels",
+            "frames",
+            "duration_seconds",
+            "subtype",
+            "source_path",
+            "destination_path",
+        )
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for record in records:
+            writer.writerow(
+                {
+                    "raw_label": record.raw_label,
+                    "speaker": record.speaker,
+                    "session": record.session,
+                    "origin": record.origin,
+                    "sample_rate": record.sample_rate,
+                    "channels": record.channels,
+                    "frames": record.frames,
+                    "duration_seconds": f"{record.frames / record.sample_rate:.6f}",
+                    "subtype": record.subtype,
+                    "source_path": _portable_source_path(record.source),
+                    "destination_path": str(
+                        destination_for(record, dataset_root).relative_to(dataset_root)
+                    ),
+                }
+            )
 
 
 def print_summary(records: list[LegacyRecord], created: int, reused: int, dry_run: bool) -> None:
@@ -368,11 +449,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="真人 wake 目录（默认 data/wake_word/human）",
     )
     parser.add_argument(
+        "--hard-dir",
+        type=Path,
+        default=None,
+        help="当前 wake slug 的 hard-negative 目录",
+    )
+    parser.add_argument(
         "--skip-validation",
         action="store_true",
         help="跳过 legacy validation TTS（非 Hi Vesper 唤醒词时使用）",
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="原子重建 dataset/raw，清除其他 wake slug 留下的陈旧映射",
+    )
     return parser
 
 
@@ -386,7 +478,12 @@ def main() -> int:
     def resolve_under_root(value: Path | None, default: Path) -> Path:
         if value is None:
             return default
-        candidate = value if value.is_absolute() else legacy_root / value
+        if value.is_absolute():
+            candidate = value
+        elif value.exists():
+            candidate = value
+        else:
+            candidate = legacy_root / value
         return candidate.resolve()
 
     wake_tts_dir = resolve_under_root(
@@ -395,11 +492,17 @@ def main() -> int:
     human_dir = resolve_under_root(
         args.human_dir, legacy_root / "wake_word" / "human"
     )
+    hard_dir = (
+        resolve_under_root(args.hard_dir, legacy_root / "not_wake_word" / "hard")
+        if args.hard_dir is not None
+        else None
+    )
     try:
         records = discover_legacy(
             legacy_root,
             wake_tts_dir=wake_tts_dir,
             human_dir=human_dir,
+            hard_dir=hard_dir,
             include_validation=not args.skip_validation,
         )
         created, reused = materialize_legacy(
@@ -407,6 +510,7 @@ def main() -> int:
             dataset_root=dataset_root,
             mode=args.mode,
             dry_run=args.dry_run,
+            rebuild=args.rebuild,
         )
     except DatasetError as exc:
         parser.error(str(exc))

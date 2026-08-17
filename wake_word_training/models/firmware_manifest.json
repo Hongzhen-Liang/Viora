@@ -1,15 +1,15 @@
 {
-  "model_path": "/Volumes/T7_APFS/Github/ESP32Projects/PlantTalk/PlantTalkServer/wake_word_training/models/hi_vesper_int8.tflite",
-  "model_sha256": "6426edeb4f1f40ae75a58da1f19d7f4e71600bd88408e056ea8051229a383187",
+  "model_path": "models/hi_vesper_int8.tflite",
+  "model_sha256": "41969170f4f219a0637c47ceaeb74dc81fee2bc62100842626c7b39b983cf675",
   "model_bytes": 37376,
-  "golden_source": "/Volumes/T7_APFS/Github/ESP32Projects/PlantTalk/PlantTalkServer/wake_word_training/data/wake_word/tts/en-AU-WilliamNeural_m15_m10_329.wav",
+  "golden_source": "dataset/test/wake/legacy-tts-en-au-natashaneural/legacy/en-AU-NatashaNeural_m8_p0_073.wav",
   "golden_output": [
-    0.99609375,
-    0.00390625,
+    0.9921875,
+    0.0078125,
     0.0
   ],
-  "input_scale": 0.031313441693782806,
-  "input_zero_point": -23,
+  "input_scale": 0.02856513299047947,
+  "input_zero_point": -15,
   "output_scale": 0.00390625,
   "output_zero_point": -128,
   "mel_shape": [

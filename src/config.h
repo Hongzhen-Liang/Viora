@@ -19,11 +19,14 @@
 #define ENABLE_LOCAL_WAKE_ACK 1
 #define WAKE_ACK_DECIDE_MS     350  // 唤醒决定窗时长
 #define WAKE_ACK_VOICE_FRAMES  2    // 约 64ms 连续人声即判定"紧跟指令"
-// 唤醒轮提交前，整段录音（含 900ms 前置）的峰值低于此值视为“没人说话”，
-// 不提交也不上传，继续聆听等待。按原始实机日志换算，取 I2S 高 16 bit 后
-// 静音峰值预期 <60，正常说话通常 >250。
-#define WAKE_MIN_SPEAK_PEAK 150
-
+#define WAKE_ACK_TAIL_GUARD_MS  96   // 先越过唤醒词尾音，再判断后续连续语音
+#define WAKE_ACK_CONT_GUARD_MS  224  // 无静音分隔时接近窗尾判定，防 VAD 尾音拖尾
+#define WAKE_ACK_TAIL_QUIET_FRAMES 2 // 若先出现约 64ms 静音，后续人声视为新开口
+#define WAKE_ACK_CONT_VOICE_FRAMES 5 // 无静音分隔时需约 160ms 持续语音，抑制尾音
+#define WAKE_ACK_BARGE_GUARD_MS 64   // 短确认音开始后很快允许用户抢话
+#define WAKE_ACK_BARGE_VOICE_FRAMES 2 // AEC 后约 64ms 人声即停止确认音
+#define WAKE_ACK_BOUNDARY_PREROLL_MS 192 // 保留确认音边界附近首字，不带唤醒词
+#define WAKE_ACK_FOLLOWUP_GUARD_MS 64 // 确认音自然播完后的极短扬声器尾音保护
 // ============================================================
 // 引脚定义（MSM3526 / INMP441，I2S 数字 MEMS 麦克风）
 //   一排 [SD][VDD][GND] → GPIO2 / GPIO1(软件3.3V) / 真实GND
@@ -105,6 +108,12 @@
 #define VOICE_THRESHOLD_MIN     125   // 自适应阈值下限（高于环境噪声尖峰~65）
 #define VOICE_THRESHOLD_MAX     625   // 自适应阈值上限
 #define VOICE_RMS_MIN           55    // 能量兜底还需满足 RMS，过滤点击/单点尖峰
+// 聆听态以 AFE 神经 VAD 为准。只有 AFE 连续多帧没有产出时，较强能量
+// 才接管判定；新鲜的 neural=silence 会明确否决音乐/扬声器声的能量误报。
+#define AFE_NEURAL_HOLD_FRAMES       2   // 异步结果偶发晚到时保持最近 speech 约64ms
+#define AFE_ENERGY_FALLBACK_FRAMES   6   // AFE 无结果约192ms后才允许能量降级
+#define ENERGY_FALLBACK_PEAK_MIN     180 // 降级路径额外峰值门
+#define ENERGY_FALLBACK_RMS_MIN      70  // 降级路径额外 RMS 门
 // 自然断句参数：短回答多等一会儿；正常句约 0.65 秒静音即回复；
 // 用户曾在句内停顿后继续说时，会自动学习其节奏并放宽，最多 1.8 秒。
 #define VAD_FRAME_MS              32
@@ -116,7 +125,7 @@
 #define ENDPOINT_MAX_MS           1800
 #define ENDPOINT_LEARN_GAP_MS     160
 #define MIN_REC_MS                450
-#define MAX_REC_MS                30000
+#define MAX_REC_MS                15000
 
 // 连续对话与打断参数
 #define CONV_TIMEOUT_MS        15000  // 回复后继续等这一时长，无需重复唤醒
@@ -128,10 +137,20 @@
 #define BARGE_IN_GUARD_MS      450    // 回答刚开始时避免瞬态误打断
 #define BARGE_IN_VOICE_FRAMES  5      // AEC 后连续约 160ms 人声才打断
 
+// 服务端/网络异常不能让设备永久卡在“处理中”或“播放中”。
+#define PROCESSING_TIMEOUT_MS      45000 // audio_end 后最久等待首个 tts_start
+#define PLAYING_STALL_TIMEOUT_MS   15000 // tts_start 后连续无 PCM/tts_end 的上限
+#define PLAYING_MAX_MS             60000 // 含本地播放排空在内的绝对上限
+
 // 唤醒/打断前置音频：避免 KWS/VAD 固有延迟截掉紧跟唤醒词的首字。
 #define AUDIO_PREROLL_MS       900
+// 句首保留的静音垫片：服务端裁剪时最多把语音起点往前保留这些毫秒。
 #define ASR_PREFIX_PADDING_MS  600
-#define ASR_SUFFIX_PADDING_MS  200
+// 句尾保留的静音垫片。独立 VAD 对扬声器/小声语音的帧比较稀疏，短句
+// 会被判成 1200ms 耐心断句，尾音其实还未结束；保留 1000ms 避免裁掉
+// 句尾字（如“现在几点了”丢“几点了”），服务端 Whisper VAD filter 会自行
+// 去掉真静音，带宽代价每次约 13KB。
+#define ASR_SUFFIX_PADDING_MS  1000
 
 // 播放音量（LLM operation: volume_up / volume_down 分发到这里）
 #define VOLUME_DEFAULT 0.6f // 默认保留约 4.4dB 数字余量，减少功放削顶失真
@@ -157,3 +176,7 @@
 // 日常嫌吵设 0；排查唤醒/麦克风/内存问题时改回 1。
 // ============================================================
 #define ENABLE_HEALTH_LOG 0
+
+// 聆听态神经 VAD 诊断：每秒打印 [VADDBG]（have_afe/neural/fallback/energy 帧
+// 计数与峰值/RMS）。排查“唤醒后听不到人说话”时临时开 1，定位后设 0。
+#define ENABLE_VAD_DEBUG 0

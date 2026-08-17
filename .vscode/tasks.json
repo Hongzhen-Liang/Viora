@@ -9,6 +9,14 @@
 			"isBackground": false,
 			"problemMatcher": [],
 			"group": "build"
+		},
+		{
+			"label": "Viora Upload (AFE)",
+			"type": "shell",
+			"command": "PATH=\"$HOME/.platformio/penv/bin:$PATH\" platformio run --target upload",
+			"args": [],
+			"isBackground": false,
+			"problemMatcher": []
 		}
 	]
 }

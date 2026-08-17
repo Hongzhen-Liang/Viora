@@ -35,26 +35,22 @@ constexpr int kInferenceFrameStride = 10;  // 100 ms at a 10 ms feature hop.
 // 特征在每个 1.5s 窗内做均值/方差归一化，模型对恒定增益不敏感——
 // 数字调大麦克风增益不会抬高远场分数，真正掉分的是距离带来的信噪比
 // 与房间混响。阈值只能迁就，根治要靠真人实距离录音重训（见
-// wake_word_training/README：现有 wake 数据 365 条 TTS + 仅 6 条真人）。
-// 触发策略 v14（独立语音活动门）：
-//  - 不再用整个 log-mel 窗的总方差漂移当语音证据。白噪声的频带
-//    着色会让总方差稳定在 1.2~1.4，缓慢漂移累计后也会误过旧的
-//    max-min 游程门；
+// wake_word_training/README：现有 wake 数据 485 条 TTS + 6 条真人）。
+// 触发策略 v15（VAD 唯一活动门，2026-08-18 校准后）：
 //  - 固件复用 ESP-SR 内置 VAD，最近 1.5s 至少 3 个 30ms 语音帧才算
-//    有人声。同时计算“每个 mel 频带沿时间的方差”（tvar）作为小声
-//    语音的非神经网络兜底；现有语料中静态白/粉噪声 tvar <= 0.34，
-//    真人唤醒词 >= 8.6，门限保守取 0.75；
-//  - 直通/强单窗/多窗证据的模型分数先经语音活动门。空调底噪即使
-//    p 瞬间冲到 0.95+ 也只会被记为背景，不会进入概率证据历史；
-//  - 直通：任一窗口 p >= 0.95 且语音活动门通过即触发；
-//  - 强单窗：任一窗口 p >= 0.50 且语音活动/能量门通过即触发；
+//    有人声；tvar（各 mel 频带时间方差）只保留在 cand 日志供诊断；
+//  - 直通/强单窗/多窗证据的模型分数必须先过 VAD 活动门。实测中文
+//    语音与房间瞬态单窗分数可达 0.58~0.92 但 vad=0/50，tvar 兜底会
+//    造成日常中文对话高频误醒，故 v15 移除 tvar 触发兜底；
+//  - 直通：任一窗口 p >= 0.95 且 VAD 门通过即触发；
+//  - 强单窗：任一窗口 p >= 0.50 且 VAD/能量门通过即触发；
 //  - 较宽证据：最近 12 个 100ms 窗（≈1.2s）中至少 2 个 p >= 0.35 且峰值
 //    p >= 0.45（接住远场低分平台）；
 //  - 响度档双窗：除原有分数/能量条件外必须有 VAD 人声，避免一次
 //    磕碰因 1.5s 滑窗重叠而被重复计为两窗；
 //  - 能量门：直通/强单窗/证据要求 kEnergyGatePeak=20（≈“麦克风还活着”
-//    检查）；静音与静止背景误醒由语音活动门拦截。
-// 误触风险靠 0.95 直通、双命中证据、2.5s 冷却兜底；
+//    检查）；静音与静止背景误醒由 VAD 活动门拦截。
+// 已知取舍：极小声说话（VAD 不触发）不再唤醒，用正常音量重试；
 // cand 日志带 var/tvar/vad/energy 字段，若开始漏醒可临时开启。
 constexpr float kEvidenceThreshold = 0.35f;
 constexpr float kEvidencePeakThreshold = 0.45f;
@@ -146,6 +142,8 @@ bool s_vad_history[kVadHistoryFrames] = {};
 int s_vad_history_head = 0;
 int s_vad_history_count = 0;
 int s_vad_speech_frames = 0;
+// 最近一个 30ms 帧的 VAD 判定（聆听/决定窗门控复用，见 wake_word.h）。
+bool s_vad_last_speech = false;
 uint32_t s_last_suppress_log_ms = 0;  // “背景抑制”日志节流
 bool s_ready = false;
 bool s_was_enabled = false;
@@ -239,6 +237,7 @@ void push_vad_result(bool speech) {
     --s_vad_speech_frames;
   }
   s_vad_history[s_vad_history_head] = speech;
+  s_vad_last_speech = speech;
   if (speech) ++s_vad_speech_frames;
   s_vad_history_head = (s_vad_history_head + 1) % kVadHistoryFrames;
   if (s_vad_history_count < kVadHistoryFrames) ++s_vad_history_count;
@@ -569,6 +568,10 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
                        float *probability) {
   if (probability != nullptr) *probability = s_last_probability;
   if (!s_ready || pcm == nullptr || samples <= 0) return false;
+  // 独立 ESP-SR VAD 在任何状态下都持续喂入：KWS 未武装（聆听态/决定窗）
+  // 时聆听门也依赖它（AFE 内置 VAD 对远场/扬声器语音不敏感）。重新武装
+  // 时 wake_word_reset 会清掉历史，不会把上一轮语音算进唤醒活动门。
+  observe_vad_pcm(pcm, samples);
   if (!enabled) {
     s_was_enabled = false;
     return false;
@@ -591,7 +594,6 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
     if (chunk_peak > s_arm_head_peak) s_arm_head_peak = chunk_peak;
     ++s_chunks_since_arm;
   }
-  observe_vad_pcm(pcm, samples);
 
   bool woken = false;
   for (int index = 0; index < samples; ++index) {
@@ -613,13 +615,15 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
         }
         const float raw_current = probabilities[0];
         const int16_t energy_peak = recent_chunk_peak();
-        // 模型分数只在独立语音活动证据存在时才进入触发历史。
-        // VAD 主门抗稳态白噪声，tvar 兜底极小声但时间调制明显的语音。
+        // 2026-08-18 校准（逐窗日志实测）：中文语音（如“打开客厅的灯”）与
+        // 房间瞬态的单窗分数可达 0.58~0.92，但 vad=0/50；而可唤醒音色
+        // （TTS/真人）vad=3~10。tvar 兜底门会让这类非唤醒语音的高分进入
+        // 触发历史造成误醒。改为：所有模型触发路径都要求最近 1.5s 内
+        // ≥3 个 30ms ESP-SR VAD 语音帧；tvar 只保留在 cand 日志供诊断。
+        // 代价：极小声说话（VAD 不触发）不再唤醒，可用正常音量重试。
         const bool vad_speech =
             s_vad_speech_frames >= kMinVadSpeechFrames;
-        const bool temporal_speech =
-            s_temporal_variance >= kMinTemporalVariance;
-        const bool has_speech_activity = vad_speech || temporal_speech;
+        const bool has_speech_activity = vad_speech;
         const float current = has_speech_activity ? raw_current : 0.0f;
         const bool first_window = s_first_window_after_arm;
         s_first_window_after_arm = false;
@@ -704,3 +708,11 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
 }
 
 uint32_t wake_word_last_inference_us() { return s_last_inference_us; }
+
+bool wake_word_vad_speech_now() {
+  return s_vad_last_speech;
+}
+
+bool wake_word_vad_ready() {
+  return s_kws_vad != nullptr;
+}

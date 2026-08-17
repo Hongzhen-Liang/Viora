@@ -36,6 +36,29 @@ def quantize(values: np.ndarray, scale: float, zero_point: int) -> np.ndarray:
     return np.clip(np.rint(values / scale + zero_point), -128, 127).astype(np.int8)
 
 
+def portable_project_path(path: Path) -> str:
+    path = path.absolute()
+    try:
+        return str(path.relative_to(PROJECT_ROOT.absolute()))
+    except ValueError:
+        return path.name
+
+
+def resolve_evaluation_audio(value: str) -> Path:
+    """Resolve new relative metadata and recover legacy moved-repo paths."""
+
+    configured = Path(value)
+    candidate = configured if configured.is_absolute() else PROJECT_ROOT / configured
+    if candidate.is_file():
+        return candidate
+    matches = sorted((PROJECT_ROOT / "dataset" / "test" / "wake").rglob(configured.name))
+    if len(matches) == 1:
+        return matches[0]
+    raise FileNotFoundError(
+        f"golden wake audio not found: {value!r}; rerun scripts/evaluate.py"
+    )
+
+
 def cpp_float(value: float) -> str:
     """Format a portable C++ float literal (including integral values)."""
 
@@ -61,7 +84,7 @@ def main() -> int:
     args = build_parser().parse_args()
     model_bytes = args.tflite.read_bytes()
     evaluation = json.loads(args.evaluation.read_text(encoding="utf-8"))
-    golden_path = Path(evaluation["golden_wake_path"])
+    golden_path = resolve_evaluation_audio(evaluation["golden_wake_path"])
     waveform = load_waveform(golden_path)
     pcm = np.clip(np.rint(waveform * 32768.0), -32768, 32767).astype(np.int16)
     reconstructed = pcm.astype(np.float32) / 32768.0
@@ -142,10 +165,10 @@ def main() -> int:
     )
 
     manifest = {
-        "model_path": str(args.tflite),
+        "model_path": portable_project_path(args.tflite),
         "model_sha256": hashlib.sha256(model_bytes).hexdigest(),
         "model_bytes": len(model_bytes),
-        "golden_source": str(golden_path),
+        "golden_source": portable_project_path(golden_path),
         "golden_output": golden_output.tolist(),
         "input_scale": float(input_scale),
         "input_zero_point": int(input_zero_point),

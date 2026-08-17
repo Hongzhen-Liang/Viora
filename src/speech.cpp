@@ -189,9 +189,10 @@ bool speech_init() {
   cfg.se_init      = true;                     // 降噪（NS_MODE_SSP，无需模型）
   cfg.vad_init     = true;                     // 神经 VAD（抗背景音乐的关键）
   cfg.wakenet_init = false;                    // 唤醒由自研 TFLM 模型完成
-  // MODE_4 在当前单麦 + AEC 配置上会明显漏掉正常近讲；MODE_3 是该版本
-  // AFE 的默认均衡档，再由上层连续帧与能量双门限抑制瞬态误触发。
-  cfg.vad_mode     = VAD_MODE_3;
+  // MODE_4 在当前单麦 + AEC 配置上会明显漏掉正常近讲；MODE_2 比 MODE_3
+  // 更敏感：聆听态以神经 VAD 为主门，宁可略灵敏（再由连续帧/能量双门限
+  // 抑瞬态），也不能听不到扬声器回采与小声说话（2026-08-17 实机验证）。
+  cfg.vad_mode     = VAD_MODE_2;
   cfg.wakenet_model_name = nullptr;
   cfg.wakenet_mode = DET_MODE_90;              // 单通道检测模式
   cfg.afe_mode     = SR_MODE_HIGH_PERF;

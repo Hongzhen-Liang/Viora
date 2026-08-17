@@ -24,5 +24,12 @@ bool net_provisioning_active();          // 是否处于配网热点模式
 // 待唤醒时允许 WiFi modem sleep；录音/处理/播放时恢复全性能。
 void net_set_idle_power_save(bool enabled);
 // 返回 WebSocket 是否实际接受该二进制帧，便于端侧发现上行丢帧。
+// 音频与 JSON 控制帧都进入同一个发送队列，由独立发送任务按序发出：
+// 主循环不会被 TCP 回压阻塞（链路抖时采集/状态机照常跑），且 audio_end
+// 一定排在它之前入队的音频之后到达服务器。
 bool net_send_audio(const uint8_t *data, size_t len);
 void net_send_json(const char *json);
+// 本轮聆听的发送统计（新一轮开始时归零，供 audio_end 的 PCM 时钟核算）
+uint32_t net_audio_sent_bytes();
+uint32_t net_audio_dropped_bytes();
+void net_audio_flush();

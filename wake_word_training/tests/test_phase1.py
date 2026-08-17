@@ -143,6 +143,57 @@ class LegacyImportTest(unittest.TestCase):
                 (0, 7),
             )
 
+            stale = dataset / "raw" / "wake" / "stale-speaker" / "old" / "stale.wav"
+            write_pcm16(stale)
+            self.assertTrue(stale.is_file())
+            self.assertEqual(
+                materialize_legacy(
+                    records,
+                    dataset_root=dataset,
+                    mode="symlink",
+                    rebuild=True,
+                ),
+                (7, 0),
+            )
+            self.assertFalse(stale.exists())
+            rebuilt = list((dataset / "raw").rglob("*.wav"))
+            self.assertEqual(len(rebuilt), 7)
+            self.assertTrue(all(path.is_symlink() and path.resolve().is_file() for path in rebuilt))
+
+    def test_hard_negatives_are_isolated_by_wake_slug(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            legacy = Path(tmp) / "data"
+            write_pcm16(
+                legacy / "wake_word" / "tts" / "en-US-AriaNeural_r+0_p+0_000.wav"
+            )
+            selected = (
+                legacy
+                / "not_wake_word"
+                / "hard"
+                / "hi-vesper"
+                / "en-US-AriaNeural_hn_hi-jasper_r+0_p+0_000.wav"
+            )
+            other = (
+                legacy
+                / "not_wake_word"
+                / "hard"
+                / "hi-casper"
+                / "en-US-GuyNeural_hn_hi-vesper_r+0_p+0_000.wav"
+            )
+            write_pcm16(selected)
+            write_pcm16(other)
+
+            records = discover_legacy(
+                legacy,
+                hard_dir=selected.parent,
+                include_validation=False,
+            )
+            hard_sources = {
+                record.source for record in records if record.raw_label == "hard_negative"
+            }
+            self.assertEqual(hard_sources, {selected.resolve()})
+            self.assertNotIn(other.resolve(), {record.source for record in records})
+
 
 if __name__ == "__main__":
     unittest.main()
