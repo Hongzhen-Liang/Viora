@@ -162,18 +162,28 @@ SPLIT_ARGS=(--group-by speaker --allow-nonstandard-duration --overwrite)
 if [[ ${#RECORDINGS[@]} -gt 0 || "$WAKE_SLUG" == "hi-vesper" ]]; then
   SPLIT_ARGS+=(--force-train-speaker "legacy-wake-human-${SPEAKER}")
 fi
+# 中文负样本（data/not_wake_word/tts 的 tts_neg_zh-* 组）强制进 train：
+# 中文拒绝能力只能在训练中学习，val/test 需要的是独立评测。
+if ls "$SCRIPT_DIR/data/not_wake_word/tts/"tts_neg_zh-*.wav >/dev/null 2>&1; then
+  SPLIT_ARGS+=(--force-train-speaker "legacy-tts-zh-cn-xiaoxiaoneural")
+fi
 "$PYTHON_BIN" -B scripts/split_dataset.py "${SPLIT_ARGS[@]}"
 
 echo "[5/9] 运行数据与模型契约测试"
 PYTHONDONTWRITEBYTECODE=1 "$PYTHON_BIN" -B -m unittest discover -s tests -v
 
 echo "[6/9] 训练 DS-CNN"
-"$PYTHON_BIN" -B scripts/train.py \
-  --epochs "$EPOCHS" \
-  --batch-size "$BATCH_SIZE" \
-  --seed 42 \
-  --human-wake-repeat "$HUMAN_REPEAT" \
+TRAIN_ARGS=(
+  --epochs "$EPOCHS"
+  --batch-size "$BATCH_SIZE"
+  --seed 42
+  --human-wake-repeat "$HUMAN_REPEAT"
   --hard-negative-repeat "$HARD_NEGATIVE_REPEAT"
+)
+if [[ "${HI_VESPER_NO_CHANNEL_IR:-0}" == "1" ]]; then
+  TRAIN_ARGS+=(--no-channel-ir)
+fi
+"$PYTHON_BIN" -B scripts/train.py "${TRAIN_ARGS[@]}"
 
 echo "[7/9] 转换 full-INT8 TFLite"
 "$PYTHON_BIN" -B scripts/convert_int8.py --representative-count 300 --seed 42

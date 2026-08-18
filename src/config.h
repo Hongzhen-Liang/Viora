@@ -180,3 +180,8 @@
 // 聆听态神经 VAD 诊断：每秒打印 [VADDBG]（have_afe/neural/fallback/energy 帧
 // 计数与峰值/RMS）。排查“唤醒后听不到人说话”时临时开 1，定位后设 0。
 #define ENABLE_VAD_DEBUG 0
+
+// 麦克风原始 PCM 流式采集（信道冲激响应测量用，调试功能）：
+// 开启后每 512 样本帧按 [AA 55 seq_lo seq_hi len_lo len_hi] 帧头原样发往
+// USB 串口，供 scripts/mic_capture.py 落盘成 WAV。测量完成后必须设回 0。
+#define ENABLE_MIC_CAPTURE 0

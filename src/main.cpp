@@ -578,6 +578,23 @@ void loop() {
   int16_t vol_l = 0;
   const int frames = audio_capture(pcm, 512, &vol_l);
   if (frames <= 0) return;
+#if ENABLE_MIC_CAPTURE
+  // 信道测量：原始麦克风 PCM 按帧头流式发往 USB 串口。
+  // 帧头 [AA 55 seq_lo seq_hi len_lo len_hi]（len=样本数，PCM 为
+  // len*2 字节小端 int16），由 scripts/mic_capture.py 解析落盘。
+  {
+    static uint16_t cap_seq = 0;
+    const uint8_t header[6] = {
+        0xAA, 0x55, static_cast<uint8_t>(cap_seq & 0xFF),
+        static_cast<uint8_t>(cap_seq >> 8),
+        static_cast<uint8_t>(frames & 0xFF),
+        static_cast<uint8_t>((frames >> 8) & 0xFF)};
+    Serial.write(header, sizeof(header));
+    Serial.write(reinterpret_cast<const uint8_t *>(pcm),
+                 frames * sizeof(int16_t));
+    ++cap_seq;
+  }
+#endif
 #if ENABLE_HEALTH_LOG
   if (vol_l > s_health_peak) s_health_peak = vol_l;
   const uint16_t capture_rms = audio_capture_rms();
@@ -607,7 +624,7 @@ void loop() {
     audio_ring_push(pcm, frames);
   }
 
-  const bool kws_enabled = s_state == ST_IDLE;
+  const bool kws_enabled = ENABLE_MIC_CAPTURE ? false : (s_state == ST_IDLE);
   float wake_probability = 0.0f;
   const bool woken =
       wake_word_process(pcm, frames, kws_enabled, &wake_probability);

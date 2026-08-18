@@ -21,6 +21,37 @@ from hi_vesper_config import DATASET_ROOT, LABELS, PROJECT_ROOT
 from modeling import build_model
 
 
+def load_channel_ir_pool() -> np.ndarray | None:
+    """Load measured channel impulse responses (data/channel_ir/ir_*.wav).
+
+    Returns a float32 [K, L] array (padded to the longest IR) or None when no
+    IR files exist, which keeps the synthetic room model as fallback.
+    """
+
+    ir_dir = PROJECT_ROOT / "data" / "channel_ir"
+    files = sorted(ir_dir.glob("ir_*.wav")) if ir_dir.is_dir() else []
+    if not files:
+        print("channel IR 池为空：使用合成回声/频响增强")
+        return None
+    import soundfile as sf
+
+    irs: list[np.ndarray] = []
+    for path in files:
+        audio, sample_rate = sf.read(path, dtype="float32", always_2d=False)
+        if int(sample_rate) != 16000:
+            raise ValueError(f"channel IR 必须是 16 kHz: {path}")
+        audio = np.asarray(audio, dtype=np.float32).reshape(-1)
+        if audio.size < 64:
+            raise ValueError(f"channel IR 太短: {path}")
+        irs.append(audio)
+    max_len = max(len(ir) for ir in irs)
+    pool = np.stack(
+        [np.pad(ir, (0, max_len - len(ir))) for ir in irs], axis=0
+    ).astype(np.float32)
+    print(f"channel IR 池: {len(files)} 条 × {max_len} 样本（真实扬声器→房间→麦克风）")
+    return pool
+
+
 def discover_split(dataset_root: Path, split: str) -> tuple[list[Path], np.ndarray]:
     paths: list[Path] = []
     labels: list[int] = []
@@ -90,6 +121,7 @@ def make_dataset(
     training: bool,
     seed: int,
     noise_pool: np.ndarray | None = None,
+    ir_pool: np.ndarray | None = None,
 ) -> tf.data.Dataset:
     waves_tensor = tf.convert_to_tensor(waves, dtype=tf.float16)
     labels_tensor = tf.convert_to_tensor(labels, dtype=tf.int32)
@@ -99,13 +131,14 @@ def make_dataset(
         dataset = dataset.shuffle(len(indices), seed=seed, reshuffle_each_iteration=True)
     dataset = dataset.batch(batch_size, drop_remainder=False)
     noise_tensor = None if noise_pool is None else tf.convert_to_tensor(noise_pool, tf.float32)
+    ir_tensor = None if ir_pool is None else tf.convert_to_tensor(ir_pool, tf.float32)
 
     def prepare(batch_indices: tf.Tensor) -> tuple[tf.Tensor, tf.Tensor]:
         audio = tf.cast(tf.gather(waves_tensor, batch_indices), tf.float32)
         batch_labels = tf.gather(labels_tensor, batch_indices)
         if training:
             assert noise_tensor is not None
-            audio = augment_waveforms(audio, noise_tensor)
+            audio = augment_waveforms(audio, noise_tensor, ir_pool=ir_tensor)
         return waveforms_to_logmel(audio), batch_labels
 
     dataset = dataset.map(prepare, num_parallel_calls=tf.data.AUTOTUNE)
@@ -133,6 +166,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="train split 中近音/连续 hard negative 的重复权重，默认 4",
     )
     parser.add_argument("--model", type=Path, default=PROJECT_ROOT / "models" / "hi_vesper.keras")
+    parser.add_argument(
+        "--no-channel-ir",
+        action="store_true",
+        help="禁用实测信道 IR 卷积增强，回退合成回声/频响增强（v16 基线）",
+    )
     return parser
 
 
@@ -174,6 +212,7 @@ def main() -> int:
     train_paths, train_labels, train_waves = splits["train"]
     _, val_labels, val_waves = splits["val"]
     noise_pool = train_waves[train_labels == LABELS["noise"]].astype(np.float32)
+    ir_pool = None if args.no_channel_ir else load_channel_ir_pool()
     train_ds = make_dataset(
         train_waves,
         train_labels,
@@ -181,6 +220,7 @@ def main() -> int:
         training=True,
         seed=args.seed,
         noise_pool=noise_pool,
+        ir_pool=ir_pool,
     )
     val_ds = make_dataset(
         val_waves,
@@ -239,6 +279,7 @@ def main() -> int:
         "human_wake_repeat": args.human_wake_repeat,
         "train_hard_negative_files": train_hard_negative_files,
         "hard_negative_repeat": args.hard_negative_repeat,
+        "channel_ir_pool": (None if ir_pool is None else int(ir_pool.shape[0])),
         "train_balanced_examples_per_epoch": len(balanced_indices(train_labels, args.seed)),
         "val_files": len(val_labels),
         "best_val_loss": float(min(history.history["val_loss"])),

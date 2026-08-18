@@ -141,10 +141,11 @@ def zero_fill_shift(audio: tf.Tensor, shifts: tf.Tensor) -> tf.Tensor:
 
     audio = tf.cast(audio, tf.float32)
     shifts = tf.cast(shifts, tf.int32)
-    positions = tf.range(SAMPLES, dtype=tf.int32)[tf.newaxis, :]
+    length = tf.shape(audio)[1]
+    positions = tf.range(length, dtype=tf.int32)[tf.newaxis, :]
     source = positions - shifts[:, tf.newaxis]
-    valid = (source >= 0) & (source < SAMPLES)
-    source = tf.clip_by_value(source, 0, SAMPLES - 1)
+    valid = (source >= 0) & (source < length)
+    source = tf.clip_by_value(source, 0, length - 1)
     shifted = tf.gather(audio, source, batch_dims=1)
     return tf.where(valid, shifted, tf.zeros_like(shifted))
 
@@ -185,8 +186,38 @@ def _apply_device_coloration(audio: tf.Tensor) -> tf.Tensor:
     return tf.where(use_coloration, colored, audio)
 
 
+def _apply_measured_ir(audio: tf.Tensor, ir_pool: tf.Tensor) -> tf.Tensor:
+    """Convolve waveforms with real channel impulse responses measured from
+    the actual speaker -> room -> device-mic path (scripts/measure_channel_ir.py
+    -> data/channel_ir/ir_*.wav). Random per-batch IR choice, small delay jitter
+    and gain variation keep the augmentation diverse. Replaces the synthetic
+    sparse-echo room model when an IR pool is available."""
+
+    batch = tf.shape(audio)[0]
+    ir_len = tf.shape(ir_pool)[1]
+    indices = tf.random.uniform((batch,), 0, tf.shape(ir_pool)[0], dtype=tf.int32)
+    ir = tf.gather(ir_pool, indices)
+    # 0~64 sample (0~4 ms) delay jitter + 64 zero headroom.
+    padded_len = ir_len + 64
+    ir = tf.pad(ir, [[0, 0], [64, 0]])
+    delays = tf.random.uniform((batch,), 0, 64, dtype=tf.int32)
+    ir = zero_fill_shift(ir, delays)
+
+    audio_pad = tf.pad(audio, [[0, 0], [0, padded_len - 1]])
+    fft_length = SAMPLES + padded_len - 1
+    spectrum = tf.signal.rfft(audio_pad) * tf.signal.rfft(ir, fft_length=[fft_length])
+    wet = tf.signal.irfft(spectrum, fft_length=[fft_length])[:, :SAMPLES]
+    # Normalize by the IR energy so overall loudness stays comparable to dry
+    # input, then apply mild random gain.
+    ir_energy = tf.sqrt(tf.reduce_sum(tf.square(ir), axis=1) + 1e-9)
+    gain = tf.random.uniform((batch, 1), 0.7, 1.3)
+    return wet / (ir_energy[:, tf.newaxis] + 1e-9) * gain
+
+
 @tf.function(reduce_retracing=True)
-def augment_waveforms(audio: tf.Tensor, noise_pool: tf.Tensor) -> tf.Tensor:
+def augment_waveforms(
+    audio: tf.Tensor, noise_pool: tf.Tensor, ir_pool: tf.Tensor | None = None
+) -> tf.Tensor:
     """Speaker/room/device/noise augmentation used only for training."""
 
     audio = tf.cast(audio, tf.float32)
@@ -198,7 +229,10 @@ def augment_waveforms(audio: tf.Tensor, noise_pool: tf.Tensor) -> tf.Tensor:
     # taught the network impossible, split-across-boundary phoneme sequences.
     shifts = tf.random.uniform((batch,), -3200, 3201, dtype=tf.int32)
     audio = zero_fill_shift(audio, shifts)
-    audio = _apply_room_reflections(audio)
+    if ir_pool is not None:
+        audio = _apply_measured_ir(audio, ir_pool)
+    else:
+        audio = _apply_room_reflections(audio)
     audio = _apply_device_coloration(audio)
 
     noise_count = tf.shape(noise_pool)[0]
