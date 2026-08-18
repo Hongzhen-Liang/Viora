@@ -123,6 +123,9 @@ build_selected(
     "kernels",
     "tensorflow/lite/micro/kernels",
     [
+        "assign_variable.cc",
+        "call_once.cc",
+        "concatenation.cc",
         "conv_common.cc",
         "depthwise_conv_common.cc",
         # The v1.3.2 ESP-NN FC wrapper ignores per-channel Dense scales.
@@ -130,10 +133,21 @@ build_selected(
         "fully_connected.cc",
         "fully_connected_common.cc",
         "kernel_util.cc",
+        "logistic.cc",
+        "logistic_common.cc",
         "micro_tensor_utils.cc",
+        "quantize.cc",
+        "quantize_common.cc",
+        "read_variable.cc",
         "reduce.cc",
         "reduce_common.cc",
+        "reshape.cc",
+        "reshape_common.cc",
         "softmax_common.cc",
+        "split_v.cc",
+        "strided_slice.cc",
+        "strided_slice_common.cc",
+        "var_handle.cc",
     ],
 )
 build_selected(

@@ -1,5 +1,14 @@
 # Viora 自研唤醒词：TTS 自动训练与固件替换
 
+> **状态（2026-08）：固件默认已切换到开源 [micro-wake-word](https://github.com/OHF-Voice/micro-wake-word)
+> 预训练流式模型**（`esphome/micro-wake-word-models` 的 `okay_nabu` v2，唤醒词 "Okay Nabu"），
+> 不再使用本目录自研训练的 Hi Vesper 模型（`src/wake_word.cpp` 已重写，见
+> `src/mww_model_data.*` / `src/mww_model_config.h` / `scripts/convert_mww_model.py`）。
+> 本目录的 TTS 自研训练流水线保留，若后续想重新训练自定义唤醒词，可参考
+> [micro-wake-word 官方训练框架](https://github.com/OHF-Voice/micro-wake-word)（基于
+> Piper 合成样本 + 流式 MixConv，方法与本目录思路一致但调参/样本工程成熟得多），
+> 训练出的 `.tflite` 用 `scripts/convert_mww_model.py` 即可换回固件。
+
 Viora 的唤醒短语通过 `wake_word_training/.env` 的 `WAKE_WORD` 配置（默认 **Hi
 Vesper**，`high VESS-per`）。模型、Log-Mel、DS-CNN、INT8 量化与 ESP32-S3 触发逻辑
 由本项目实现，不使用 Espressif WakeNet 模型。

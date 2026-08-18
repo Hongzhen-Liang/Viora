@@ -3,7 +3,7 @@
 > 本文档面向 **ESP32 端**项目，说明如何接入 Mac 上的 Viora 服务器。
 >
 > ESP32 端职责（只做这四件事）：
-> 1. **自研唤醒词检测**（"Hi Vesper"，Log-Mel + DS-CNN INT8）
+> 1. **唤醒词检测**（micro-wake-word 预训练流式模型，默认 "Okay Nabu"）
 > 2. **录音上传**（16k/16bit PCM，经 WebSocket）
 > 3. **接收音频播放**（服务器下发的合成语音）
 > 4. **传感器采集上报**（土壤湿度 / 温湿度 / 光照）
@@ -169,7 +169,7 @@ lib_deps =
 | `schreibfaul1/ESP32-audioI2S` | （可选）封装好的 I2S 输入输出 |
 | `DHT sensor library` | 温湿度 |
 | ESP-SR（ESP-IDF 组件） | 神经 VAD + 降噪（AFE，见 §7） |
-| TFLite Micro + ESP-NN | 自研 Hi Vesper 全 INT8 推理 |
+| TFLite Micro + ESP-NN | micro-wake-word 预训练流式模型（INT8，含变量算子） |
 
 ---
 
@@ -373,11 +373,15 @@ void loop() {
 
 项目把唤醒与对话音频前端分开处理：
 
-- **唤醒词**：原始 16 kHz PCM 经 ESP-DSP 计算 `148×40` Log-Mel，由自研轻量 DS-CNN
-  full-int8 模型通过 TFLite Micro + ESP-NN 推理；最近 4 个 100 ms 滑窗中至少 2 个
-  `p>=0.40`，窗口峰值 `p>=0.60`，且当前 1.5 s 音频有足够能量才触发；单窗
-  `p>=0.95` 可直接触发，之后冷却 2.5 秒。这一时间证据规则用于兼顾随意发音的召回率
-  与异常单窗的误唤醒风险。每次启动先运行 Python/ESP32 golden-vector 自检。
+- **唤醒词**：采用开源 [micro-wake-word](https://github.com/OHF-Voice/micro-wake-word)
+  预训练流式模型（默认 `okay_nabu` v2，唤醒词 "Okay Nabu"，来自
+  [esphome/micro-wake-word-models](https://github.com/esphome/micro-wake-word-models)）。
+  microfeatures 前端（tflite-micro micro_speech 预处理，含降噪 + PCAN）把 16 kHz PCM
+  每 10 ms 产出 40 维 int8 特征；流式模型输入 `[1,3,40]`，每 30 ms 推理一次，输出
+  0-255 概率；最近 5 帧滑窗均值超过阈值（okay_nabu 为 0.97）即触发。重新武装/命中后
+  有约 1 s 冷却防重复触发与扬声器 TTS 尾音泄漏。模型与阈值元数据见
+  `src/mww_model_data.*` / `src/mww_model_config.h`，换模型用
+  `scripts/convert_mww_model.py`。
 - **断句端点**：AFE 内置**神经 VAD**（`vad_state`）判断“是否有人说话”，替代能量门限——背景音乐不会被当成人声，音乐播放中也能正确结束对话；能量法（`vad.*`）仅留作诊断。
 - **降噪**：AFE 输出增强音频（NS_MODE_SSP），上传给服务器 Whisper 的也是增强后的 PCM。
 - **WakeNet 已关闭**：不加载 `wn9_nihaoxiaozhi`，不生成/烧录 `srmodels.bin`，不再需要
@@ -385,8 +389,8 @@ void loop() {
 
 > 注意：`src/esp_afe_sr_1mic.ref` 是新版本模板，与 1.9.2 头文件不兼容，不要编译；直接用 `esp_afe_sr_models.h` 里的 `ESP_AFE_SR_HANDLE.create_from_config()`。
 
-> 当前 N16R8 板端实测模型 37,376 bytes，tensor arena 约 122 KB（内部 SRAM），单次推理
-> 约 49.2 ms；ESP32-S3 带 PSRAM 用于音频和 AFE 缓冲。
+> 当前 N16R8 板端实测模型 60,264 bytes，tensor arena 约 26 KB（内部 SRAM），单次推理
+> 约 40-60 ms（30 ms 一次）；ESP32-S3 带 PSRAM 用于音频和 AFE 缓冲。
 
 ---
 
