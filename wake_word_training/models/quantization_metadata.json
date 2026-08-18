@@ -7,8 +7,8 @@
     1
   ],
   "input_dtype": "<class 'numpy.int8'>",
-  "input_scale": 0.02856513299047947,
-  "input_zero_point": -15,
+  "input_scale": 0.04286598414182663,
+  "input_zero_point": -40,
   "output_shape": [
     1,
     3

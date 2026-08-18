@@ -37,24 +37,33 @@ constexpr int kInferenceFrameStride = 10;  // 100 ms at a 10 ms feature hop.
 // 与房间混响。阈值只能迁就，根治要靠真人实距离录音重训（见
 // wake_word_training/README：现有 wake 数据 485 条 TTS + 6 条真人）。
 // 触发策略 v15（VAD 唯一活动门，2026-08-18 校准后）：
-//  - 固件复用 ESP-SR 内置 VAD，最近 1.5s 至少 3 个 30ms 语音帧才算
-//    有人声；tvar（各 mel 频带时间方差）只保留在 cand 日志供诊断；
-//  - 直通/强单窗/多窗证据的模型分数必须先过 VAD 活动门。实测中文
-//    语音与房间瞬态单窗分数可达 0.58~0.92 但 vad=0/50，tvar 兜底会
-//    造成日常中文对话高频误醒，故 v15 移除 tvar 触发兜底；
-//  - 直通：任一窗口 p >= 0.95 且 VAD 门通过即触发；
-//  - 强单窗：任一窗口 p >= 0.50 且 VAD/能量门通过即触发；
-//  - 较宽证据：最近 12 个 100ms 窗（≈1.2s）中至少 2 个 p >= 0.35 且峰值
-//    p >= 0.45（接住远场低分平台）；
+//  - 活动门（v16）：VAD 语音帧 >= 3，或“言语样”兜底
+//    （当前窗 log-mel 全局方差 var >= 2.5 且能量 >= 120）。
+//    2026-08-18 实测：ESP-SR MODE_3 VAD 是自适应能量阈值（约 10x
+//    噪声底），不是内容判别 —— 安静房间噪声底 ~40，正常音量真人
+//    录音 energy 271~402 全部 vad=0/50，只有 energy 489 才触发；
+//    这就是“安静地方要喊两次”的根因。而背景瞬态 var <= 1.6，
+//    一切真实语音（中英文、TTS）var >= 3.5，故 var/能量兜底不会
+//    把背景瞬态放进触发历史。tvar 只保留在 cand 日志供诊断；
+//  - 直通：任一窗口 p >= 0.95 且活动门通过即触发；
+//  - 多窗证据：最近 12 个 100ms 窗（≈1.2s）中至少 2 个 p >= 0.50。
+//    中文语音实测只有单窗 0.918（1 窗 < 2 窗被拦）；真人录音 2~9 个
+//    >=0.5 窗全过。v17 曾用 0.35 配合重训模型（近音负样本误接受
+//    29%->1.5%），但重训模型经扬声器声道得分暴跌（真人 12 次播放仅
+//    醒 1 次），且 "Hi Best Friend" 实播仍 0.90 —— 干净数据的判别
+//    无法迁移到实播信道，故回退旧模型 + 0.50。
 //  - 响度档双窗：除原有分数/能量条件外必须有 VAD 人声，避免一次
 //    磕碰因 1.5s 滑窗重叠而被重复计为两窗；
-//  - 能量门：直通/强单窗/证据要求 kEnergyGatePeak=20（≈“麦克风还活着”
-//    检查）；静音与静止背景误醒由 VAD 活动门拦截。
-// 已知取舍：极小声说话（VAD 不触发）不再唤醒，用正常音量重试；
+//  - 能量门：直通/证据要求 kEnergyGatePeak=20（≈“麦克风还活着”检查）；
+//    静音与静止背景误醒由活动门拦截。
+// 已知取舍：活动门只拦“不像人声”的瞬态，不再以音量设限；
 // cand 日志带 var/tvar/vad/energy 字段，若开始漏醒可临时开启。
-constexpr float kEvidenceThreshold = 0.35f;
+constexpr float kEvidenceThreshold = 0.50f;
 constexpr float kEvidencePeakThreshold = 0.45f;
 constexpr float kStrongWindowThreshold = 0.50f;
+// v16 言语样兜底：var/能量都来自当前特征窗与最近 1.5s 采集块峰值。
+constexpr float kMinSpeechVariance = 2.5f;
+constexpr int16_t kMinSpeechEnergyPeak = 120;
 // 响度档（v11 升级为双窗）：远场真实语音分数低（0.25~0.38），只能靠
 // 能量维度与底噪分开（安静底噪峰值 23~132，说话 453~905）。单窗瞬态
 // （开机爆音、磕碰，实测 1 窗 p=0.25~0.34 能量 526~1128）会误醒，
@@ -615,15 +624,18 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
         }
         const float raw_current = probabilities[0];
         const int16_t energy_peak = recent_chunk_peak();
-        // 2026-08-18 校准（逐窗日志实测）：中文语音（如“打开客厅的灯”）与
-        // 房间瞬态的单窗分数可达 0.58~0.92，但 vad=0/50；而可唤醒音色
-        // （TTS/真人）vad=3~10。tvar 兜底门会让这类非唤醒语音的高分进入
-        // 触发历史造成误醒。改为：所有模型触发路径都要求最近 1.5s 内
-        // ≥3 个 30ms ESP-SR VAD 语音帧；tvar 只保留在 cand 日志供诊断。
-        // 代价：极小声说话（VAD 不触发）不再唤醒，可用正常音量重试。
+        // v16 活动门：VAD 语音帧足够，或“言语样”兜底（当前窗 var 高且
+        // 能量高）。ESP-SR MODE_3 VAD 是自适应能量阈值（约 10x 噪声底），
+        // 安静房间正常音量真人录音 energy 271~402 时 vad=0/50，会导致
+        // 需要喊两次；而背景瞬态 var<=1.6、真实语音 var>=3.5，var/能量
+        // 兜底不会把背景瞬态放进触发历史（中文负样本虽有单窗 0.918，
+        // 但证据档 v16 已上调为 2 窗 >=0.50，单窗进历史也不触发）。
         const bool vad_speech =
             s_vad_speech_frames >= kMinVadSpeechFrames;
-        const bool has_speech_activity = vad_speech;
+        const bool speech_like =
+            s_feature_variance >= kMinSpeechVariance &&
+            energy_peak >= kMinSpeechEnergyPeak;
+        const bool has_speech_activity = vad_speech || speech_like;
         const float current = has_speech_activity ? raw_current : 0.0f;
         const bool first_window = s_first_window_after_arm;
         s_first_window_after_arm = false;
@@ -656,23 +668,22 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
             has_detection_evidence(current, energy_peak, &evidence_hits,
                                    &evidence_peak, &loud_hits);
         const bool direct = current >= kDirectTriggerThreshold;
-        const bool strong = current >= kStrongWindowThreshold;
+        // v16：单窗 strong 路径并入证据档（阈值 0.35 -> 0.50）。
         const bool evidence = detected;
         // 响度档禁止只靠 tvar 通过：磕碰会在多个重叠窗里都留下
         // 高 tvar/高能量，但激进档 VAD 不应连续判成人声。
         const bool loud =
             loud_hits >= kLoudRequiredHits && vad_speech;
-        if (((direct || strong || evidence) &&
+        if (((direct || evidence) &&
              energy_peak >= kEnergyGatePeak) || loud) {
           s_cooldown_until_ms = now + kCooldownMs;
           clear_detection_history();
           woken = true;
           Serial.printf(
-              "[KWS] wake-word p=%.4f%s%s%s, evidence=%d/%d peak=%.4f, "
+              "[KWS] wake-word p=%.4f%s%s, evidence=%d/%d peak=%.4f, "
               "loud=%d/%d, energy=%d, var=%.3f tvar=%.3f vad=%d/%d, "
               "inference=%lu us\n",
                         current, direct ? " (direct)" : "",
-                        strong ? " (strong)" : "",
                         loud ? " (loud)" : "",
                         evidence_hits, kEvidenceWindow, evidence_peak,
                         loud_hits, kLoudRequiredHits,
@@ -694,7 +705,7 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
                 s_vad_speech_frames, s_vad_history_count);
           }
         }
-        if ((direct || strong || evidence) &&
+        if ((direct || evidence) &&
             energy_peak < kEnergyGatePeak) {
           Serial.printf("[KWS] 证据满足但能量过低 energy=%d，忽略\n",
                         static_cast<int>(energy_peak));

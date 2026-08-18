@@ -1,235 +1,235 @@
 {
   "model_path": "models/hi_vesper.keras",
   "tflite_path": "models/hi_vesper_int8.tflite",
-  "test_files": 642,
+  "test_files": 751,
   "class_counts": {
-    "wake": 75,
-    "unknown": 520,
-    "noise": 47
+    "wake": 84,
+    "unknown": 621,
+    "noise": 46
   },
-  "fp32_accuracy": 0.9034267912772586,
-  "int8_accuracy": 0.8909657320872274,
-  "fp32_int8_class_agreement": 0.9797507788161994,
-  "fp32_int8_max_probability_delta": 0.10433089733123779,
+  "fp32_accuracy": 0.9533954727030626,
+  "int8_accuracy": 0.952063914780293,
+  "fp32_int8_class_agreement": 0.9933422103861518,
+  "fp32_int8_max_probability_delta": 0.19778621196746826,
   "fp32_confusion_matrix": [
     [
-      62,
-      12,
+      56,
+      28,
+      0
+    ],
+    [
+      5,
+      615,
       1
     ],
     [
-      35,
-      477,
-      8
-    ],
-    [
       0,
-      6,
-      41
+      1,
+      45
     ]
   ],
   "int8_confusion_matrix": [
     [
-      61,
-      14,
+      54,
+      30,
       0
     ],
     [
-      34,
-      479,
-      7
+      4,
+      616,
+      1
     ],
     [
       0,
-      15,
-      32
+      1,
+      45
     ]
   ],
   "fp32_classification": {
     "wake": {
-      "precision": 0.6391752577319587,
-      "recall": 0.8266666666666667,
-      "f1-score": 0.7209302325581395,
-      "support": 75.0
+      "precision": 0.9180327868852459,
+      "recall": 0.6666666666666666,
+      "f1-score": 0.7724137931034483,
+      "support": 84.0
     },
     "unknown": {
-      "precision": 0.9636363636363636,
-      "recall": 0.9173076923076923,
-      "f1-score": 0.9399014778325123,
-      "support": 520.0
+      "precision": 0.9549689440993789,
+      "recall": 0.9903381642512077,
+      "f1-score": 0.9723320158102767,
+      "support": 621.0
     },
     "noise": {
-      "precision": 0.82,
-      "recall": 0.8723404255319149,
-      "f1-score": 0.845360824742268,
-      "support": 47.0
+      "precision": 0.9782608695652174,
+      "recall": 0.9782608695652174,
+      "f1-score": 0.9782608695652174,
+      "support": 46.0
     },
-    "accuracy": 0.9034267912772586,
+    "accuracy": 0.9533954727030626,
     "macro avg": {
-      "precision": 0.8076038737894408,
-      "recall": 0.872104928168758,
-      "f1-score": 0.8353975117109732,
-      "support": 642.0
+      "precision": 0.9504208668499473,
+      "recall": 0.8784219001610305,
+      "f1-score": 0.907668892826314,
+      "support": 751.0
     },
     "weighted avg": {
-      "precision": 0.915216594113405,
-      "recall": 0.9034267912772586,
-      "f1-score": 0.9073995244200211,
-      "support": 642.0
+      "precision": 0.9522642721492344,
+      "recall": 0.9533954727030626,
+      "f1-score": 0.9503341417295227,
+      "support": 751.0
     }
   },
   "int8_classification": {
     "wake": {
-      "precision": 0.6421052631578947,
-      "recall": 0.8133333333333334,
-      "f1-score": 0.7176470588235294,
-      "support": 75.0
+      "precision": 0.9310344827586207,
+      "recall": 0.6428571428571429,
+      "f1-score": 0.7605633802816901,
+      "support": 84.0
     },
     "unknown": {
-      "precision": 0.9429133858267716,
-      "recall": 0.9211538461538461,
-      "f1-score": 0.9319066147859922,
-      "support": 520.0
+      "precision": 0.9520865533230294,
+      "recall": 0.9919484702093397,
+      "f1-score": 0.9716088328075709,
+      "support": 621.0
     },
     "noise": {
-      "precision": 0.8205128205128205,
-      "recall": 0.6808510638297872,
-      "f1-score": 0.7441860465116279,
-      "support": 47.0
+      "precision": 0.9782608695652174,
+      "recall": 0.9782608695652174,
+      "f1-score": 0.9782608695652174,
+      "support": 46.0
     },
-    "accuracy": 0.8909657320872274,
+    "accuracy": 0.952063914780293,
     "macro avg": {
-      "precision": 0.801843823165829,
-      "recall": 0.8051127477723222,
-      "f1-score": 0.7979132400403831,
-      "support": 642.0
+      "precision": 0.9537939685489558,
+      "recall": 0.8710221608772333,
+      "f1-score": 0.9034776942181595,
+      "support": 751.0
     },
     "weighted avg": {
-      "precision": 0.8988114609515045,
-      "recall": 0.8909657320872274,
-      "f1-score": 0.8931335097920984,
-      "support": 642.0
+      "precision": 0.9513350814451736,
+      "recall": 0.952063914780293,
+      "f1-score": 0.9484106646034134,
+      "support": 751.0
     }
   },
   "fp32_thresholds": [
     {
       "threshold": 0.25,
-      "wake_recall": 0.9466666666666667,
-      "false_accept_rate": 0.09700176366843033,
-      "false_accept_count": 55,
-      "negative_count": 567
+      "wake_recall": 0.7976190476190477,
+      "false_accept_rate": 0.017991004497751123,
+      "false_accept_count": 12,
+      "negative_count": 667
     },
     {
       "threshold": 0.35,
-      "wake_recall": 0.9066666666666666,
-      "false_accept_rate": 0.07936507936507936,
-      "false_accept_count": 45,
-      "negative_count": 567
+      "wake_recall": 0.75,
+      "false_accept_rate": 0.01199400299850075,
+      "false_accept_count": 8,
+      "negative_count": 667
     },
     {
       "threshold": 0.45,
-      "wake_recall": 0.84,
-      "false_accept_rate": 0.06349206349206349,
-      "false_accept_count": 36,
-      "negative_count": 567
+      "wake_recall": 0.6904761904761905,
+      "false_accept_rate": 0.008995502248875561,
+      "false_accept_count": 6,
+      "negative_count": 667
     },
     {
       "threshold": 0.5,
-      "wake_recall": 0.8266666666666667,
-      "false_accept_rate": 0.06172839506172839,
-      "false_accept_count": 35,
-      "negative_count": 567
+      "wake_recall": 0.6666666666666666,
+      "false_accept_rate": 0.0074962518740629685,
+      "false_accept_count": 5,
+      "negative_count": 667
     },
     {
       "threshold": 0.6,
-      "wake_recall": 0.8133333333333334,
-      "false_accept_rate": 0.047619047619047616,
-      "false_accept_count": 27,
-      "negative_count": 567
+      "wake_recall": 0.6309523809523809,
+      "false_accept_rate": 0.005997001499250375,
+      "false_accept_count": 4,
+      "negative_count": 667
     },
     {
       "threshold": 0.9,
-      "wake_recall": 0.3333333333333333,
-      "false_accept_rate": 0.01763668430335097,
-      "false_accept_count": 10,
-      "negative_count": 567
+      "wake_recall": 0.34523809523809523,
+      "false_accept_rate": 0.0,
+      "false_accept_count": 0,
+      "negative_count": 667
     },
     {
       "threshold": 0.95,
-      "wake_recall": 0.14666666666666667,
-      "false_accept_rate": 0.007054673721340388,
-      "false_accept_count": 4,
-      "negative_count": 567
+      "wake_recall": 0.20238095238095238,
+      "false_accept_rate": 0.0,
+      "false_accept_count": 0,
+      "negative_count": 667
     },
     {
       "threshold": 0.97,
-      "wake_recall": 0.05333333333333334,
-      "false_accept_rate": 0.003527336860670194,
-      "false_accept_count": 2,
-      "negative_count": 567
+      "wake_recall": 0.13095238095238096,
+      "false_accept_rate": 0.0,
+      "false_accept_count": 0,
+      "negative_count": 667
     }
   ],
   "int8_thresholds": [
     {
       "threshold": 0.25,
-      "wake_recall": 0.9466666666666667,
-      "false_accept_rate": 0.09347442680776014,
-      "false_accept_count": 53,
-      "negative_count": 567
+      "wake_recall": 0.7619047619047619,
+      "false_accept_rate": 0.014992503748125937,
+      "false_accept_count": 10,
+      "negative_count": 667
     },
     {
       "threshold": 0.35,
-      "wake_recall": 0.92,
-      "false_accept_rate": 0.07407407407407407,
-      "false_accept_count": 42,
-      "negative_count": 567
+      "wake_recall": 0.7023809523809523,
+      "false_accept_rate": 0.010494752623688156,
+      "false_accept_count": 7,
+      "negative_count": 667
     },
     {
       "threshold": 0.45,
-      "wake_recall": 0.84,
-      "false_accept_rate": 0.06525573192239859,
-      "false_accept_count": 37,
-      "negative_count": 567
+      "wake_recall": 0.6666666666666666,
+      "false_accept_rate": 0.005997001499250375,
+      "false_accept_count": 4,
+      "negative_count": 667
     },
     {
       "threshold": 0.5,
-      "wake_recall": 0.8133333333333334,
-      "false_accept_rate": 0.059964726631393295,
-      "false_accept_count": 34,
-      "negative_count": 567
+      "wake_recall": 0.6428571428571429,
+      "false_accept_rate": 0.005997001499250375,
+      "false_accept_count": 4,
+      "negative_count": 667
     },
     {
       "threshold": 0.6,
-      "wake_recall": 0.7866666666666666,
-      "false_accept_rate": 0.04938271604938271,
-      "false_accept_count": 28,
-      "negative_count": 567
+      "wake_recall": 0.5952380952380952,
+      "false_accept_rate": 0.005997001499250375,
+      "false_accept_count": 4,
+      "negative_count": 667
     },
     {
       "threshold": 0.9,
-      "wake_recall": 0.3333333333333333,
-      "false_accept_rate": 0.014109347442680775,
-      "false_accept_count": 8,
-      "negative_count": 567
+      "wake_recall": 0.2857142857142857,
+      "false_accept_rate": 0.0,
+      "false_accept_count": 0,
+      "negative_count": 667
     },
     {
       "threshold": 0.95,
-      "wake_recall": 0.12,
-      "false_accept_rate": 0.007054673721340388,
-      "false_accept_count": 4,
-      "negative_count": 567
+      "wake_recall": 0.16666666666666666,
+      "false_accept_rate": 0.0,
+      "false_accept_count": 0,
+      "negative_count": 667
     },
     {
       "threshold": 0.97,
-      "wake_recall": 0.04,
-      "false_accept_rate": 0.003527336860670194,
-      "false_accept_count": 2,
-      "negative_count": 567
+      "wake_recall": 0.13095238095238096,
+      "false_accept_rate": 0.0,
+      "false_accept_count": 0,
+      "negative_count": 667
     }
   ],
   "input_quantization": {
-    "scale": 0.02856513299047947,
-    "zero_point": -15
+    "scale": 0.04286598414182663,
+    "zero_point": -40
   },
   "output_quantization": {
     "scale": 0.00390625,
@@ -238,203 +238,203 @@
   "limitations": [
     "6 personal human wake files are train-only; test wake positives remain TTS-only"
   ],
-  "test_hard_negative_files": 102,
+  "test_hard_negative_files": 204,
   "int8_hard_negative_thresholds": [
     {
       "threshold": 0.25,
-      "false_accept_rate": 0.4019607843137255,
-      "false_accept_count": 41,
-      "negative_count": 102
+      "false_accept_rate": 0.0392156862745098,
+      "false_accept_count": 8,
+      "negative_count": 204
     },
     {
       "threshold": 0.35,
-      "false_accept_rate": 0.3333333333333333,
-      "false_accept_count": 34,
-      "negative_count": 102
+      "false_accept_rate": 0.029411764705882353,
+      "false_accept_count": 6,
+      "negative_count": 204
     },
     {
       "threshold": 0.45,
-      "false_accept_rate": 0.3137254901960784,
-      "false_accept_count": 32,
-      "negative_count": 102
+      "false_accept_rate": 0.014705882352941176,
+      "false_accept_count": 3,
+      "negative_count": 204
     },
     {
       "threshold": 0.5,
-      "false_accept_rate": 0.29411764705882354,
-      "false_accept_count": 30,
-      "negative_count": 102
+      "false_accept_rate": 0.014705882352941176,
+      "false_accept_count": 3,
+      "negative_count": 204
     },
     {
       "threshold": 0.6,
-      "false_accept_rate": 0.23529411764705882,
-      "false_accept_count": 24,
-      "negative_count": 102
+      "false_accept_rate": 0.014705882352941176,
+      "false_accept_count": 3,
+      "negative_count": 204
     },
     {
       "threshold": 0.9,
-      "false_accept_rate": 0.0784313725490196,
-      "false_accept_count": 8,
-      "negative_count": 102
+      "false_accept_rate": 0.0,
+      "false_accept_count": 0,
+      "negative_count": 204
     },
     {
       "threshold": 0.95,
-      "false_accept_rate": 0.0392156862745098,
-      "false_accept_count": 4,
-      "negative_count": 102
+      "false_accept_rate": 0.0,
+      "false_accept_count": 0,
+      "negative_count": 204
     },
     {
       "threshold": 0.97,
-      "false_accept_rate": 0.0196078431372549,
-      "false_accept_count": 2,
-      "negative_count": 102
+      "false_accept_rate": 0.0,
+      "false_accept_count": 0,
+      "negative_count": 204
     }
   ],
   "train_human_wake_files": 6,
   "train_human_wake_diagnostic": {
     "note": "training-set diagnostic; not an independent test metric",
-    "minimum_probability": 0.703125,
-    "mean_probability": 0.9401041865348816,
+    "minimum_probability": 0.07421875,
+    "mean_probability": 0.7727864384651184,
     "at_or_above_0_97": 4,
     "count": 6
   },
   "streaming_firmware_proxy": {
     "note": "desktop proxy: temporal-variance activity gate only; ESP-SR VAD and the VAD-only loud path require board replay validation",
     "stride_ms": 100,
-    "files": 642,
-    "windows": 18525,
-    "wake_file_recall": 0.9733333333333334,
-    "wake_files_triggered": 73,
-    "wake_files": 75,
-    "negative_files_triggered": 115,
-    "negative_files": 567,
-    "false_accepts": 115,
-    "negative_audio_hours": 0.20882699652777736,
-    "false_accepts_per_hour": 550.6950821116807,
+    "files": 751,
+    "windows": 21449,
+    "wake_file_recall": 0.8928571428571429,
+    "wake_files_triggered": 75,
+    "wake_files": 84,
+    "negative_files_triggered": 139,
+    "negative_files": 667,
+    "false_accepts": 139,
+    "negative_audio_hours": 0.24465585069444482,
+    "false_accepts_per_hour": 568.1450069779842,
     "phrase_end_latency_ms": {
-      "count": 73,
-      "p50": -388.5625,
-      "p95": -83.73750305175781
+      "count": 75,
+      "p50": -274.6875,
+      "p95": 800.84375
     },
     "false_examples": [
       {
-        "path": "dataset/test/unknown/legacy-speech-commands-11379f4d/legacy/sc_five_11379f4d_nohash_0.wav",
+        "path": "dataset/test/unknown/legacy-speech-commands-05739450/legacy/sc_cat_05739450_nohash_0.wav",
         "triggers": 1,
-        "first_trigger_probability": 0.54296875,
-        "max_activity_probability": 0.54296875
+        "first_trigger_probability": 0.56640625,
+        "max_activity_probability": 0.56640625
       },
       {
-        "path": "dataset/test/unknown/legacy-speech-commands-131e738d/legacy/sc_go_131e738d_nohash_2.wav",
+        "path": "dataset/test/unknown/legacy-speech-commands-063d48cf/legacy/sc_bed_063d48cf_nohash_1.wav",
         "triggers": 1,
-        "first_trigger_probability": 0.83203125,
-        "max_activity_probability": 0.87890625
+        "first_trigger_probability": 0.53515625,
+        "max_activity_probability": 0.53515625
       },
       {
-        "path": "dataset/test/unknown/legacy-speech-commands-131e738d/legacy/sc_off_131e738d_nohash_2.wav",
+        "path": "dataset/test/unknown/legacy-speech-commands-0c2ca723/legacy/sc_bed_0c2ca723_nohash_1.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.515625,
+        "max_activity_probability": 0.515625
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-15b0c947/legacy/sc_go_15b0c947_nohash_0.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.6171875,
+        "max_activity_probability": 0.6171875
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-21307344/legacy/sc_wow_21307344_nohash_0.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.60546875,
+        "max_activity_probability": 0.60546875
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-2313e093/legacy/sc_off_2313e093_nohash_0.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.50390625,
+        "max_activity_probability": 0.50390625
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-324210dd/legacy/sc_stop_324210dd_nohash_4.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.50390625,
+        "max_activity_probability": 0.50390625
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-33246bc2/legacy/sc_off_33246bc2_nohash_1.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.55078125,
+        "max_activity_probability": 0.55078125
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-3402e488/legacy/sc_left_3402e488_nohash_1.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.63671875,
+        "max_activity_probability": 0.6640625
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-3b7f817e/legacy/sc_zero_3b7f817e_nohash_3.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.60546875,
+        "max_activity_probability": 0.60546875
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-3bb68054/legacy/sc_stop_3bb68054_nohash_1.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.5703125,
+        "max_activity_probability": 0.5703125
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-4e99c1b7/legacy/sc_nine_4e99c1b7_nohash_2.wav",
+        "triggers": 1,
+        "first_trigger_probability": 0.3515625,
+        "max_activity_probability": 0.45703125
+      },
+      {
+        "path": "dataset/test/unknown/legacy-speech-commands-5170b77f/legacy/sc_visual_5170b77f_nohash_2.wav",
         "triggers": 1,
         "first_trigger_probability": 0.69921875,
         "max_activity_probability": 0.69921875
       },
       {
-        "path": "dataset/test/unknown/legacy-speech-commands-179a61b7/legacy/sc_house_179a61b7_nohash_0.wav",
+        "path": "dataset/test/unknown/legacy-speech-commands-525eaa62/legacy/sc_down_525eaa62_nohash_2.wav",
         "triggers": 1,
-        "first_trigger_probability": 0.63671875,
-        "max_activity_probability": 0.78515625
+        "first_trigger_probability": 0.46484375,
+        "max_activity_probability": 0.46484375
       },
       {
-        "path": "dataset/test/unknown/legacy-speech-commands-1cec8d71/legacy/sc_house_1cec8d71_nohash_0.wav",
+        "path": "dataset/test/unknown/legacy-speech-commands-5588c7e6/legacy/sc_six_5588c7e6_nohash_1.wav",
         "triggers": 1,
-        "first_trigger_probability": 0.41796875,
-        "max_activity_probability": 0.68359375
+        "first_trigger_probability": 0.515625,
+        "max_activity_probability": 0.515625
       },
       {
-        "path": "dataset/test/unknown/legacy-speech-commands-41dce6f5/legacy/sc_marvin_41dce6f5_nohash_1.wav",
+        "path": "dataset/test/unknown/legacy-speech-commands-893705bb/legacy/sc_off_893705bb_nohash_5.wav",
         "triggers": 1,
-        "first_trigger_probability": 0.74609375,
-        "max_activity_probability": 0.74609375
+        "first_trigger_probability": 0.53515625,
+        "max_activity_probability": 0.60546875
       },
       {
-        "path": "dataset/test/unknown/legacy-speech-commands-4bba14ce/legacy/sc_seven_4bba14ce_nohash_1.wav",
+        "path": "dataset/test/unknown/legacy-speech-commands-90e72357/legacy/sc_left_90e72357_nohash_3.wav",
         "triggers": 1,
-        "first_trigger_probability": 0.54296875,
-        "max_activity_probability": 0.6875
+        "first_trigger_probability": 0.69140625,
+        "max_activity_probability": 0.69140625
       },
       {
-        "path": "dataset/test/unknown/legacy-speech-commands-7ea032f3/legacy/sc_two_7ea032f3_nohash_4.wav",
+        "path": "dataset/test/unknown/legacy-speech-commands-97f4c236/legacy/sc_right_97f4c236_nohash_1.wav",
         "triggers": 1,
-        "first_trigger_probability": 0.5859375,
-        "max_activity_probability": 0.5859375
+        "first_trigger_probability": 0.60546875,
+        "max_activity_probability": 0.60546875
       },
       {
-        "path": "dataset/test/unknown/legacy-speech-commands-b66f4f93/legacy/sc_five_b66f4f93_nohash_4.wav",
+        "path": "dataset/test/unknown/legacy-speech-commands-9a69672b/legacy/sc_stop_9a69672b_nohash_3.wav",
         "triggers": 1,
-        "first_trigger_probability": 0.4765625,
-        "max_activity_probability": 0.4921875
+        "first_trigger_probability": 0.515625,
+        "max_activity_probability": 0.515625
       },
       {
-        "path": "dataset/test/unknown/legacy-speech-commands-b8874962/legacy/sc_four_b8874962_nohash_1.wav",
-        "triggers": 1,
-        "first_trigger_probability": 0.6640625,
-        "max_activity_probability": 0.6640625
-      },
-      {
-        "path": "dataset/test/unknown/legacy-speech-commands-d0faf7e4/legacy/sc_left_d0faf7e4_nohash_0.wav",
-        "triggers": 1,
-        "first_trigger_probability": 0.45703125,
-        "max_activity_probability": 0.45703125
-      },
-      {
-        "path": "dataset/test/unknown/legacy-speech-commands-d1dd03ed/legacy/sc_forward_d1dd03ed_nohash_0.wav",
+        "path": "dataset/test/unknown/legacy-speech-commands-a709ddd3/legacy/sc_one_a709ddd3_nohash_0.wav",
         "triggers": 1,
         "first_trigger_probability": 0.5,
         "max_activity_probability": 0.5
-      },
-      {
-        "path": "dataset/test/unknown/legacy-speech-commands-dc7ec25b/legacy/sc_four_dc7ec25b_nohash_0.wav",
-        "triggers": 1,
-        "first_trigger_probability": 0.5859375,
-        "max_activity_probability": 0.5859375
-      },
-      {
-        "path": "dataset/test/unknown/legacy-speech-commands-eeaf97c3/legacy/sc_right_eeaf97c3_nohash_3.wav",
-        "triggers": 1,
-        "first_trigger_probability": 0.37890625,
-        "max_activity_probability": 0.49609375
-      },
-      {
-        "path": "dataset/test/unknown/legacy-speech-commands-f6a380e7/legacy/sc_happy_f6a380e7_nohash_0.wav",
-        "triggers": 1,
-        "first_trigger_probability": 0.47265625,
-        "max_activity_probability": 0.47265625
-      },
-      {
-        "path": "dataset/test/unknown/legacy-tts-en-au-natashaneural/legacy/hard_negative/en-AU-NatashaNeural_hn_bye-vesper_r+0_p+10_003.wav",
-        "triggers": 1,
-        "first_trigger_probability": 0.51953125,
-        "max_activity_probability": 0.62890625
-      },
-      {
-        "path": "dataset/test/unknown/legacy-tts-en-au-natashaneural/legacy/hard_negative/en-AU-NatashaNeural_hn_bye-vesper_r+5_p+20_004.wav",
-        "triggers": 1,
-        "first_trigger_probability": 0.3515625,
-        "max_activity_probability": 0.5
-      },
-      {
-        "path": "dataset/test/unknown/legacy-tts-en-au-natashaneural/legacy/hard_negative/en-AU-NatashaNeural_hn_bye-vesper_r-12_p-10_001.wav",
-        "triggers": 1,
-        "first_trigger_probability": 0.6875,
-        "max_activity_probability": 0.6875
-      },
-      {
-        "path": "dataset/test/unknown/legacy-tts-en-au-natashaneural/legacy/hard_negative/en-AU-NatashaNeural_hn_context_006_r-20_p+10.wav",
-        "triggers": 1,
-        "first_trigger_probability": 0.515625,
-        "max_activity_probability": 0.92578125
-      },
-      {
-        "path": "dataset/test/unknown/legacy-tts-en-au-natashaneural/legacy/hard_negative/en-AU-NatashaNeural_hn_context_008_r-5_p-20.wav",
-        "triggers": 1,
-        "first_trigger_probability": 0.53515625,
-        "max_activity_probability": 0.53515625
       }
     ],
     "rule": {
@@ -449,10 +449,10 @@
       "cooldown_ms": 2500
     }
   },
-  "golden_wake_path": "dataset/test/wake/legacy-tts-en-au-natashaneural/legacy/en-AU-NatashaNeural_m8_p0_073.wav",
+  "golden_wake_path": "dataset/test/wake/legacy-tts-en-us-christopherneural/legacy/en-US-ChristopherNeural_p15_p10_096.wav",
   "golden_wake_probabilities": [
-    0.9921875,
-    0.0078125,
+    0.99609375,
+    0.0,
     0.0
   ]
 }

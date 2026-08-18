@@ -34,6 +34,9 @@ from split_dataset import DatasetError, inspect_audio
 
 TTS_VOICE_RE = re.compile(r"^(?P<voice>.+?Neural)_")
 TTS_NEGATIVE_RE = re.compile(r"^tts_neg_(?P<voice>.+?Neural)_")
+# macOS `say` 生成的数据（与扬声器验收同源音色）：
+#   macsay-<Voice>_hi-vesper_r150_000.wav / macsay-<Voice>_hn_hey-vesper_r150_000.wav
+MACSAY_RE = re.compile(r"^macsay-(?P<voice>[A-Za-z0-9]+)_", re.IGNORECASE)
 SPEECH_COMMAND_RE = re.compile(
     r"^sc_(?P<keyword>.+?)_(?P<speaker>[0-9a-f]+)_nohash_(?P<index>\d+)\.wav$",
     re.IGNORECASE,
@@ -64,6 +67,9 @@ def _slug(value: str) -> str:
 
 
 def _tts_voice(filename: str, negative: bool = False) -> str:
+    macsay = MACSAY_RE.match(filename)
+    if macsay:
+        return "macsay-" + macsay.group("voice")
     match = (TTS_NEGATIVE_RE if negative else TTS_VOICE_RE).match(filename)
     if not match:
         raise DatasetError(f"无法从 TTS 文件名解析 voice: {filename}")

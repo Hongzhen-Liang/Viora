@@ -1,17 +1,17 @@
 {
   "seed": 42,
   "epochs_requested": 40,
-  "epochs_completed": 16,
+  "epochs_completed": 21,
   "parameter_count": 14715,
-  "train_files": 5012,
-  "train_source_files": 3134,
+  "train_files": 10000,
+  "train_source_files": 3532,
   "train_human_wake_files": 6,
   "human_wake_repeat": 8,
-  "train_hard_negative_files": 612,
-  "hard_negative_repeat": 4,
-  "train_balanced_examples_per_epoch": 13248,
-  "val_files": 676,
-  "best_val_loss": 0.2363954335451126,
-  "best_val_accuracy": 0.9082840085029602,
-  "best_epoch": 8
+  "train_hard_negative_files": 918,
+  "hard_negative_repeat": 8,
+  "train_balanced_examples_per_epoch": 28056,
+  "val_files": 739,
+  "best_val_loss": 0.24737204611301422,
+  "best_val_accuracy": 0.8958051204681396,
+  "best_epoch": 13
 }
