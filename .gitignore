@@ -38,5 +38,28 @@ VioraServer/
 .claude/
 .codex/
 
+# ---- Python 产物（根目录 scripts/ 等）----
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+
+# ---- 根级环境/敏感文件 ----
+.env
+
+# ---- 测试/临时音频（mic_capture 等调试落盘）----
+*.pcm
+*.wav
+
+# ---- 备份包（可能含历史与密钥，切勿入库）----
+*.bundle
+
+# ---- 通用 IDE / 编辑器 / OS ----
+.idea/
+*.swp
+*.swo
+Thumbs.db
+
 # ---- macOS ----
 .DS_Store

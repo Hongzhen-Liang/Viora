@@ -8,7 +8,7 @@
 
 ## 1. 项目定位
 
-Viora 是一个"植物陪伴 Agent"。用户对盆栽说唤醒词 **Okay Nabu**（micro-wake-word 预训练模型，英文）后开始说话，ESP32 把音频发给 Mac 服务器，服务器依次完成：
+Viora 是一个"植物陪伴 Agent"。用户对盆栽说唤醒词 **Hi Vesper**（micro-wake-word 官方框架本地训练的英文唤醒词）后开始说话，ESP32 把音频发给 Mac 服务器，服务器依次完成：
 
 ```
 音频 → ASR(Whisper) → LLM(DeepSeek) → TTS(edge-tts) → 音频回传 → ESP32 播放
@@ -28,7 +28,7 @@ sequenceDiagram
     participant D as DeepSeek API
     participant T as edge-tts(在线)
 
-    Note over E: micro-wake-word 唤醒词 "Okay Nabu" 命中
+    Note over E: micro-wake-word 唤醒词 "Hi Vesper" 命中
     E->>S: {"type":"audio_start"}
     E->>S: 二进制 PCM（连续流式发送）
     E->>S: {"type":"audio_end"}

@@ -1,0 +1,586 @@
+# Negative phrases for wake-word training (NOT "hi vesper").
+# Deliberately includes many phrases with /aɪ/ ("hi/high/light/right/night")
+# and sibilant patterns phonetically close to "hi vesper" so the model learns
+# to reject them regardless of voice.
+turn on the lights
+turn off the lights
+please turn on the lights
+the light is on
+the light is off
+bright light
+light switch
+that's right
+you're right
+good night
+last night
+right now
+right there
+all right
+hi there
+hi how are you
+hiya
+hi everyone
+hi my name is
+high five
+high school
+how high
+on a high
+high and low
+hey how are you
+hey there
+hey you
+hey guys
+hello how are you
+hello there
+good morning
+good afternoon
+good evening
+what time is it
+what's the time
+tell me the time
+set a timer
+set an alarm
+play some music
+stop the music
+play a song
+next song
+previous song
+volume up
+volume down
+turn it up
+turn it down
+what's the weather
+how's the weather
+is it raining
+will it rain today
+what's the temperature
+it's cold today
+it's hot today
+open the window
+close the window
+open the door
+close the door
+lock the door
+unlock the door
+who are you
+what can you do
+tell me a joke
+tell me a story
+sing a song
+thank you
+thanks a lot
+you're welcome
+goodbye
+see you later
+see you soon
+bye bye
+good luck
+have a nice day
+how old are you
+where are you from
+i love you
+i miss you
+call me later
+text me
+send a message
+check the mail
+check the news
+what's new
+what's up
+how's it going
+how are you doing
+i'm fine
+i'm doing well
+it's better
+this is better
+that is better
+best version
+bless you
+it's blessed
+the best
+i guess so
+i suppose
+let me think
+i don't know
+maybe not
+of course
+certainly
+absolutely
+definitely
+probably not
+i think so
+i believe so
+it's possible
+it's impossible
+what's your name
+my name is
+nice to meet you
+pleased to meet you
+it's a pleasure
+take it easy
+calm down
+relax
+slow down
+hurry up
+come here
+go away
+leave me alone
+help me please
+i need help
+can you help me
+please help
+stop that
+stop it now
+wait a moment
+hold on
+just a second
+one moment please
+excuse me
+sorry about that
+no problem
+it doesn't matter
+never mind
+forget it
+i forgot
+i remember
+i remember you
+don't forget
+remind me
+wake me up
+wake up now
+get up
+stand up
+sit down
+come back
+go home
+stay home
+take a break
+let's go
+let's start
+let's begin
+we're done
+we're finished
+i'm tired
+i'm hungry
+i'm thirsty
+i'm sleepy
+i'm happy
+i'm sad
+i'm excited
+i'm bored
+i'm busy
+i'm free
+are you busy
+are you free
+do you understand
+i understand
+i don't understand
+say it again
+repeat that
+say that again
+speak slower
+speak faster
+talk to me
+listen to me
+look at me
+watch out
+be careful
+take care
+stay safe
+drive safe
+good job
+well done
+great job
+awesome
+amazing
+wonderful
+fantastic
+perfect
+excellent
+terrific
+brilliant
+splendid
+marvelous
+beautiful
+handsome
+pretty
+cute
+funny
+smart
+clever
+wise
+strong
+brave
+kind
+nice
+sweet
+gentle
+honest
+loyal
+friendly
+happy birthday
+happy new year
+merry christmas
+congratulations
+i'm sorry
+i apologize
+forgive me
+it's okay
+it's fine
+no worries
+don't worry
+it's alright
+all is well
+everything is fine
+everything is okay
+is everything okay
+are you okay
+are you alright
+is something wrong
+what happened
+what's wrong
+what's the matter
+what's going on
+what's happening
+what are you doing
+what do you want
+what do you need
+where are you
+where is it
+where is everyone
+when is it
+when are we going
+who is that
+who's there
+who called
+whom did you see
+which one
+which is better
+whose is this
+how much is it
+how many are there
+how far is it
+how long will it take
+how does it work
+how do i do this
+why not
+why is that
+because i said so
+it's a secret
+don't tell anyone
+keep it quiet
+be quiet
+silence please
+no talking
+stop talking
+start talking
+keep talking
+keep going
+keep moving
+don't stop
+never give up
+keep trying
+try again
+do it again
+once more
+one more time
+all over again
+from the start
+from the beginning
+to the end
+to the top
+to the bottom
+side to side
+back and forth
+up and down
+left and right
+north and south
+east and west
+here and there
+now and then
+sometimes
+always
+never
+often
+rarely
+usually
+maybe
+perhaps
+possibly
+probably
+likely
+unlikely
+certainly
+surely
+definitely not
+absolutely not
+of course not
+not at all
+no way
+for sure
+no doubt
+without a doubt
+i'm not sure
+i'm not certain
+i'm not convinced
+i have no idea
+i have no clue
+i can't remember
+i don't recall
+it slipped my mind
+it's on the tip of my tongue
+give me a minute
+give me a second
+give me a moment
+i'll be right back
+i'm coming now
+i'm on my way
+i'm almost there
+i just arrived
+i just left
+i'm heading home
+i'm going out
+i'm staying in
+let's meet up
+let's hang out
+see you at the party
+we should go out
+i want to leave
+i need to rest
+i should sleep
+time to wake up
+time to get up
+time to go
+time to leave
+time to eat
+time to cook
+time to clean
+time to work
+time to study
+time to play
+it's time
+it's late
+it's early
+it's noon
+it's midnight
+it's morning
+it's afternoon
+it's evening
+it's night
+the sun is up
+the sun is down
+the moon is bright
+the stars are out
+the sky is clear
+the sky is dark
+the clouds are gray
+it's windy outside
+it's foggy
+it's misty
+it's humid
+it's dry
+it's snowy
+it's icy
+it's slippery
+it's stormy
+it's thunderstorm
+lightning struck
+the thunder roared
+the rain is falling
+the rain stopped
+the sun came out
+the rainbow appeared
+the flowers are blooming
+the leaves are falling
+the birds are singing
+the dog is barking
+the cat is sleeping
+the door is open
+the window is shut
+the car is parked
+the bus is late
+the train arrived
+the plane took off
+the boat sailed away
+the ship is docking
+the bike is broken
+the phone is ringing
+the battery is low
+the power is out
+the wifi is down
+the signal is weak
+the screen is dark
+the keyboard is sticky
+the mouse is broken
+the printer is jammed
+the coffee is cold
+the tea is hot
+the water is boiling
+the milk is sour
+the bread is fresh
+the cake is sweet
+the pizza is ready
+the soup is warm
+the salad is crisp
+the fruit is ripe
+the apple is red
+the banana is yellow
+the orange is juicy
+the grapes are sweet
+the berries are tart
+the nuts are crunchy
+the seeds are tiny
+the leaves are green
+the grass is tall
+the tree is old
+the branch is bent
+the root is deep
+the stone is heavy
+the sand is soft
+the wave is high
+the tide is low
+the current is strong
+the river is wide
+the lake is calm
+the pond is small
+the ocean is vast
+the sea is rough
+the beach is crowded
+the shore is rocky
+the island is remote
+the mountain is steep
+the hill is gentle
+the valley is green
+the desert is hot
+the forest is dense
+the jungle is humid
+the cave is dark
+the tunnel is long
+the bridge is narrow
+the road is bumpy
+the street is quiet
+the lane is narrow
+the path is clear
+the trail is muddy
+the park is peaceful
+the garden is lovely
+the farm is busy
+the market is crowded
+the store is closed
+the shop is open
+the mall is huge
+the office is bright
+the room is tidy
+the kitchen is clean
+the bathroom is wet
+the bedroom is cozy
+the living room is spacious
+the basement is cold
+the attic is dusty
+the garage is full
+the porch is shaded
+the roof is leaking
+the wall is cracked
+the floor is slippery
+the ceiling is high
+the stairs are steep
+the doorbell is ringing
+the mailbox is full
+the fence is broken
+the gate is locked
+the driveway is long
+the sidewalk is cracked
+the streetlight is on
+the traffic is heavy
+the parking lot is full
+the gas tank is empty
+the engine is loud
+the brakes are squeaky
+the tires are flat
+the headlights are on
+the windshield is dirty
+the wipers are slow
+the horn is stuck
+the seatbelt is tight
+the mirror is foggy
+the dashboard is lit
+the speedometer is broken
+the fuel gauge is low
+the radio is static
+the gps is recalculating
+the map is outdated
+the route is blocked
+the detour is long
+the shortcut is tricky
+the distance is far
+the destination is near
+the address is wrong
+the number is busy
+the line is dead
+the call dropped
+the message was sent
+the email is spam
+the file is corrupted
+the folder is empty
+the document is long
+the page is blank
+the image is blurry
+the video is buffering
+the audio is distorted
+the volume is too high
+the volume is too low
+the bass is heavy
+the treble is sharp
+the melody is catchy
+the rhythm is fast
+the beat is strong
+the song is over
+the show is starting
+the movie is boring
+the book is interesting
+the story is long
+the ending is surprising
+the beginning is slow
+the middle is confusing
+the plot is thick
+the character is complex
+the actor is famous
+the singer is talented
+the band is loud
+the concert was great
+the theater was packed
+the seats are comfortable
+the popcorn is salty
+the soda is flat
+the candy is sweet
+the chocolate is dark
+the cookie is crunchy
+the pie is warm
+the muffin is soft
+the bagel is chewy
+the toast is burnt
+the cereal is soggy
+the oatmeal is plain
+the pancake is fluffy
+the waffle is crisp
+the syrup is sticky
+the butter is melted
+the cheese is stringy
+the sandwich is fresh
+the burger is juicy
+the fries are salty
+the salad is healthy
+the soup is hot
+the stew is hearty
+the chili is spicy
+the curry is aromatic
+the rice is fluffy
+the noodles are long
+the pasta is al dente
+the sauce is rich
+the pizza is cheesy
+the bread is crusty
+the roll is warm
+the croissant is flaky
+the donut is glazed
+the muffin top is golden

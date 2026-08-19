@@ -285,6 +285,90 @@ bool build_interpreter(const tflite::Model *model, size_t arena_bytes) {
   return true;
 }
 
+// ------------------------------------------------------------------
+// KWS 输入自适应衰减（AGC，只衰减不放大）
+// 大声/近讲时 INMP441 饱和削顶会严重拉低模型分数（PC 实测：+24dB
+// 削顶后 aria=0.014 / jenny=0.067；衰减回正常电平后恢复至 0.35~0.95）。
+// 前端的降噪/PCAN 在极端电平下会失准，这里在喂前端前把超响帧的
+// 电平拉回模型训练范围；正常音量峰值远低于目标，完全不受影响。
+// ------------------------------------------------------------------
+constexpr int32_t kAgcTargetPeak = 6000;  // 目标峰值（贴近正常说话峰值 ~4.7k）
+constexpr float kAgcMinGain = 0.05f;      // 最大衰减 20x
+constexpr float kAgcAttack = 1.0f;        // 超响帧瞬时压低，避免首音节削顶期
+constexpr float kAgcRelease = 0.05f;      // 恢复缓慢，避免抽吸
+static float s_agc_gain = 1.0f;
+
+// 对一帧应用自适应增益，结果写入 out（可能为原样拷贝）；peak_out 返回
+// 本帧输入峰值（供大声兜底唤醒统计）。
+void apply_kws_agc(const int16_t *in, int16_t *out, int samples,
+                   int32_t *peak_out) {
+  int32_t peak = 0;
+  for (int i = 0; i < samples; ++i) {
+    const int32_t a = in[i] < 0 ? -static_cast<int32_t>(in[i])
+                                : static_cast<int32_t>(in[i]);
+    if (a > peak) peak = a;
+  }
+  if (peak_out != nullptr) *peak_out = peak;
+  if (peak > 0) {
+    const float desired = static_cast<float>(kAgcTargetPeak) / peak;
+    const float clamped = desired < kAgcMinGain
+                              ? kAgcMinGain
+                              : (desired > 1.0f ? 1.0f : desired);
+    if (clamped < s_agc_gain) {
+      s_agc_gain += (clamped - s_agc_gain) * kAgcAttack;
+    } else {
+      s_agc_gain += (1.0f - s_agc_gain) * kAgcRelease;
+    }
+    if (s_agc_gain < kAgcMinGain) s_agc_gain = kAgcMinGain;
+    if (s_agc_gain > 1.0f) s_agc_gain = 1.0f;
+  }
+  if (s_agc_gain < 1.0f) {
+    for (int i = 0; i < samples; ++i) {
+      int32_t v =
+          static_cast<int32_t>(static_cast<float>(in[i]) * s_agc_gain);
+      if (v > 32767) v = 32767;
+      if (v < -32768) v = -32768;
+      out[i] = static_cast<int16_t>(v);
+    }
+  } else {
+    memcpy(out, in, samples * sizeof(int16_t));
+  }
+}
+
+// ------------------------------------------------------------------
+// 大声/贴麦兜底唤醒（yell-to-wake）
+// 用户急时大喊、或贴着麦克风正常音量讲（实测贴麦 mic_peak=32767 /
+// rms≈2 万，与大喊同为硬饱和）都会把 INMP441 推入饱和，削顶波形即便
+// 衰减回正常电平，模型仍持续 p≈0（削顶破坏波形形状）。贴麦时只有
+// 元音帧冲高（1 万~3.3 万），辅音/停顿帧很低，1s 窗口内 ≥1 万帧只有
+// 3~11 个，所以窗口必须贴合一次唤醒词的时长、阈值不宜过高。
+// 兜底策略：武装态下，最近 ~0.5s 内 ≥5 帧峰值 ≥8k 且 VAD 判定语音，
+// 就认为“有人在朝设备喊/贴着讲”，直接触发唤醒。正常说话峰值仅
+// ~4.7k（实测最高 ~8.5k 均出现在贴麦测试段），阈值 8k + 连续计数
+// 要求，正常对话不会触发；模型路径仍优先（见 wake_word_process）。
+// ------------------------------------------------------------------
+constexpr int32_t kLoudPeakThreshold = 8000;  // 明确喊/贴麦电平（正常 ~4.7k）
+constexpr int kLoudWindowFrames = 16;         // ~0.5s @32ms/帧，贴合一次唤醒词
+constexpr int kLoudMinFrames = 5;             // 窗口内至少 5 帧超标
+constexpr int kLoudMinVadFrames = 8;          // 窗口内须有语音证据
+static uint8_t s_loud_hist[kLoudWindowFrames] = {};
+static int s_loud_head = 0;
+static int s_loud_count = 0;
+
+void observe_loud_frame(int32_t peak) {
+  if (s_loud_hist[s_loud_head]) --s_loud_count;
+  const bool loud = peak >= kLoudPeakThreshold;
+  s_loud_hist[s_loud_head] = loud ? 1 : 0;
+  if (loud) ++s_loud_count;
+  s_loud_head = (s_loud_head + 1) % kLoudWindowFrames;
+}
+
+void clear_loud_history() {
+  memset(s_loud_hist, 0, sizeof(s_loud_hist));
+  s_loud_head = 0;
+  s_loud_count = 0;
+}
+
 }  // namespace
 
 bool wake_word_init() {
@@ -425,6 +509,8 @@ void wake_word_reset() {
   s_stride_step = 0;
   s_last_probability = 0.0f;
   s_last_inference_us = 0;
+  s_agc_gain = 1.0f;
+  clear_loud_history();
   clear_vad_history();
 }
 
@@ -447,6 +533,16 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
     Serial.printf("[KWS] armed @%lu ms\n", static_cast<unsigned long>(millis()));
   }
 
+  // 大声/近讲时输入可能削顶：先经自适应衰减再喂前端，恢复模型响应。
+  // 瞬时压低（attack=1.0）+ 目标 6000，使中大声但未饱和的语音尽量
+  // 回到正常电平被模型识别；硬饱和则由下方大声兜底接管。
+  static int16_t s_agc_pcm[512];
+  if (samples > 512) samples = 512;
+  int32_t frame_peak = 0;
+  apply_kws_agc(pcm, s_agc_pcm, samples, &frame_peak);
+  const int16_t *kws_pcm = s_agc_pcm;
+  observe_loud_frame(frame_peak);
+
   // 每帧可能产出多个 10ms 特征（512 样本 ≈ 3 个）；前端内部会缓冲
   // 不足一个窗的样本，因此循环处理直到本帧样本耗尽或不足一窗。
   bool woken = false;
@@ -454,7 +550,7 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
   while (offset < static_cast<size_t>(samples)) {
     size_t consumed = 0;
     struct FrontendOutput output = FrontendProcessSamples(
-        &s_frontend_state, pcm + offset, samples - offset, &consumed);
+        &s_frontend_state, kws_pcm + offset, samples - offset, &consumed);
     if (consumed == 0) break;  // 防御：前端异常时避免死循环
     offset += consumed;
     if (output.size == 0) break;  // 剩余样本不足一窗，留待下帧
@@ -464,6 +560,18 @@ bool wake_word_process(const int16_t *pcm, int samples, bool enabled,
       woken = true;
       break;
     }
+  }
+
+  // 大声兜底：模型对硬饱和语音持续 p≈0，改判“持续大喊 + 语音”。
+  // 仅武装/空闲态生效（本函数在 !enabled 时已提前返回）。
+  if (!woken && s_loud_count >= kLoudMinFrames &&
+      s_vad_speech_frames >= kLoudMinVadFrames) {
+    Serial.printf(
+        "[KWS] LOUD 兜底唤醒：近 %.1fs %d/%d 帧峰值>=%d (vad=%d)\n",
+        kLoudWindowFrames * 0.032f, s_loud_count, kLoudWindowFrames,
+        static_cast<int>(kLoudPeakThreshold), s_vad_speech_frames);
+    clear_loud_history();
+    woken = true;
   }
   return woken;
 }

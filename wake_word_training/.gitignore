@@ -35,3 +35,12 @@ __pycache__/
 .DS_Store
 
 .venv-metal
+
+# ---- mww 训练工作区（wake_word_training/mww/）----
+# 只跟踪 scripts/ 与 README.md；第三方框架与数据/模型产物巨大不入库
+# （mww/data 约 31GB、piper-sample-generator 约 213MB，均可用脚本重建）
+mww/data/
+mww/trained_models/
+mww/micro-wake-word/
+mww/piper-sample-generator/
+mww/*.egg-info/
