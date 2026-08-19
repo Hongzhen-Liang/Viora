@@ -488,11 +488,15 @@ bool wake_word_init() {
     }
   }
 
-  s_kws_vad = vad_create(VAD_MODE_3);
+  // 聆听门主 VAD 的灵敏度：esp_vad.h 明确 mode 越大越保守。AFE 在
+  // 2026-08-17 实机验证用 MODE_2 才能听到小声近讲；独立 VAD（聆听态
+  // 主门）原先用更保守的 MODE_3，实测只命中句首、把整段近讲当静音，
+  // 导致静音计时提前耗尽、用户没说完就断句。这里统一为 MODE_2。
+  s_kws_vad = vad_create(VAD_MODE_2);
   if (s_kws_vad == nullptr) {
     Serial.println("[KWS] 警告：独立 VAD 创建失败（聆听门将回退到 AFE/能量）");
   } else {
-    Serial.println("[KWS] 独立 ESP-SR VAD 就绪（聆听门复用）");
+    Serial.println("[KWS] 独立 ESP-SR VAD 就绪：mode=2（聆听门复用）");
   }
 
   s_ready = true;

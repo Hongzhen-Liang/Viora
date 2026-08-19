@@ -117,15 +117,17 @@
 #define AFE_ENERGY_FALLBACK_FRAMES   6   // AFE 无结果约192ms后才允许能量降级
 #define ENERGY_FALLBACK_PEAK_MIN     180 // 降级路径额外峰值门
 #define ENERGY_FALLBACK_RMS_MIN      70  // 降级路径额外 RMS 门
-// 自然断句参数：短回答多等一会儿；正常句约 0.65 秒静音即回复；
-// 用户曾在句内停顿后继续说时，会自动学习其节奏并放宽，最多 1.8 秒。
+// 自然断句参数：短回答多等一会儿；正常句约 0.85 秒静音即回复；
+// 用户曾在句内停顿后继续说时，会自动学习其节奏并放宽，最多 2.0 秒。
+// 2026-08-20：设备端神经 VAD 对正常音量近讲命中偏稀疏（常只命中句首、
+// 句中被误判为静音），静音阈值必须留出富余，避免“没听完就断句开播”。
 #define VAD_FRAME_MS              32
 #define ENDPOINT_SHORT_SPEECH_MS  640
-#define ENDPOINT_SHORT_MS         1200
-#define ENDPOINT_NORMAL_MS        650
+#define ENDPOINT_SHORT_MS         1500
+#define ENDPOINT_NORMAL_MS        850
 #define ENDPOINT_LONG_TURN_MS     5000
-#define ENDPOINT_LONG_MS          750
-#define ENDPOINT_MAX_MS           1800
+#define ENDPOINT_LONG_MS          850
+#define ENDPOINT_MAX_MS           2000
 #define ENDPOINT_LEARN_GAP_MS     160
 #define MIN_REC_MS                450
 #define MAX_REC_MS                15000
