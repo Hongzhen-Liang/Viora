@@ -1,46 +1,28 @@
 # ============================================================
-# Hi Vesper 训练流水线忽略规则
-# 训练入口: bash run.sh（edge-tts 生成 -> 映射 -> 训练 -> INT8 -> 导出）
+# Hi Vesper 唤醒词训练忽略规则（mww 官方框架流水线）
+# 训练入口: 见 mww/README.md
 # ============================================================
 
-# ---- 数据集 ----
-# dataset/ 是脚本从 data/ 重建的符号链接缓存（train/val/test/raw），
-# 换数据后先 rm -rf dataset/{train,val,test,raw} 再重跑 import 即可。
-dataset/
-
-# ---- 模型产物 ----
-# 大体积二进制不入库；同目录下的 *.json（evaluation/training_metadata 等）
-# 是模型来源与质量的元数据，保留入库。
-models/*.keras
-models/*.h5
-models/*.tflite
-models/*.cc
-models/*.h
-
-# ---- 源数据与本地生成物 ----
-data/
-.cache/
-.venv/
-.env
+# ---- mww 训练工作区（wake_word_training/mww/）----
+# 只跟踪 scripts/ 与 README.md；第三方框架与数据/模型产物巨大不入库
+# （mww/data 约 31GB、piper-sample-generator 约 200MB，均可用脚本重建）
+mww/data/
+mww/trained_models/
+mww/micro-wake-word/
+mww/piper-sample-generator/
+mww/*.egg-info/
 
 # ---- Python ----
 __pycache__/
 *.pyc
 .pytest_cache/
 
+# ---- 环境 ----
+.venv/
+.venv-metal/
+
 # ---- 日志 ----
 *.log
 
 # ---- macOS ----
 .DS_Store
-
-.venv-metal
-
-# ---- mww 训练工作区（wake_word_training/mww/）----
-# 只跟踪 scripts/ 与 README.md；第三方框架与数据/模型产物巨大不入库
-# （mww/data 约 31GB、piper-sample-generator 约 213MB，均可用脚本重建）
-mww/data/
-mww/trained_models/
-mww/micro-wake-word/
-mww/piper-sample-generator/
-mww/*.egg-info/
