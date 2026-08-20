@@ -1,13 +1,17 @@
 #pragma once
 // ============================================================
 // Viora 全局配置：引脚、网络、音频、VAD、对话参数
+//   引脚定义集中管理于 src/hardware/hardware_config.h，
+//   修改硬件只改那一个文件。
 // ============================================================
 #include <Arduino.h>
 #include <driver/i2s.h>
 
+#include "hardware/hardware_config.h"
+
 // ============================================================
 // 唤醒词（仅用于串口提示与日志；实际检测由 micro-wake-word 流式模型完成，
-// 见 src/wake_word.cpp）
+// 见 src/ai/wake_word.cpp，经 WakeWordManager 接口调用）
 // 当前使用 wake_word_training/mww 官方框架训练的 "Hi Vesper" 模型
 // （Piper 合成样本，mixednet v2 架构）。换模型：scripts/convert_mww_model.py
 // 重新生成 src/mww_model_data.* 与 src/mww_model_config.h，再把这里的提示
@@ -31,27 +35,19 @@
 #define WAKE_ACK_BOUNDARY_PREROLL_MS 192 // 保留确认音边界附近首字，不带唤醒词
 #define WAKE_ACK_FOLLOWUP_GUARD_MS 64 // 确认音自然播完后的极短扬声器尾音保护
 // ============================================================
-// 引脚定义（MSM3526 / INMP441，I2S 数字 MEMS 麦克风）
-//   一排 [SD][VDD][GND] → GPIO2 / GPIO1(软件3.3V) / 真实GND
-//   另一排 [L/R][WS][SCK] → GPIO17(拉低=左声道) / GPIO16 / GPIO15
-// 避开八线PSRAM(26-37)、strapping(0/3/45/46)、功放(12/13/14)、状态灯(48)
-// ⚠️ 状态灯 WS2812 在 GPIO48，麦克风 SD 不能再用 48（会把灯灌成白色）
+// I2S 音频（引脚见 hardware_config.h）
+//   INMP441（RX）与 MAX98357A（TX）共享 BCLK/WS，
+//   使用单个 I2S_NUM_0 全双工端口。INMP441 L/R 接 GND（左声道），
+//   VDD 接 3.3V，无需 GPIO 驱动。
 // ============================================================
-#define I2S_SCK  15
-#define I2S_WS   16
-#define I2S_SD   2
-#define MIC_VDD  1   // 输出高电平 ≈3.3V，给麦克风 VDD 供电（~1.4mA，安全）
-#define MIC_LR   17   // 输出低电平 → 左声道（模块 L/R 接这里）
 #define I2S_PORT I2S_NUM_0
 
 // 采样率（ESP-SR 固定要求 16kHz）
 #define SR_SAMPLE_RATE 16000
 
 // ============================================================
-// 板载状态灯（WS2812 RGB）
-// 本板 WS2812 在 GPIO48；麦克风 SD 已挪到 GPIO2 给灯让位
+// 板载状态灯（WS2812 RGB，GPIO 见 hardware_config.h 的 LED_PIN）
 // ============================================================
-#define LED_PIN 48
 
 // ============================================================
 // 敏感配置：WiFi / 服务器地址 / API Key
@@ -94,15 +90,9 @@
 #define ENABLE_IDLE_WIFI_POWER_SAVE 0
 
 // ============================================================
-// 扬声器（MAX98357 I2S 功放，输出 TTS 音频）
-//   LRC(WS) → GPIO11 / BCLK → GPIO12 / DIN → GPIO13
-//   SD_MODE → 稳定 3.3V（实测 GPIO14 驱动会失真，禁止悬空）
-// 避开 PSRAM(26-37)、strapping(0/3/45/46)、麦克风(1/2/15/16/17)、状态灯(48)
+// 传感器轮询间隔
 // ============================================================
-#define SPK_WS       11   // 接功放 LRC（WS）
-#define SPK_BCK      12   // 接功放 BCLK
-#define SPK_DIN      13   // 接功放 DIN
-#define SPK_I2S_PORT I2S_NUM_1
+#define SENSOR_POLL_MS 5000  // 每 5s 读一次 SHT40 / BH1750 / 土壤湿度
 
 // ============================================================
 // 录音 VAD 参数（神经 VAD 负责判定；能量阈值仅用于诊断）

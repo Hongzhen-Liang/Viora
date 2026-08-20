@@ -12,6 +12,55 @@
 
 ---
 
+## 0. 软件模块结构
+
+固件按功能拆成独立模块，**修改硬件只改 `src/hardware/hardware_config.h`**：
+
+```
+src/
+├── main.cpp                  # 对话状态机编排（IDLE→LISTENING→PROCESSING→PLAYING）
+├── config.h                  # 全局配置（含 hardware_config.h）
+├── hardware/
+│   └── hardware_config.h     # ⭐ 所有 GPIO/总线定义集中在这里
+├── sensor/
+│   ├── sensor_manager.h      # SensorManager：SHT40 + BH1750 + 土壤湿度
+│   └── sensor_manager.cpp
+├── audio/
+│   ├── audio_manager.h       # AudioManager：INMP441 + MAX98357A（共享 I2S 全双工）
+│   └── audio_manager.cpp
+├── ai/
+│   ├── wake_word.h           # WakeWordManager 接口（detectWakeWord，后端=micro-wake-word）
+│   ├── wake_word.cpp
+│   ├── ai_manager.h          # AIManager 接口预留（Mic→WakeWord→ASR→LLM→TTS→播放，mock）
+│   └── ai_manager.cpp
+├── net.cpp / provisioning.*  # WiFi 配网 + WebSocket 上传/接收
+├── speech.*                  # esp-sr AFE（AEC + 神经 VAD）
+├── turn_detector.* / vad.*   # 轮次状态机 / 能量 VAD
+└── led.* / wake_ack_data.*   # 状态灯 / 本地确认音
+```
+
+> 旧的 `src/audio.cpp` 与 `src/wake_word.cpp` 已由
+> `src/audio/audio_manager.cpp`、`src/ai/wake_word.cpp` 取代，在
+> `platformio.ini` 的 `build_src_filter` 中排除编译（保留在磁盘上，确认
+> 无误后可自行删除）。
+
+### 需要安装的库
+
+已在 `platformio.ini` 的 `lib_deps` 中声明，`platformio run` 会自动下载：
+
+| 库 | 用途 |
+|----|------|
+| `adafruit/Adafruit SHT4x Library` | SHT40 温湿度（I2C） |
+| `claws/BH1750` | BH1750 光照（I2C，GY-302） |
+| `links2004/WebSockets` | WebSocket 客户端（连接 VioraServer） |
+| `bblanchon/ArduinoJson` | JSON 控制帧解析 |
+
+ESP-IDF 组件（本地 `components/`，`scripts/fetch_components.py` 拉取）：
+`esp-sr`（AFE/神经 VAD/独立 VAD）、`esp-tflite-micro`（唤醒词模型运行时）、
+`esp-dsp`、`esp-nn`。传感器使用 Arduino 库，无需额外 ESP-IDF 组件。
+
+---
+
 ## 1. 整体链路
 
 ```mermaid
@@ -39,31 +88,84 @@ sequenceDiagram
 
 | 模块 | 推荐型号 | 说明 |
 |------|----------|------|
-| 主控 | ESP32-S3-WROOM-1（N16R8） | 带向量指令，跑唤醒词更省力；I2S 外设全 |
+| 主控 | ESP32-S3 DevKitC | I2S / I2C / ADC 外设全 |
 | 麦克风 | INMP441 | I2S MEMS 数字麦克风，输出 24bit（取高 16bit） |
-| 功放+扬声器 | MAX98357A + 3W 小喇叭 | I2S DAC 功放，单声道 |
-| 土壤湿度 | 电容式土壤湿度传感器 | 比电阻式耐腐蚀 |
-| 温湿度 | DHT22 / SHT30 | I2C 或单总线 |
-| 光照 | BH1750 或光敏电阻 | I2C / ADC |
+| 功放+扬声器 | MAX98357A + 8Ω 喇叭 | I2S D 类功放，单声道 |
+| 土壤湿度 | 电容式土壤湿度传感器 | 模拟输出，接 ADC（GPIO4） |
+| 温湿度 | SHT40 | I2C（与 BH1750 共享总线） |
+| 光照 | GY-302（BH1750） | I2C |
 
-### 实际引脚连接（与 `src/config.h` 一致）
+### 实际引脚连接（固定映射，与 `src/hardware/hardware_config.h` 一致）
 
-| 外设 | 引脚 | 说明 |
-|------|------|------|
-| 麦克风 SD（数据） | GPIO 2 | MSM3526 / INMP441 I2S 数据 |
-| 麦克风 SCK（位时钟） | GPIO 15 | I2S BCLK |
-| 麦克风 WS（左右时钟） | GPIO 16 | I2S LRCK |
-| 麦克风 VDD | GPIO 1 | 软件输出 3.3V 供电（约 1.4mA） |
-| 麦克风 L/R | GPIO 17 | 输出低电平 = 左声道 |
-| MAX98357 VIN | 5V | 功放供电（2.5~5.5V，5V 更响） |
-| MAX98357 LRC | GPIO 11 | I2S 左右时钟（WS） |
-| MAX98357 BCLK | GPIO 12 | I2S 位时钟 |
-| MAX98357 DIN | GPIO 13 | I2S 音频数据 |
-| MAX98357 GAIN | 悬空 | 多数模块默认 9dB，焊跳线可调 3~15dB |
-| 板载 WS2812 状态灯 | GPIO 48 | 麦克风 SD 不能用 48，会把灯灌成白色 |
-| DHT22 / BH1750 / 土壤湿度 | 待定 | `sensors.h` 为占位，传感器到货后实现 |
+> 所有引脚集中定义在 `src/hardware/hardware_config.h`，修改硬件只改这一个文件。
 
-> 引脚可按实际板子调整，只需在 `config.h` 里改。
+| 外设 | 信号 | 引脚 | 说明 |
+|------|------|------|------|
+| SHT40 | SDA | GPIO 8 | I2C 数据（与 BH1750 共享） |
+| SHT40 | SCL | GPIO 9 | I2C 时钟（与 BH1750 共享） |
+| GY-302 (BH1750) | SDA | GPIO 8 | I2C 数据 |
+| GY-302 (BH1750) | SCL | GPIO 9 | I2C 时钟 |
+| 土壤湿度 | AO | GPIO 4 | 模拟 ADC（ADC1_CH3） |
+| INMP441 | SCK (BCLK) | GPIO 5 | 与 MAX98357A BCLK 共享 |
+| INMP441 | WS | GPIO 6 | 与 MAX98357A LRC 共享 |
+| INMP441 | SD | GPIO 7 | I2S 数据输入 |
+| INMP441 | L/R | GND | 拉低 = 左声道 |
+| INMP441 | VDD | 3.3V | 数字供电 |
+| MAX98357A | BCLK | GPIO 5 | 与 INMP441 SCK 共享 |
+| MAX98357A | LRC (WS) | GPIO 6 | 与 INMP441 WS 共享 |
+| MAX98357A | DIN | GPIO 15 | I2S 数据输出 |
+| MAX98357A | VIN | 5V | 功放供电（2.5~5.5V，5V 更响） |
+| MAX98357A | GAIN | 悬空 | 多数模块默认 9dB |
+| 板载 WS2812 状态灯 | DIN | GPIO 48 | 状态指示 |
+
+> ⚠️ **INMP441 与 MAX98357A 共享 BCLK/WS**：固件使用**单个 I2S 全双工端口**
+> （`I2S_NUM_0`）同时收发，不是两个独立 I2S 端口，接线时两者必须接到
+> 同一根 BCLK 与 WS 线上（见 `src/audio/audio_manager.cpp`）。
+
+---
+
+## 2.1 接线验证方法
+
+烧录后打开串口监视器（115200），应看到启动横幅：
+
+```text
+========== Vesper Hardware ==========
+ESP32-S3 Ready
+I2C:
+SDA GPIO8
+SCL GPIO9
+I2S:
+BCLK GPIO5
+WS GPIO6
+Sensors:
+SHT40 OK
+BH1750 OK
+Soil ADC OK
+Audio:
+INMP441 OK
+MAX98357 OK
+=====================================
+```
+
+按顺序排查：
+
+1. **传感器（I2C）**：横幅中 `SHT40` / `BH1750` 若显示 `FAIL`，先确认
+   SDA=GPIO8、SCL=GPIO9 接对、上拉（模块自带）、供电 3.3V、地址正确
+   （SHT40=0x44，BH1750=0x23）。随后每 5 秒打印一行
+   `[SENSOR] temp=..C hum=..% light=..lx soil=..% (raw=..)`。
+2. **土壤湿度（ADC）**：看 `[SENSOR]` 行中的 `soil`/`raw`。手捏传感器数值应
+   变化（干土 raw 高、湿土 raw 低）。校准：空气中读数设为 dry、泡水读数
+   设为 wet，调用 `g_sensor.setSoilCalibration(dry, wet)`。
+3. **麦克风（INMP441）**：若 `INMP441 FAIL`，检查 SD=GPIO7、L/R=GND、
+   VDD=3.3V。正常说话时 `[HEALTH]` 日志的 `mic_peak`/`mic_rms` 会明显抬升
+   （`config.h` 的 `ENABLE_HEALTH_LOG` 设为 1 开启）。
+4. **喇叭（MAX98357A）**：若 `MAX98357 FAIL`，检查 DIN=GPIO15、BCLK/WS 与
+   麦克风共享、VIN=5V。对设备说唤醒词“Hi Vesper”，应听到确认音/回复。
+5. **无线对话**：连上 VioraServer 后说“Hi Vesper”+指令，走完整
+   麦克风→唤醒→上传→ASR→LLM→TTS→播放 链路。
+
+> 排查时若 `Audio` 报 `FAIL`，`[AUDIO] I2S init failed` 会打印具体错误码
+> （ESP_ERR_*）。
 
 ---
 
