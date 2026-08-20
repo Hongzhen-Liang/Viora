@@ -6,6 +6,7 @@
 //                    └── barge-in ─┘
 // ============================================================
 #include <Arduino.h>
+#include <cmath>
 #include <string.h>
 
 #include "ai/ai_manager.h"
@@ -576,16 +577,42 @@ void setup() {
   led_init();
 }
 
+// 周期上报传感器遥测（JSON 帧，约 110B/5s，走 WS 发送队列不阻塞主循环）。
+// 未成功读到的传感器以 null 上报；服务端 plant_state 只收有效值。
+static void send_sensor_telemetry() {
+  if (!net_connected()) return;
+  const SensorData &d = g_sensor.data();
+  char t[16], h[16], l[16], s[16];
+  auto fmt = [](char *out, size_t sz, float v, const char *fmt) {
+    if (std::isnan(v)) {
+      snprintf(out, sz, "null");
+    } else {
+      snprintf(out, sz, fmt, v);
+    }
+  };
+  fmt(t, sizeof(t), d.temperature, "%.2f");
+  fmt(h, sizeof(h), d.humidity, "%.1f");
+  fmt(l, sizeof(l), d.light, "%.1f");
+  fmt(s, sizeof(s), d.soil, "%.1f");
+  char buf[160];
+  snprintf(buf, sizeof(buf),
+           "{\"type\":\"telemetry\",\"temp\":%s,\"hum\":%s,"
+           "\"light\":%s,\"soil\":%s,\"soil_raw\":%d}",
+           t, h, l, s, d.soil_raw);
+  net_send_json(buf);
+}
+
 void loop() {
   net_loop();
 
-  // 周期读取传感器（SHT40 / BH1750 / 土壤湿度）并打印
+  // 周期读取传感器（SHT40 / BH1750 / 土壤湿度）并打印 + 上报服务端
   static uint32_t s_last_sensor_ms = 0;
   const uint32_t sensor_now = millis();
   if (sensor_now - s_last_sensor_ms >= SENSOR_POLL_MS) {
     s_last_sensor_ms = sensor_now;
     g_sensor.poll();
     g_sensor.print();
+    send_sensor_telemetry();
   }
 
   // 默认保持 WiFi 全性能，避免待唤醒阶段的 modem sleep 令 WebSocket
