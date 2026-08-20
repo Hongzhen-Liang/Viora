@@ -423,10 +423,15 @@ void AudioManager::playDrain() {
     portEXIT_CRITICAL(&s_play_mux);
 
     if (s_play_write_mutex) xSemaphoreGive(s_play_write_mutex);
-    if (err != ESP_OK || written != chunk) {
-      Serial.printf("[I2S] 播放写入异常 err=%s written=%u/%u\n",
+    // 注意：i2s_write 以 32bit slot 计字节（tx_samples*4），而 chunk 是
+    // int16 PCM 字节数，两者相差 2 倍。比较/日志必须用实际请求的 tx_bytes，
+    // 否则每次全量写成功都会被误报成"写入异常"（written=2048/1024 刷屏）。
+    const uint32_t tx_bytes =
+        static_cast<uint32_t>(tx_samples) * sizeof(int32_t);
+    if (err != ESP_OK || written != tx_bytes) {
+      Serial.printf("[I2S] 播放写入异常 err=%s written=%u/%uB\n",
                     esp_err_to_name(err), static_cast<unsigned>(written),
-                    static_cast<unsigned>(chunk));
+                    static_cast<unsigned>(tx_bytes));
     }
   }
 }
