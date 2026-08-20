@@ -13,7 +13,10 @@
 // ---- I2C 总线（SHT40 与 GY-302 共享）----
 #define I2C_SDA_PIN 8
 #define I2C_SCL_PIN 9
-#define I2C_FREQ_HZ 400000  // SHT40 最高 1MHz，BH1750 最高 400kHz
+// 无外部上拉电阻：Wire.begin 已启用内部 ~45kΩ 弱上拉，
+// 总线降到 20kHz（半周期 25us 远大于 RC 上升沿），杜邦线也能稳。
+// 有 4.7k 外部上拉后可回升到 100k~400k。
+#define I2C_FREQ_HZ 20000
 
 // ---- 土壤湿度（电容式，模拟 ADC）----
 #define SOIL_ADC_PIN 4
