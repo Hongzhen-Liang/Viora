@@ -4,6 +4,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <esp_wifi.h>
+#include <esp_mac.h>
 #include <ESPmDNS.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
@@ -241,14 +242,30 @@ static void start_websocket() {
   // 心跳放宽：长 TTS 流播放期间偶尔的收包停顿不应直接判死断连。
   // 15s ping / 10s 超时 / 连续 4 次才断开（约 40s 无 pong）。
   s_ws.enableHeartbeat(15000, 10000, 4);
+  // 设备唯一标识：eFuse 出厂 MAC（每颗芯片唯一，掉电/重刷不丢）。
+  // 服务端用它区分每台设备的对话历史（history_store 按 device_id 键存），
+  // 多台设备即使共用同一 API Key 也各有一份独立历史。
+  static char s_device_id[13];
+  uint8_t mac[6];
+  esp_efuse_mac_get_default(mac);
+  snprintf(s_device_id, sizeof(s_device_id), "%02x%02x%02x%02x%02x%02x",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  static char s_api_headers[220];
+  // 注意：库在 extraHeaders 后会自己追加换行（WebSocketsClient.cpp
+  // sendHeader: handshake += extraHeaders + NEW_LINE），因此多个头之间用
+  // \r\n 分隔、整体不能再以 \r\n 结尾，否则握手头会提前空行，残留字节
+  // 被当非法 WS 帧导致连接 0ms 被杀。
   if (SERVER_API_KEY[0] != '\0') {
-    static char s_api_headers[160];
-    // 注意：库在 extraHeaders 后会自己追加换行，这里不能再带 \r\n，
-    // 否则握手头会提前空行，残留字节被当非法 WS 帧导致连接 0ms 被杀。
-    snprintf(s_api_headers, sizeof(s_api_headers), "X-Api-Key: %s",
-             SERVER_API_KEY);
+    snprintf(s_api_headers, sizeof(s_api_headers),
+             "X-Device-Id: %s\r\nX-Api-Key: %s",
+             s_device_id, SERVER_API_KEY);
     s_ws.setExtraHeaders(s_api_headers);
-    Serial.println("[WS] 已附加 X-Api-Key 鉴权头");
+    Serial.printf("[WS] 已附加鉴权头 device=%s\n", s_device_id);
+  } else {
+    snprintf(s_api_headers, sizeof(s_api_headers), "X-Device-Id: %s",
+             s_device_id);
+    s_ws.setExtraHeaders(s_api_headers);
+    Serial.printf("[WS] 已附加设备标识头 device=%s\n", s_device_id);
   }
   s_target_ready = true;
   Serial.printf("[WS] 目标服务器: ws://%s:%d%s（心跳 15s）\n", SERVER_HOST,
