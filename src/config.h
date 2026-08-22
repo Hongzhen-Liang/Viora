@@ -125,7 +125,12 @@
 #define MAX_CONSEC_ERRORS 2    // 连续多次未识别/服务器错误（如背景音乐被当语音）→ 回待唤醒
 #define ENABLE_BARGE_IN        1      // 播放中说话可打断；依赖 AFE AEC
 #define BARGE_IN_GUARD_MS      450    // 回答刚开始时避免瞬态误打断
-#define BARGE_IN_VOICE_FRAMES  5      // AEC 后连续约 160ms 人声才打断
+#define BARGE_IN_VOICE_FRAMES  3      // 连续约 96ms 的近端强语音才打断
+// 正式 TTS 抢话还必须有当前原始麦克风能量。AFE VAD 单独命中可能只是
+// 未完全消除的扬声器回声。实机上个别 TTS 音节回采可达 687/312，
+// 因此按“宁可需要更响地抢话，也不允许设备自打断”的取舍提高峰值门限。
+#define BARGE_IN_PEAK_MIN      850
+#define BARGE_IN_RMS_MIN       220
 
 // 服务端/网络异常不能让设备永久卡在“处理中”或“播放中”。
 #define PROCESSING_TIMEOUT_MS      45000 // audio_end 后最久等待首个 tts_start

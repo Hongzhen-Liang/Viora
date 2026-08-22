@@ -14,6 +14,10 @@
 #include "provisioning.h"
 
 static WebSocketsClient s_ws;
+// links2004/WebSocketsClient is not thread-safe. The main loop receives via
+// loop() while ws_tx_worker sends from another core; serialize both directions
+// or a barge-in's cancel/audio_start burst can corrupt lwIP pbuf references.
+static SemaphoreHandle_t s_ws_mutex = nullptr;
 static bool s_ws_connected = false;
 static NetCallbacks s_cb = {};
 
@@ -121,9 +125,11 @@ static void ws_tx_worker(void *) {
       vTaskDelay(pdMS_TO_TICKS(2));
       continue;
     }
+    if (s_ws_mutex) xSemaphoreTakeRecursive(s_ws_mutex, portMAX_DELAY);
     const bool ok = frame.kind == 0
                         ? s_ws.sendBIN(frame.data, frame.len)
                         : s_ws.sendTXT(frame.data, frame.len);
+    if (s_ws_mutex) xSemaphoreGiveRecursive(s_ws_mutex);
     portENTER_CRITICAL(&s_tx_mux);
     if (generation == s_tx_generation) {
       if (ok) s_tx_sent_bytes += frame.len;
@@ -277,6 +283,7 @@ static void start_websocket() {
 // ============================================================
 void net_init(const NetCallbacks &cb) {
   s_cb = cb;
+  if (s_ws_mutex == nullptr) s_ws_mutex = xSemaphoreCreateRecursiveMutex();
   prov_setup();  // 加载 NVS 里保存过的 WiFi（出门配网用）
   s_wifi_down_since = millis();  // 配网超时从开机算起，而不是从首次断网算起
   wifi_connect();
@@ -368,9 +375,9 @@ void net_loop() {
   // 该库一次 loop() 只消费一帧，不能只按主采音循环（约 32ms）调用一次。
   // 多次空轮询成本很低；有积压时则可一次清掉服务端的 TTS 预缓冲批次，
   // 也避免 Pong 长时间排在 PCM 后面被客户端自己的心跳误判超时。
-  for (uint8_t i = 0; i < WS_LOOP_PUMP_PASSES; ++i) {
-    s_ws.loop();
-  }
+  if (s_ws_mutex) xSemaphoreTakeRecursive(s_ws_mutex, portMAX_DELAY);
+  for (uint8_t i = 0; i < WS_LOOP_PUMP_PASSES; ++i) s_ws.loop();
+  if (s_ws_mutex) xSemaphoreGiveRecursive(s_ws_mutex);
 }
 
 bool net_connected() {
@@ -397,7 +404,10 @@ bool net_send_audio(const uint8_t *data, size_t len) {
   if (!s_ws_connected || s_tx_task == nullptr) {
     // 回退路径：无发送任务时仍直接发（极端低内存场景）
     if (!s_ws_connected || data == nullptr || len == 0) return false;
-    return s_ws.sendBIN((uint8_t *)data, len);
+    if (s_ws_mutex) xSemaphoreTakeRecursive(s_ws_mutex, portMAX_DELAY);
+    const bool ok = s_ws.sendBIN((uint8_t *)data, len);
+    if (s_ws_mutex) xSemaphoreGiveRecursive(s_ws_mutex);
+    return ok;
   }
   return tx_push(0, data, len);
 }
@@ -406,7 +416,9 @@ void net_send_json(const char *json) {
   if (json == nullptr) return;
   const size_t len = strlen(json);
   if (s_tx_task == nullptr) {
+    if (s_ws_mutex) xSemaphoreTakeRecursive(s_ws_mutex, portMAX_DELAY);
     s_ws.sendTXT(json);
+    if (s_ws_mutex) xSemaphoreGiveRecursive(s_ws_mutex);
     return;
   }
   tx_push(1, reinterpret_cast<const uint8_t *>(json), len);

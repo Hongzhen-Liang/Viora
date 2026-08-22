@@ -169,7 +169,8 @@ static void keep_latest_ring_audio(uint32_t keep_ms) {
 
 // 发 audio_start 并进入下一轮聆听。唤醒和打断会把缓存的前置音频先上传，
 // 从而保住紧跟唤醒词/打断发生前的首字；普通追问不携带扬声器尾音。
-static void enter_listening(ListenOrigin origin, bool force_preroll = false) {
+static void enter_listening(ListenOrigin origin, bool force_preroll = false,
+                            bool tx_already_flushed = false) {
   if (!net_connected()) {
     set_state(ST_IDLE);
     g_audio.ringClear();
@@ -181,7 +182,7 @@ static void enter_listening(ListenOrigin origin, bool force_preroll = false) {
   net_set_idle_power_save(false);
   // 清空上一轮残留的发送队列并归零发送统计：本轮的 PCM 时钟
   // （audio_end 里的 pcm_ms）从零重新累计。
-  net_audio_flush();
+  if (!tx_already_flushed) net_audio_flush();
 
   const bool keep_preroll = force_preroll ||
       origin == LISTEN_FROM_WAKE || origin == LISTEN_FROM_BARGE_IN;
@@ -190,6 +191,9 @@ static void enter_listening(ListenOrigin origin, bool force_preroll = false) {
   // 使上一轮尚未返回的 AFE 结果失效。该操作非阻塞，
   // 不会让聆听链路再次等待 esp-sr fetch。
   speech_async_reset();
+  // The auxiliary VAD is fed continuously, including during TTS. Do not let a
+  // speaker-echo decision leak into the first silent frame after playback.
+  wake_word.reset();
   set_state(ST_LISTENING);
   s_listen_origin = origin;
   s_listen_speech.reset();
@@ -727,23 +731,40 @@ void loop() {
       s_state == ST_WAKE_ACK && !s_ack_playing;
   if (playback_afe || idle_afe || listening_afe || wake_decision_afe) {
     speech_async_submit(pcm, playback_ref, frames);
-    // 队列中若有多帧，聆听态采用最新判定；播放态每帧都推进打断
-    // 连续证据，避免丢掉用户持续说话的信号。
+    // 队列中若有多帧，聆听态采用最新判定。播放态保留每帧 AFE 音频，
+    // 但每个真实采音周期最多累计一次打断证据，避免一次排空积压结果时
+    // 瞬间凑满 BARGE_IN_VOICE_FRAMES。
     bool afe_woken = false;
+    bool have_playback_result = false;
+    bool playback_speech = false;
     while (speech_async_poll(afe_out, &is_speech, &afe_woken)) {
       have_afe = true;
       if (afe_woken && s_state == ST_IDLE) woken = true;
 #if ENABLE_BARGE_IN
       if (!playback_afe) continue;
       g_audio.ringPush(afe_out, speech_fetch_size());
+      have_playback_result = true;
+      playback_speech = is_speech;
+#endif
+    }
+#if ENABLE_BARGE_IN
+    if (playback_afe && have_playback_result) {
       const bool local_ack = s_state == ST_WAKE_ACK;
       const uint32_t guard_ms =
           local_ack ? WAKE_ACK_BARGE_GUARD_MS : BARGE_IN_GUARD_MS;
       const uint16_t required_frames =
           local_ack ? WAKE_ACK_BARGE_VOICE_FRAMES : BARGE_IN_VOICE_FRAMES;
+      const bool raw_voice =
+          vol_l >= BARGE_IN_PEAK_MIN &&
+          g_audio.captureRms() >= BARGE_IN_RMS_MIN;
+      // During playback the AFE VAD may either retain residual speaker echo or
+      // suppress a real near-end voice together with that echo. Sustained raw
+      // near-end energy is therefore the hard gate for both acknowledgement
+      // and normal TTS; measured self-echo stays below these thresholds.
+      const bool confirmed_voice = raw_voice;
       const uint32_t now = millis();
       if (elapsed_at_least(now, s_playback_start_ms, guard_ms)) {
-        if (is_speech) ++s_barge_voice_frames;
+        if (confirmed_voice) ++s_barge_voice_frames;
         else s_barge_voice_frames = 0;
         if (s_barge_voice_frames >= required_frames) {
           s_accept_tts_audio = false;
@@ -753,17 +774,37 @@ void loop() {
             // 纯本地确认音没有服务端任务可取消；这仍是新唤醒会话。
             enter_listening(LISTEN_FROM_WAKE_ACK, true);
           } else {
-            Serial.println(">>> 检测到用户打断，立即停止当前回复");
+            Serial.printf(
+                ">>> 检测到用户打断，立即停止当前回复（peak=%d rms=%u）\n",
+                static_cast<int>(vol_l),
+                static_cast<unsigned>(g_audio.captureRms()));
+            // Flush stale audio/control frames before queuing cancel. Passing
+            // tx_already_flushed prevents enter_listening() from deleting the
+            // just-queued cancel; wire order is cancel -> audio_start -> PCM.
+            net_audio_flush();
             net_send_json("{\"type\":\"cancel\",\"reason\":\"barge_in\"}");
-            enter_listening(LISTEN_FROM_BARGE_IN);
+            enter_listening(LISTEN_FROM_BARGE_IN, false, true);
           }
-          // enter_listening 已发送 AEC 前置；本帧不能再按新 LISTENING
-          // 重复上传，也不能复用旧世代 AFE 结果。
           return;
         }
       }
-#endif
     }
+#if ENABLE_HEALTH_LOG
+    if (playback_afe) {
+      static uint32_t last_barge_log_ms = 0;
+      const uint32_t barge_now = millis();
+      if (barge_now - last_barge_log_ms >= 500) {
+        last_barge_log_ms = barge_now;
+        Serial.printf(
+            "[BARGE] afe=%d speech=%d peak=%d rms=%u evidence=%u\n",
+            have_playback_result ? 1 : 0, playback_speech ? 1 : 0,
+            static_cast<int>(vol_l),
+            static_cast<unsigned>(g_audio.captureRms()),
+            static_cast<unsigned>(s_barge_voice_frames));
+      }
+    }
+#endif
+#endif
   }
 
   if (s_state == ST_IDLE || s_state == ST_WAKE_ACK ||
