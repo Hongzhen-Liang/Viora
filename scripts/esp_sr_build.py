@@ -1,11 +1,8 @@
-"""PlatformIO extra script: ESP-SR AFE + official TensorFlow Lite Micro.
-
-The firmware keeps ESP-SR 1.9.2 for noise suppression/VAD, but wake-word
-inference is provided by our own full-int8 model through Espressif's official
-esp-tflite-micro 1.3.2 component (the IDF 4.4-compatible release).
-"""
+"""PlatformIO extra script: ESP-SR AFE + WakeNet support."""
 
 import os
+import subprocess
+import sys
 
 from SCons.Script import DefaultEnvironment
 
@@ -16,6 +13,23 @@ ESP_SR = os.path.join(PROJECT_DIR, "components", "esp-sr")
 ESP_DSP = os.path.join(PROJECT_DIR, "components", "esp-dsp")
 ESP_TFLM = os.path.join(PROJECT_DIR, "components", "esp-tflite-micro")
 ESP_NN = os.path.join(PROJECT_DIR, "components", "esp-nn")
+BUILD_DIR = env.subst("$BUILD_DIR")
+
+# ESP-SR 1.x expects S3 WakeNet weights in a flash partition named `model`.
+# PlatformIO/Arduino does not run esp-sr's IDF CMake model packer, so package
+# the one selected model explicitly during the pre-build step.
+model_source = os.path.join(
+    ESP_SR, "model", "wakenet_model", "wn9_nihaoxiaoxin_tts"
+)
+model_output = os.path.join(BUILD_DIR, "srmodels.bin")
+if not os.path.isfile(model_output):
+    subprocess.check_call([
+        sys.executable,
+        os.path.join(PROJECT_DIR, "scripts", "package_wakenet_model.py"),
+        "--source", model_source,
+        "--output", model_output,
+    ])
+    print("已生成 WakeNet 模型分区镜像: %s" % model_output)
 
 for required in (ESP_SR, ESP_DSP, ESP_TFLM, ESP_NN):
     if not os.path.isdir(required):
@@ -231,7 +245,6 @@ for tag, relative, names in (
         src_filter=source_filter,
     )
 
-# ESP-SR prebuilt library. It now contains only AFE/VAD/NS in the live path;
-# no WakeNet model partition is loaded or flashed.
+# ESP-SR prebuilt library, including the built-in WakeNet model runtime.
 env.Append(LIBPATH=[os.path.join(ESP_SR, "lib", "esp32s3_merged")])
 env.Append(LIBS=["espsr"])

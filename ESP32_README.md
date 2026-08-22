@@ -3,7 +3,7 @@
 > 本文档面向 **ESP32 端**项目，说明如何接入 Mac 上的 Viora 服务器。
 >
 > ESP32 端职责（只做这四件事）：
-> 1. **唤醒词检测**（micro-wake-word 官方框架本地训练的流式模型，"Hi Vesper"）
+> 1. **唤醒词检测**（ESP-SR WakeNet 内置模型，"nihaoxiaoxin（你好小鑫）"）
 > 2. **录音上传**（16k/16bit PCM，经 WebSocket）
 > 3. **接收音频播放**（服务器下发的合成语音）
 > 4. **传感器采集上报**（土壤湿度 / 温湿度 / 光照）
@@ -29,12 +29,12 @@ src/
 │   ├── audio_manager.h       # AudioManager：INMP441 + MAX98357A（共享 I2S 全双工）
 │   └── audio_manager.cpp
 ├── ai/
-│   ├── wake_word.h           # WakeWordManager 接口（detectWakeWord，后端=micro-wake-word）
+│   ├── wake_word.h           # WakeWordManager 兼容接口（独立 VAD；唤醒由 AFE WakeNet 返回）
 │   ├── wake_word.cpp
 │   ├── ai_manager.h          # AIManager 接口预留（Mic→WakeWord→ASR→LLM→TTS→播放，mock）
 │   └── ai_manager.cpp
 ├── net.cpp / provisioning.*  # WiFi 配网 + WebSocket 上传/接收
-├── speech.*                  # esp-sr AFE（AEC + 神经 VAD）
+├── speech.*                  # esp-sr AFE（AEC + 神经 VAD + WakeNet 9）
 ├── turn_detector.* / vad.*   # 轮次状态机 / 能量 VAD
 └── led.* / wake_ack_data.*   # 状态灯 / 本地确认音
 ```
@@ -56,8 +56,8 @@ src/
 | `bblanchon/ArduinoJson` | JSON 控制帧解析 |
 
 ESP-IDF 组件（本地 `components/`，`scripts/fetch_components.py` 拉取）：
-`esp-sr`（AFE/神经 VAD/独立 VAD）、`esp-tflite-micro`（唤醒词模型运行时）、
-`esp-dsp`、`esp-nn`。传感器使用 Arduino 库，无需额外 ESP-IDF 组件。
+`esp-sr`（AFE/神经 VAD/独立 VAD/WakeNet 9）、`esp-dsp`、`esp-nn`。
+传感器使用 Arduino 库，无需额外 ESP-IDF 组件。
 
 ---
 
@@ -68,7 +68,7 @@ sequenceDiagram
     participant E as ESP32
     participant S as Mac 服务器(8765)
 
-    Note over E: 唤醒词 "Hi Vesper" 命中
+    Note over E: WakeNet 唤醒词“你好小鑫”命中
     E->>S: {"type":"audio_start"}
     E->>S: 二进制 PCM（连续流式发送）
     E->>S: {"type":"audio_end"}
@@ -160,8 +160,8 @@ MAX98357 OK
    VDD=3.3V。正常说话时 `[HEALTH]` 日志的 `mic_peak`/`mic_rms` 会明显抬升
    （`config.h` 的 `ENABLE_HEALTH_LOG` 设为 1 开启）。
 4. **喇叭（MAX98357A）**：若 `MAX98357 FAIL`，检查 DIN=GPIO15、BCLK/WS 与
-   麦克风共享、VIN=5V。对设备说唤醒词“Hi Vesper”，应听到确认音/回复。
-5. **无线对话**：连上 VioraServer 后说“Hi Vesper”+指令，走完整
+   麦克风共享、VIN=5V。对设备说唤醒词“你好小鑫”，应听到确认音/回复。
+5. **无线对话**：连上 VioraServer 后说“你好小鑫”+指令，走完整
    麦克风→唤醒→上传→ASR→LLM→TTS→播放 链路。
 
 > 排查时若 `Audio` 报 `FAIL`，`[AUDIO] I2S init failed` 会打印具体错误码
@@ -271,7 +271,7 @@ lib_deps =
 | `schreibfaul1/ESP32-audioI2S` | （可选）封装好的 I2S 输入输出 |
 | `DHT sensor library` | 温湿度 |
 | ESP-SR（ESP-IDF 组件） | 神经 VAD + 降噪（AFE，见 §7） |
-| TFLite Micro + ESP-NN | micro-wake-word 预训练流式模型（INT8，含变量算子） |
+| ESP-SR + ESP-NN | AFE、神经 VAD 与 WakeNet 9 推理 |
 
 ---
 
@@ -352,7 +352,7 @@ bool mic_begin();                    // 初始化 I2S 麦克风
 bool speaker_begin();                // 初始化 I2S 功放
 int  mic_read(int16_t* buf, int samples);   // 读一帧 PCM，返回样本数
 void speaker_play(const uint8_t* data, size_t len); // 播放一段 PCM
-bool wake_word_detected();           // 自研唤醒词 "Hi Vesper" 是否命中
+bool wake_word_detected();           // AFE WakeNet 是否命中“你好小鑫”
 
 WebSocketsClient ws;
 bool collecting = false;             // 是否处于"录音上传"状态
@@ -473,33 +473,24 @@ void loop() {
 
 ## 7. 唤醒词检测 + 断句 VAD
 
-项目把唤醒与对话音频前端分开处理：
+项目使用同一条 ESP-SR AFE 连续音频流完成唤醒和对话前端：
 
-- **唤醒词**：采用 [micro-wake-word](https://github.com/OHF-Voice/micro-wake-word)
-  官方框架**本地训练**的流式模型（唤醒词 "Hi Vesper"，Piper 合成样本 +
-  TTS 负样本重训，训练流水线见 `wake_word_training/mww/README.md`）。
-  microfeatures 前端（tflite-micro micro_speech 预处理，含降噪 + PCAN）把 16 kHz PCM
-  每 10 ms 产出 40 维 int8 特征；流式模型输入 `[1,3,40]`，每 30 ms 推理一次，输出
-  0-255 概率；最近 5 帧滑窗均值超过阈值（当前 0.40）即触发。重新武装/命中后
-  有约 1 s 冷却防重复触发与扬声器 TTS 尾音泄漏。模型与阈值元数据见
-  `src/mww_model_data.*` / `src/mww_model_config.h`，换模型用
-  `scripts/convert_mww_model.py`。
-- **大声/贴麦兜底**：INMP441 在用户大喊或贴着麦克风讲话时会**硬饱和削顶**（实测
-  `mic_peak=32767` / `rms≈2 万`），削顶破坏波形形状，模型分数归零。固件两道防线：
-  ① KWS 输入 **AGC**（`wake_word.cpp` `apply_kws_agc`，瞬时压增益、目标峰值 6000，
-  只衰减不放大），让中大声但未饱和的语音回到正常电平被模型识别；② **大声兜底唤醒**
-  （yell-to-wake）：武装态下最近 ~0.5 s 内 ≥5 帧峰值 ≥8000 且独立 VAD 报语音，
-  判定"有人在朝设备喊/贴着讲"直接触发唤醒（`kLoud*` 常量可调）。正常说话峰值仅
-  ~4.7k，正常对话不受影响；放电视/音乐等持续高声可能误醒，属设计取舍。
+- **唤醒词**：使用 Espressif 官方 `wn9_nihaoxiaoxin_tts`，口令为“你好小鑫”，
+  不需要自行训练。`scripts/package_wakenet_model.py` 在构建时把模型打包成
+  `srmodels.bin`，并写入分区表中的 `model` 分区（偏移 `0x410000`）。
+- **连续流要求**：AFE 的 feed 与 fetch 分属两个 FreeRTOS 任务。WakeNet 约需
+  1.5 秒感受野；不能在喂一帧后由同一任务阻塞等待 fetch，否则会超时且永不命中。
+- **增益**：采用 ESP-SR 默认的 `AFE_MN_PEAK_AGC_MODE_2`，让正常距离下约
+  -35～-30 dBFS 的 INMP441 语音稳定进入 WakeNet。
 - **断句端点**：AFE 内置**神经 VAD**（`vad_state`）判断“是否有人说话”，替代能量门限——背景音乐不会被当成人声，音乐播放中也能正确结束对话；能量法（`vad.*`）仅留作诊断。
 - **降噪**：AFE 输出增强音频（NS_MODE_SSP），上传给服务器 Whisper 的也是增强后的 PCM。
-- **WakeNet 已关闭**：不加载 `wn9_nihaoxiaozhi`，不生成/烧录 `srmodels.bin`，不再需要
-  `model` 分区。AFE 配置为单麦、无参考通道（`aec_init=false`），内存优先放 PSRAM。
+- **WakeNet**：启用 `wn9_nihaoxiaoxin_tts`。AFE 配置为单麦 + 扬声器参考通道，
+  开启 AEC，并优先把工作内存放入 PSRAM。
 
 > 注意：`src/esp_afe_sr_1mic.ref` 是新版本模板，与 1.9.2 头文件不兼容，不要编译；直接用 `esp_afe_sr_models.h` 里的 `ESP_AFE_SR_HANDLE.create_from_config()`。
 
-> 当前 N16R8 板端实测模型 62,304 bytes（本地训练 hi_vesper），tensor arena 约 26 KB
-> （内部 SRAM），单次推理约 40-60 ms（30 ms 一次）；ESP32-S3 带 PSRAM 用于音频和 AFE 缓冲。
+> 当前 `srmodels.bin` 约 284 KB。首次或模型变化后除普通固件上传外，还需把它烧录到
+> `0x410000`；仅更新应用固件不会擦除该模型分区。
 
 ---
 

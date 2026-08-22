@@ -2,13 +2,13 @@
 
 > 本 README 是 **Mac 服务器端新项目**的完整规格说明书。用它作为蓝本，在 Mac 上新建一个独立项目（例如 `viora-server/`），实现"语音识别 → 大模型对话 → 语音合成"的编排服务。
 >
-> ESP32 端只负责：**micro-wake-word 唤醒检测（预训练流式模型）+ 录音上传（断句由神经 VAD 判定）+ 接收音频播放 + 传感器采集**。所有语音理解、对话、合成都在 Mac 端完成。
+> ESP32 端只负责：**ESP-SR WakeNet 唤醒检测（nihaoxiaoxin）+ 录音上传（断句由神经 VAD 判定）+ 接收音频播放 + 传感器采集**。所有语音理解、对话、合成都在 Mac 端完成。
 
 ---
 
 ## 1. 项目定位
 
-Viora 是一个"植物陪伴 Agent"。用户对盆栽说唤醒词 **Hi Vesper**（micro-wake-word 官方框架本地训练的英文唤醒词）后开始说话，ESP32 把音频发给 Mac 服务器，服务器依次完成：
+Viora 是一个"植物陪伴 Agent"。用户对盆栽说唤醒词 **nihaoxiaoxin（你好小鑫）**（ESP-SR 内置 WakeNet 模型）后开始说话，ESP32 把音频发给 Mac 服务器，服务器依次完成：
 
 ```
 音频 → ASR(Whisper) → LLM(DeepSeek) → TTS(edge-tts) → 音频回传 → ESP32 播放
@@ -28,7 +28,7 @@ sequenceDiagram
     participant D as DeepSeek API
     participant T as edge-tts(在线)
 
-    Note over E: micro-wake-word 唤醒词 "Hi Vesper" 命中
+    Note over E: WakeNet 唤醒词 "nihaoxiaoxin" 命中
     E->>S: {"type":"audio_start"}
     E->>S: 二进制 PCM（连续流式发送）
     E->>S: {"type":"audio_end"}

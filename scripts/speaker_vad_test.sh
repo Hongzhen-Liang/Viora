@@ -3,6 +3,7 @@
 # cmd_zh.wav 由完整音色名 "Reed (Chinese (China mainland))" 生成（短名无效）。
 set -u
 OUT="${OUT:-/tmp/viora_speaker_test}"
+PORT="${PORT:-$(find /dev -maxdepth 1 -name 'cu.usbmodem*' -print -quit)}"
 PYSERIAL_PY="${PYSERIAL_PY:-/Users/hongzhenliang/.platformio/penv/bin/python}"
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 ts() { date +%H:%M:%S; }
@@ -14,12 +15,12 @@ play() { echo ">> [$(ts)] 播放 $1"; afplay -v 1.0 "$OUT/$1.wav"; }
     -af "loudnorm=I=-14:TP=-1.5:LRA=7" -ar 44100 "$OUT/cmd_zh.wav"
 }
 
-"$PYSERIAL_PY" "$SCRIPT_DIR/serial_log.py" /dev/cu.usbmodem21101 115200 60 > "$OUT/serial_vad3.log" 2>"$OUT/serial_vad3.err" &
+"$PYSERIAL_PY" "$SCRIPT_DIR/serial_log.py" "$PORT" 115200 60 > "$OUT/serial_vad3.log" 2>"$OUT/serial_vad3.err" &
 LOGPID=$!
 sleep 2
 
-echo "== 唤醒 Daniel -> 中文指令 -> 背景 =="
-play wake_Daniel; sleep 3
+echo "== 唤醒 Tingting -> 中文指令 -> 背景 =="
+play wake_Tingting; sleep 3
 play cmd_zh; sleep 12
 play bg_noise; sleep 8
 

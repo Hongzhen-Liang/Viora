@@ -1,7 +1,6 @@
 #pragma once
 // ============================================================
-// 语音模块：esp-sr AFE（仅神经 VAD + 降噪）
-//   自研 Hi Vesper 唤醒检测位于 wake_word.*。
+// 语音模块：esp-sr AFE（AEC + 神经 VAD + 降噪 + WakeNet）
 // ============================================================
 #include <Arduino.h>
 
@@ -15,7 +14,7 @@ int speech_feed_size();
 int speech_fetch_size();
 
 // AFE fetch 在 esp-sr 1.9.2 中是同步等待接口，绝不允许从主循环
-// 直接调用。下面的 API 通过独立 FreeRTOS 任务处理 AEC/VAD：
+// 直接调用。下面的 API 通过独立 feed/fetch FreeRTOS 任务处理 AFE：
 // 即使 AFE 底层卡住，WebSocket 和 TTS 播放也不会受影响。
 
 // 开始新一轮 AFE：立即使旧结果失效，真正 reset 由工作任务完成。
@@ -27,4 +26,4 @@ bool speech_async_submit(const int16_t *mic, const int16_t *reference,
                          int samples);
 
 // 非阻塞取一帧 AFE 结果。返回 false 表示当前没有新结果。
-bool speech_async_poll(int16_t *out, bool *is_speech);
+bool speech_async_poll(int16_t *out, bool *is_speech, bool *woken);

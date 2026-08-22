@@ -4,7 +4,7 @@
 # 依赖: macOS say/afplay/ffmpeg；scripts/serial_log.py 读设备串口日志（带时间戳）。
 set -u
 
-PORT="${PORT:-/dev/cu.usbmodem21101}"
+PORT="${PORT:-$(find /dev -maxdepth 1 -name 'cu.usbmodem*' -print -quit)}"
 OUT="${OUT:-/tmp/viora_speaker_test}"
 PYSERIAL_PY="${PYSERIAL_PY:-/Users/hongzhenliang/.platformio/penv/bin/python}"
 SERVER_LOG="${SERVER_LOG:-/Volumes/T7_APFS/Github/ESP32Projects/Viora/VioraServer/server.log}"
@@ -22,13 +22,20 @@ say_clip() { # name text voice
 }
 play() { echo ">> [$(ts)] 播放 $1"; afplay -v 1.0 "$OUT/$1.wav"; }
 
+if [ -z "$PORT" ]; then
+  echo "未找到 /dev/cu.usbmodem*；请用 PORT=/dev/cu.xxx 指定串口" >&2
+  exit 1
+fi
+
 echo "== 生成唤醒/近音/背景/指令音频 =="
-for v in Samantha Daniel Karen; do say_clip "wake_$v" "Hi Vesper" "$v"; done
-say_clip near_jasper "Hi Jasper" Daniel
-say_clip near_heyvesper "Hey Vesper" Daniel
-say_clip near_byevesper "Bye Vesper" Daniel
-say_clip near_bestfriend "Hi Best Friend" Daniel
-say_clip near_jasper_karen "Hi Jasper" Karen
+for v in Tingting "Reed (Chinese (China mainland))" "Flo (Chinese (China mainland))"; do
+  safe_v="${v%% *}"
+  say_clip "wake_$safe_v" "你好小鑫" "$v"
+done
+say_clip near_xiaoxin "你好小新" Tingting
+say_clip near_xiaozhi "你好小智" Tingting
+say_clip near_xiaoxin_only "小鑫" Tingting
+say_clip near_nihao "你好" Tingting
 ffmpeg -y -loglevel error -f lavfi -i "anoisesrc=color=brown:amplitude=0.45:duration=22" \
   -ar 44100 "$OUT/bg_noise.wav"
 say_clip cmd_time "现在几点了" Reed
@@ -39,10 +46,10 @@ LOGPID=$!
 sleep 2
 
 echo "== 1) 唤醒矩阵（3 音色，间隔 4s） =="
-for v in Samantha Daniel Karen; do play "wake_$v"; sleep 4; done
+for v in Tingting Reed Flo; do play "wake_$v"; sleep 4; done
 
 echo "== 2) 近音误醒（间隔 3s） =="
-for f in near_jasper near_heyvesper near_byevesper near_bestfriend near_jasper_karen; do
+for f in near_xiaoxin near_xiaozhi near_xiaoxin_only near_nihao; do
   play "$f"; sleep 3
 done
 
@@ -50,7 +57,7 @@ echo "== 3) 背景噪声 22s（应零误醒） =="
 play bg_noise; sleep 1
 
 echo "== 4) 端到端：唤醒 -> 中文指令（扬声器代说） =="
-play wake_Daniel; sleep 3
+play wake_Tingting; sleep 3
 # 中文指令音源必须是完整音色名生成（"Reed (Chinese (China mainland))"），
 # 短名 `say -v Reed` 产出的 cmd_time.wav 是 0.01s 静音。
 [ -f "$OUT/cmd_zh.wav" ] || {

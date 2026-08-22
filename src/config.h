@@ -10,14 +10,9 @@
 #include "hardware/hardware_config.h"
 
 // ============================================================
-// 唤醒词（仅用于串口提示与日志；实际检测由 micro-wake-word 流式模型完成，
-// 见 src/ai/wake_word.cpp，经 WakeWordManager 接口调用）
-// 当前使用 wake_word_training/mww 官方框架训练的 "Hi Vesper" 模型
-// （Piper 合成样本，mixednet v2 架构）。换模型：scripts/convert_mww_model.py
-// 重新生成 src/mww_model_data.* 与 src/mww_model_config.h，再把这里的提示
-// 字符串改成对应唤醒词。
+// 唤醒词由 ESP-SR AFE WakeNet 模型 wn9_nihaoxiaoxin_tts 提供。
 // ============================================================
-#define WAKE_WORD "Hi Vesper"
+#define WAKE_WORD "nihaoxiaoxin"
 // 本地唤醒确认音：KWS 命中后先进入决定窗（WAKE_ACK_DECIDE_MS，期间不
 // 开播不上传），窗内检测到连续人声说明用户紧跟指令 → 直接应答；无人声
 // 才判定纯唤醒：本地播放确认音（scripts/gen_wake_ack.py 生成），唤醒轮

@@ -2,9 +2,7 @@
 // ============================================================
 // WakeWordManager —— 唤醒词检测接口预留
 //
-//   当前后端：micro-wake-word "Hi Vesper" 流式模型（见本目录 wake_word.cpp）
-//   未来可接：microWakeWord / ESP-SR 等（只需替换本模块内部实现，
-//             保持 detectWakeWord() 接口不变即可）。
+//   当前后端：ESP-SR AFE WakeNet（wn9_nihaoxiaoxin_tts）。
 // ============================================================
 #include <Arduino.h>
 

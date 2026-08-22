@@ -563,7 +563,7 @@ void setup() {
                 static_cast<unsigned>(getCpuFrequencyMhz()));
   // 语音 AFE（esp-sr，AEC + 神经 VAD）
   const bool afe_ok = speech_init();
-  // 唤醒词（micro-wake-word，经 WakeWordManager 接口）
+  // 唤醒词（ESP-SR WakeNet，经 AFE fetch 结果返回）
   const bool kws_ok = wake_word.begin();
   if (!afe_ok || !kws_ok) {
     Serial.printf("[SYS] 语音初始化失败: AFE=%s KWS=%s\n",
@@ -690,10 +690,10 @@ void loop() {
     g_audio.ringPush(pcm, frames);
   }
 
-  const bool kws_enabled = ENABLE_MIC_CAPTURE ? false : (s_state == ST_IDLE);
   float wake_probability = 0.0f;
-  const bool woken = wake_word.detectWakeWord(
-      AudioBuffer{pcm, frames}, kws_enabled, &wake_probability);
+  bool woken = false;
+  // Keep the lightweight auxiliary VAD fed; WakeNet itself runs in AFE.
+  wake_word.detectWakeWord(AudioBuffer{pcm, frames}, true, &wake_probability);
 #if ENABLE_HEALTH_LOG
   s_health_wake_probability = wake_probability;
 
@@ -717,19 +717,22 @@ void loop() {
   // 播放态提交真实扬声器参考，聆听态提交零参考；两者都由独立 AFE
   // 工作任务处理。主循环只轮询结果，所以 esp-sr fetch 不会阻塞
   // WebSocket/TTS。聆听仍上传原始 PCM，保持样本时钟完整；AFE 输出
-  // 仅负责神经 VAD，后续可在带时间戳/尾帧 flush 后再切增强 PCM 上传。
+  // 负责 WakeNet 与神经 VAD；后续可在带时间戳/尾帧 flush 后再切增强 PCM 上传。
   static int16_t afe_out[512];
   bool is_speech = false;
   bool have_afe = false;
   const bool listening_afe = s_state == ST_LISTENING;
+  const bool idle_afe = s_state == ST_IDLE;
   const bool wake_decision_afe =
       s_state == ST_WAKE_ACK && !s_ack_playing;
-  if (playback_afe || listening_afe || wake_decision_afe) {
+  if (playback_afe || idle_afe || listening_afe || wake_decision_afe) {
     speech_async_submit(pcm, playback_ref, frames);
     // 队列中若有多帧，聆听态采用最新判定；播放态每帧都推进打断
     // 连续证据，避免丢掉用户持续说话的信号。
-    while (speech_async_poll(afe_out, &is_speech)) {
+    bool afe_woken = false;
+    while (speech_async_poll(afe_out, &is_speech, &afe_woken)) {
       have_afe = true;
+      if (afe_woken && s_state == ST_IDLE) woken = true;
 #if ENABLE_BARGE_IN
       if (!playback_afe) continue;
       g_audio.ringPush(afe_out, speech_fetch_size());
