@@ -141,7 +141,8 @@
 // 服务端/网络异常不能让设备永久卡在“处理中”或“播放中”。
 #define PROCESSING_TIMEOUT_MS      45000 // audio_end 后最久等待首个 tts_start
 #define PLAYING_STALL_TIMEOUT_MS   15000 // tts_start 后连续无 PCM/tts_end 的上限
-#define PLAYING_MAX_MS             60000 // 含本地播放排空在内的绝对上限
+#define PLAYING_DRAIN_GRACE_MS     10000 // tts_end 后按剩余 PCM 时长另加的排空容差
+#define PLAYING_SAFETY_MAX_MS     600000 // 极端异常的最后保险，正常长故事不会触发
 
 // 唤醒/打断前置音频：避免 KWS/VAD 固有延迟截掉紧跟唤醒词的首字。
 #define AUDIO_PREROLL_MS       900

@@ -74,6 +74,8 @@ static uint16_t s_barge_voice_frames = 0;
 static uint16_t s_barge_ref_rms_hold = 0;
 static uint32_t s_tts_last_activity_ms = 0;
 static bool s_tts_end_received = false;
+static uint32_t s_tts_end_received_ms = 0;
+static uint32_t s_tts_end_pending_bytes = 0;
 
 static uint16_t pcm_rms(const int16_t *samples, int count) {
   if (samples == nullptr || count <= 0) return 0;
@@ -441,14 +443,26 @@ static bool handle_state_watchdog() {
         !s_tts_end_received &&
         elapsed_at_least(now, s_tts_last_activity_ms,
                          PLAYING_STALL_TIMEOUT_MS);
-    const bool absolute_timeout =
-        elapsed_at_least(now, s_state_since_ms, PLAYING_MAX_MS);
-    if (stalled || absolute_timeout) {
+    const uint32_t drain_budget_ms = static_cast<uint32_t>(
+        s_tts_end_pending_bytes * 1000ULL /
+        (SR_SAMPLE_RATE * sizeof(int16_t))) + PLAYING_DRAIN_GRACE_MS;
+    const bool drain_timeout =
+        s_tts_end_received && s_tts_end_received_ms != 0 &&
+        elapsed_at_least(now, s_tts_end_received_ms, drain_budget_ms);
+    const bool safety_timeout =
+        elapsed_at_least(now, s_state_since_ms, PLAYING_SAFETY_MAX_MS);
+    if (stalled || drain_timeout || safety_timeout) {
+      const char *reason = stalled ? "数据停滞"
+                           : drain_timeout ? "播放排空超时"
+                                           : "超过安全上限";
       Serial.printf(
-          "[STATE] PLAYING %s（state=%lums activity=%lums），取消并恢复聆听\n",
-          stalled ? "数据停滞" : "超过绝对上限",
+          "[STATE] PLAYING %s（state=%lums activity=%lums "
+          "end_pending=%luB drain_budget=%lums），取消并恢复聆听\n",
+          reason,
           static_cast<unsigned long>(now - s_state_since_ms),
-          static_cast<unsigned long>(now - s_tts_last_activity_ms));
+          static_cast<unsigned long>(now - s_tts_last_activity_ms),
+          static_cast<unsigned long>(s_tts_end_pending_bytes),
+          static_cast<unsigned long>(drain_budget_ms));
       net_send_json("{\"type\":\"cancel\",\"reason\":\"playback_timeout\"}");
       retry_listening_after_failure();
       return true;
@@ -495,6 +509,8 @@ static void on_server_text(const char *type, const char *user,
     s_playback_start_ms = millis();
     s_tts_last_activity_ms = s_playback_start_ms;
     s_tts_end_received = false;
+    s_tts_end_received_ms = 0;
+    s_tts_end_pending_bytes = 0;
     s_tts_received_bytes = 0;
     reset_barge_evidence();
     speech_async_reset();
@@ -519,12 +535,14 @@ static void on_server_text(const char *type, const char *user,
     s_accept_tts_audio = false;
     s_tts_end_received = true;
     s_tts_last_activity_ms = millis();
+    s_tts_end_received_ms = s_tts_last_activity_ms;
+    s_tts_end_pending_bytes = g_audio.playBufferedBytes();
     g_audio.markTtsEnd();
     Serial.printf(
         ">>> TTS 接收完成：%luB（%.2fs PCM），待播放=%luB\n",
         static_cast<unsigned long>(s_tts_received_bytes),
         s_tts_received_bytes / 32000.0f,
-        static_cast<unsigned long>(g_audio.playBufferedBytes()));
+        static_cast<unsigned long>(s_tts_end_pending_bytes));
   } else if (strcmp(type, "error") == 0) {
     if (!accept_server_event(type, s_state == ST_LISTENING ||
                                       s_state == ST_PROCESSING ||
