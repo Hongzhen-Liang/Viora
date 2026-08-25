@@ -248,3 +248,123 @@ for tag, relative, names in (
 # ESP-SR prebuilt library, including the built-in WakeNet model runtime.
 env.Append(LIBPATH=[os.path.join(ESP_SR, "lib", "esp32s3_merged")])
 env.Append(LIBS=["espsr"])
+
+
+# PlatformIO's normal Arduino upload only writes the bootloader, partition table
+# and application image. ESP-SR model data lives in our separate `model`
+# partition, so upload it explicitly whenever the model, environment or port
+# changes. This is essential after moving the firmware to another board.
+MODEL_FLASH_BAUD = "921600"
+
+
+def _find_upload_port(build_env):
+    port = build_env.subst("$UPLOAD_PORT")
+    if port:
+        return port
+    try:
+        port = build_env.GetProjectOption("upload_port")
+        if port:
+            return port
+    except Exception:
+        pass
+    try:
+        from platformio.util import get_serial_ports
+
+        ports = get_serial_ports()
+        for item in ports:
+            name = item["port"].lower()
+            if "usbmodem" in name or "wchusb" in name or "usbserial" in name:
+                return item["port"]
+        if ports:
+            return ports[0]["port"]
+    except Exception:
+        pass
+    return None
+
+
+def _model_partition_offset():
+    partition_file = os.path.join(PROJECT_DIR, "partitions.csv")
+    with open(partition_file, encoding="utf-8") as handle:
+        for raw_line in handle:
+            line = raw_line.split("#", 1)[0].strip()
+            if not line:
+                continue
+            columns = [column.strip() for column in line.split(",")]
+            if len(columns) >= 4 and columns[0] == "model":
+                return columns[3]
+    raise RuntimeError("partitions.csv 中未找到 model 分区")
+
+
+def _model_digest(path):
+    import hashlib
+
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(65536), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _model_marker_path(build_env, offset):
+    environment = build_env.subst("$PIOENV").replace("/", "_")
+    return os.path.join(
+        PROJECT_DIR,
+        ".pio",
+        "model_flashed_%s_%s.marker" % (environment, offset.replace("0x", "")),
+    )
+
+
+def _flash_models(source, target, env):
+    del source, target
+    build_env = env
+    if not os.path.isfile(model_output):
+        raise RuntimeError("未找到 WakeNet 模型镜像: %s" % model_output)
+
+    offset = _model_partition_offset()
+    port = _find_upload_port(build_env)
+    if not port:
+        raise RuntimeError("未检测到上传端口，请确认开发板已连接")
+
+    digest = _model_digest(model_output)
+    marker_path = _model_marker_path(build_env, offset)
+    marker_value = "%s|%s|%s" % (digest, offset, port)
+    if os.environ.get("FORCE_MODEL_FLASH") != "1":
+        try:
+            with open(marker_path, encoding="utf-8") as handle:
+                if handle.read() == marker_value:
+                    print(">> WakeNet model 分区已是最新，跳过重复烧录")
+                    return
+        except OSError:
+            pass
+
+    esptool_dir = build_env.PioPlatform().get_package_dir("tool-esptoolpy")
+    esptool_py = os.path.join(esptool_dir, "esptool.py")
+    command = [
+        sys.executable,
+        esptool_py,
+        "--chip", "esp32s3",
+        "--port", port,
+        "--baud", MODEL_FLASH_BAUD,
+        "--connect-attempts", "2",
+        "write_flash", "-z",
+        "--flash_mode", "keep",
+        "--flash_freq", "keep",
+        "--flash_size", "keep",
+        offset, model_output,
+    ]
+    print(">> 烧录 WakeNet model 分区 @%s: %s" % (offset, model_output))
+    last_error = None
+    for attempt in (1, 2):
+        try:
+            subprocess.check_call(command)
+            os.makedirs(os.path.dirname(marker_path), exist_ok=True)
+            with open(marker_path, "w", encoding="utf-8") as handle:
+                handle.write(marker_value)
+            return
+        except subprocess.CalledProcessError as error:
+            last_error = error
+            print(">> model 分区烧录第 %d 次失败，准备重试" % attempt)
+    raise RuntimeError("烧录 WakeNet model 分区失败: %s" % last_error)
+
+
+env.AddPreAction("upload", _flash_models)

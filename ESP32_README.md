@@ -463,8 +463,8 @@ void loop() {
   `srmodels.bin`，并写入分区表中的 `model` 分区（偏移 `0x410000`）。
 - **连续流要求**：AFE 的 feed 与 fetch 分属两个 FreeRTOS 任务。WakeNet 约需
   1.5 秒感受野；不能在喂一帧后由同一任务阻塞等待 fetch，否则会超时且永不命中。
-- **增益**：采用 ESP-SR 默认的 `AFE_MN_PEAK_AGC_MODE_2`，让正常距离下约
-  -35～-30 dBFS 的 INMP441 语音稳定进入 WakeNet。
+- **增益**：采用 ESP-SR 默认的 `AFE_MN_PEAK_AGC_MODE_2`，补偿板载麦克风在
+  不同说话距离下的电平变化。
 - **断句端点**：AFE 内置**神经 VAD**（`vad_state`）判断“是否有人说话”，替代能量门限——背景音乐不会被当成人声，音乐播放中也能正确结束对话；能量法（`vad.*`）仅留作诊断。
 - **降噪**：AFE 输出增强音频（NS_MODE_SSP），上传给服务器 Whisper 的也是增强后的 PCM。
 - **WakeNet**：启用 `wn9_nihaoxiaoxin_tts`。AFE 配置为单麦 + 扬声器参考通道，
@@ -472,8 +472,9 @@ void loop() {
 
 > 注意：`src/esp_afe_sr_1mic.ref` 是新版本模板，与 1.9.2 头文件不兼容，不要编译；直接用 `esp_afe_sr_models.h` 里的 `ESP_AFE_SR_HANDLE.create_from_config()`。
 
-> 当前 `srmodels.bin` 约 284 KB。首次或模型变化后除普通固件上传外，还需把它烧录到
-> `0x410000`；仅更新应用固件不会擦除该模型分区。
+> 当前 `srmodels.bin` 约 284 KB。PlatformIO 上传固件时会自动检查并烧录
+> `0x410000` 的 model 分区；模型、开发环境或串口变化时会重新烧录。
+> 如需强制重刷，可在上传时设置 `FORCE_MODEL_FLASH=1`。
 
 ---
 
