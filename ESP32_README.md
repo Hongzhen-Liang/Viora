@@ -105,22 +105,21 @@ sequenceDiagram
 | SHT40 | SCL | GPIO 9 | I2C 时钟（与 BH1750 共享） |
 | GY-302 (BH1750) | SDA | GPIO 8 | I2C 数据 |
 | GY-302 (BH1750) | SCL | GPIO 9 | I2C 时钟 |
-| 土壤湿度 | AO | GPIO 4 | 模拟 ADC（ADC1_CH3） |
-| INMP441 | SCK (BCLK) | GPIO 5 | 与 MAX98357A BCLK 共享 |
-| INMP441 | WS | GPIO 6 | 与 MAX98357A LRC 共享 |
+| 土壤湿度 | AO | GPIO 10 | 模拟 ADC |
+| INMP441 | SCK (BCLK) | GPIO 4 | 独立 I2S RX 时钟 |
+| INMP441 | WS | GPIO 5 | 独立 I2S RX 字选择 |
+| INMP441 | L/R | GPIO 6 | 固件拉低，选择左声道 |
 | INMP441 | SD | GPIO 7 | I2S 数据输入 |
-| INMP441 | L/R | GND | 拉低 = 左声道 |
 | INMP441 | VDD | 3.3V | 数字供电 |
-| MAX98357A | BCLK | GPIO 5 | 与 INMP441 SCK 共享 |
-| MAX98357A | LRC (WS) | GPIO 6 | 与 INMP441 WS 共享 |
-| MAX98357A | DIN | GPIO 15 | I2S 数据输出 |
+| MAX98357A | LRC (WS) | GPIO 39 | 独立 I2S TX 字选择 |
+| MAX98357A | BCLK | GPIO 38 | 独立 I2S TX 时钟 |
+| MAX98357A | DIN | GPIO 40 | I2S 数据输出（GPIO37 为 N16R8 PSRAM 信号，不可用） |
 | MAX98357A | VIN | 5V | 功放供电（2.5~5.5V，5V 更响） |
 | MAX98357A | GAIN | 悬空 | 多数模块默认 9dB |
 | 板载 WS2812 状态灯 | DIN | GPIO 48 | 状态指示 |
 
-> ⚠️ **INMP441 与 MAX98357A 共享 BCLK/WS**：固件使用**单个 I2S 全双工端口**
-> （`I2S_NUM_0`）同时收发，不是两个独立 I2S 端口，接线时两者必须接到
-> 同一根 BCLK 与 WS 线上（见 `src/audio/audio_manager.cpp`）。
+> **INMP441 与 MAX98357A 使用两组独立 I2S 信号**：麦克风使用 `I2S_NUM_0`
+> 接收，扬声器使用 `I2S_NUM_1` 发送，不共享 BCLK/WS。
 
 ---
 

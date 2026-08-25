@@ -63,13 +63,11 @@ float AudioManager::getVolume() {
 }
 
 // ============================================================
-// 共享 I2S 总线（全双工：INMP441 RX + MAX98357A TX）
-//   INMP441 与 MAX98357A 共享 BCLK=GPIO5 / WS=GPIO6，因此必须用
-//   单个 I2S 端口同时收发，不能像旧硬件那样分两个独立端口。
+// 独立 I2S 总线：INMP441 RX 与 MAX98357A TX 使用各自的时钟和端口。
 // ============================================================
 bool AudioManager::initI2s() {
-  i2s_config_t cfg = {
-    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_RX),
+  i2s_config_t mic_cfg = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
     .sample_rate = SR_SAMPLE_RATE,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,  // INMP441 是 24bit，装在 32bit 帧里
     .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,  // 麦克风 L/R=GND 左声道；功放播左声道
@@ -79,36 +77,61 @@ bool AudioManager::initI2s() {
     .dma_buf_count = 12,
     .dma_buf_len = 256,
     .use_apll = false,
-    .tx_desc_auto_clear = true,  // TX 无数据时自动补零，喇叭保持静音
+    .tx_desc_auto_clear = false,
     .fixed_mclk = 0,
   };
-  i2s_pin_config_t pins = {
-    .bck_io_num = I2S_BCLK_PIN,      // GPIO5（INMP441 SCK = MAX98357A BCLK）
-    .ws_io_num = I2S_WS_PIN,         // GPIO6（INMP441 WS = MAX98357A LRC）
-    .data_out_num = I2S_SPK_DATA_PIN,  // GPIO15 → MAX98357A DIN
-    .data_in_num = I2S_MIC_DATA_PIN,   // GPIO7 ← INMP441 SD
+  i2s_pin_config_t mic_pins = {
+    .bck_io_num = MIC_SCK,
+    .ws_io_num = MIC_WS,
+    .data_out_num = I2S_PIN_NO_CHANGE,
+    .data_in_num = MIC_SD,
   };
-  esp_err_t err = i2s_driver_install(I2S_PORT, &cfg, 0, nullptr);
+  esp_err_t err = i2s_driver_install(MIC_I2S_PORT, &mic_cfg, 0, nullptr);
   if (err != ESP_OK) {
     Serial.printf("[AUDIO] I2S init failed: %s\n", esp_err_to_name(err));
     return false;
   }
-  err = i2s_set_pin(I2S_PORT, &pins);
+  err = i2s_set_pin(MIC_I2S_PORT, &mic_pins);
   if (err != ESP_OK) {
     Serial.printf("[AUDIO] I2S pin config failed: %s\n", esp_err_to_name(err));
     return false;
   }
-  Serial.printf(
-      "[AUDIO] 共享 I2S 全双工就绪: BCLK=%d WS=%d DIN=%d SD=%d @%dHz\n",
-      I2S_BCLK_PIN, I2S_WS_PIN, I2S_SPK_DATA_PIN, I2S_MIC_DATA_PIN,
-      SR_SAMPLE_RATE);
+  pinMode(MIC_LR, OUTPUT);
+  digitalWrite(MIC_LR, LOW);
+
+  i2s_config_t spk_cfg = mic_cfg;
+  spk_cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
+  spk_cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT;
+  spk_cfg.channel_format = I2S_CHANNEL_FMT_ONLY_LEFT;
+  spk_cfg.tx_desc_auto_clear = true;
+  err = i2s_driver_install(SPK_I2S_PORT, &spk_cfg, 0, nullptr);
+  if (err != ESP_OK) {
+    Serial.printf("[AUDIO] speaker I2S init failed: %s\n", esp_err_to_name(err));
+    return false;
+  }
+  i2s_pin_config_t spk_pins = {
+    .bck_io_num = SPK_BCLK,
+    .ws_io_num = SPK_LRC,
+    .data_out_num = SPK_DIN,
+    .data_in_num = I2S_PIN_NO_CHANGE,
+  };
+  err = i2s_set_pin(SPK_I2S_PORT, &spk_pins);
+  if (err != ESP_OK) {
+    Serial.printf("[AUDIO] speaker I2S pin config failed: %s\n", esp_err_to_name(err));
+    return false;
+  }
+  Serial.printf("[AUDIO] I2S 独立总线就绪: MIC SCK=%d WS=%d LR=%d SD=%d; SPK LRC=%d BCLK=%d DIN=%d @%dHz\n",
+                MIC_SCK, MIC_WS, MIC_LR, MIC_SD, SPK_LRC, SPK_BCLK, SPK_DIN,
+                SR_SAMPLE_RATE);
   return true;
 }
 
 bool AudioManager::begin() {
+  Serial.println("[AUDIO] begin: init I2S...");
   if (!initI2s()) {
     return false;
   }
+  Serial.println("[AUDIO] begin: I2S ready");
 
   s_play_buf = (uint8_t *)ps_malloc(PLAY_BUFFER_SIZE);
   if (s_play_buf) {
@@ -118,6 +141,9 @@ bool AudioManager::begin() {
   }
 
   s_play_write_mutex = xSemaphoreCreateMutex();
+  Serial.printf("[AUDIO] begin: play buffer=%s mutex=%s\n",
+                s_play_buf ? "OK" : "FAIL",
+                s_play_write_mutex ? "OK" : "FAIL");
   if (s_play_buf && s_play_write_mutex) {
     const BaseType_t created = xTaskCreatePinnedToCore(
         [](void *) {
@@ -142,14 +168,25 @@ bool AudioManager::begin() {
 }
 
 // ============================================================
-// 麦克风采集（共享全双工总线，ONLY_LEFT 单声道）
+// 麦克风采集（独立 RX 总线，ONLY_LEFT 单声道）
 // ============================================================
 int AudioManager::capture(int16_t *pcm, int max_frames, int16_t *peak) {
   static int32_t raw[1024];  // 512 帧 × 单声道 32bit（static 避免占 loopTask 栈）
   size_t bytes_read = 0;
-  if (i2s_read(I2S_PORT, raw, max_frames * sizeof(int32_t), &bytes_read,
-               portMAX_DELAY) != ESP_OK)
+  // 不使用无限等待：INMP441 未接好或 RX DMA 异常时，不能让 loopTask
+  // 永久阻塞并触发 TG1 看门狗复位。
+  const esp_err_t err =
+      i2s_read(MIC_I2S_PORT, raw, max_frames * sizeof(int32_t), &bytes_read,
+               pdMS_TO_TICKS(100));
+  if (err != ESP_OK) {
+    static uint32_t last_log_ms = 0;
+    const uint32_t now_ms = millis();
+    if (now_ms - last_log_ms >= 1000) {
+      last_log_ms = now_ms;
+      Serial.printf("[AUDIO] MIC RX timeout/error: %s\n", esp_err_to_name(err));
+    }
     return 0;
+  }
   int frames = bytes_read / sizeof(int32_t);  // ONLY_LEFT：每帧 = 1 个 32bit slot
   if (frames > max_frames) frames = max_frames;
   int32_t vol = 0;
@@ -391,7 +428,7 @@ void AudioManager::playDrain() {
     }
     size_t written = 0;
     const esp_err_t err =
-        i2s_write(I2S_PORT, tx_buf, tx_samples * sizeof(int32_t), &written,
+        i2s_write(SPK_I2S_PORT, tx_buf, tx_samples * sizeof(int32_t), &written,
                   portMAX_DELAY);
 
     portENTER_CRITICAL(&s_play_mux);
@@ -478,7 +515,7 @@ void AudioManager::playDiscard() {
   s_play_reference_len = 0;
   portEXIT_CRITICAL(&s_play_mux);
   // 打断时不仅清应用缓冲，也立即清掉 I2S DMA 中尚未播放的尾音。
-  i2s_zero_dma_buffer(I2S_PORT);
+  i2s_zero_dma_buffer(SPK_I2S_PORT);
   if (s_play_write_mutex) xSemaphoreGive(s_play_write_mutex);
 }
 

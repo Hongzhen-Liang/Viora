@@ -531,8 +531,8 @@ static void print_hardware_banner(bool sensors_ok, bool audio_ok) {
   Serial.printf("SDA GPIO%d\n", I2C_SDA_PIN);
   Serial.printf("SCL GPIO%d\n", I2C_SCL_PIN);
   Serial.println("I2S:");
-  Serial.printf("BCLK GPIO%d\n", I2S_BCLK_PIN);
-  Serial.printf("WS GPIO%d\n", I2S_WS_PIN);
+  Serial.printf("MIC SCK/WS/LR/SD GPIO%d/%d/%d/%d\n", MIC_SCK, MIC_WS, MIC_LR, MIC_SD);
+  Serial.printf("SPK LRC/BCLK/DIN GPIO%d/%d/%d\n", SPK_LRC, SPK_BCLK, SPK_DIN);
   Serial.println("Sensors:");
   Serial.printf("SHT40 %s\n", g_sensor.sht40_ok() ? "OK" : "FAIL");
   Serial.printf("BH1750 %s\n", g_sensor.bh1750_ok() ? "OK" : "FAIL");
@@ -551,7 +551,7 @@ void setup() {
 
   // 传感器（SHT40 / BH1750 / 土壤湿度）
   const bool sensors_ok = g_sensor.begin();
-  // 音频（INMP441 + MAX98357A 共享 I2S 全双工总线）
+  // 音频（INMP441 + MAX98357A 使用两组独立 I2S 端口）
   const bool audio_ok = g_audio.begin();
   // 启动横幅
   print_hardware_banner(sensors_ok, audio_ok);

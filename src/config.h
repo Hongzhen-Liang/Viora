@@ -31,11 +31,9 @@
 #define WAKE_ACK_FOLLOWUP_GUARD_MS 64 // 确认音自然播完后的极短扬声器尾音保护
 // ============================================================
 // I2S 音频（引脚见 hardware_config.h）
-//   INMP441（RX）与 MAX98357A（TX）共享 BCLK/WS，
-//   使用单个 I2S_NUM_0 全双工端口。INMP441 L/R 接 GND（左声道），
-//   VDD 接 3.3V，无需 GPIO 驱动。
+//   INMP441 与 MAX98357A 使用两个独立 I2S 端口和两组时钟。
+//   INMP441 L/R 接 MIC_LR 并拉低选择左声道，VDD 接 3.3V。
 // ============================================================
-#define I2S_PORT I2S_NUM_0
 
 // 采样率（ESP-SR 固定要求 16kHz）
 #define SR_SAMPLE_RATE 16000

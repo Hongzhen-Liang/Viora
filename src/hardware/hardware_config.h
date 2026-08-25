@@ -19,13 +19,22 @@
 #define I2C_FREQ_HZ 20000
 
 // ---- 土壤湿度（电容式，模拟 ADC）----
-#define SOIL_ADC_PIN 4
+#define SOIL_ADC_PIN 10       // GPIO4 已固定给 INMP441 SCK
 
-// ---- I2S 音频总线（INMP441 与 MAX98357A 共享 BCLK/WS）----
-#define I2S_BCLK_PIN 5        // INMP441 SCK = MAX98357A BCLK
-#define I2S_WS_PIN 6          // INMP441 WS  = MAX98357A LRC
-#define I2S_MIC_DATA_PIN 7    // INMP441 SD（L/R 接 GND = 左声道）
-#define I2S_SPK_DATA_PIN 15   // MAX98357A DIN
+// ---- INMP441 麦克风（独立 I2S RX）----
+#define MIC_SCK 4
+#define MIC_WS 5
+#define MIC_LR 6               // L/R 设为低电平，选择左声道
+#define MIC_SD 7
+
+// ---- MAX98357A 扬声器（独立 I2S TX）----
+#define SPK_LRC 39
+#define SPK_BCLK 38
+#define SPK_DIN 40       // GPIO37 属于 N16R8 八线 PSRAM 信号，不能用于音频输出
+
+// I2S 端口分离，麦克风和扬声器不共享时钟线。
+#define MIC_I2S_PORT I2S_NUM_0
+#define SPK_I2S_PORT I2S_NUM_1
 
 // ---- 板载状态灯（WS2812）----
 #define LED_PIN 48
