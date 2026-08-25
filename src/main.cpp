@@ -13,6 +13,7 @@
 #include "ai/wake_word.h"
 #include "audio/audio_manager.h"
 #include "config.h"
+#include "display/display_manager.h"
 #include "hardware/hardware_config.h"
 #include "led.h"
 #include "net.h"
@@ -469,6 +470,7 @@ static void on_server_text(const char *type, const char *user,
     }
     Serial.printf(">>> 你说: %s\n", user);
     Serial.printf(">>> Vesper: %s\n", reply);
+    g_display.setSubtitle(reply);
     s_consec_errors = 0;
     if (strcmp(op, "exit") == 0) {
       s_exit_pending = true;
@@ -574,6 +576,8 @@ void setup() {
   const bool sensors_ok = g_sensor.begin();
   // 音频（板载 ES7210 + ES8311 共享 I2S 全双工总线）
   const bool audio_ok = g_audio.begin();
+  // 4.2 英寸 ST7305 反射屏：蝴蝶兰角色 + 动态中文字幕。
+  g_display.begin();
   // 启动横幅
   print_hardware_banner(sensors_ok, audio_ok);
 
@@ -654,6 +658,7 @@ void loop() {
   else led_mode = LED_MODE_PLAYING;
   led_set_mode(led_mode);
   led_loop();
+  g_display.loop(s_state == ST_PLAYING);
 
   if (s_rearm_pending) {
     s_rearm_pending = false;
