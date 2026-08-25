@@ -18,19 +18,28 @@ static uint8_t breath(uint32_t period_ms) {
 }
 
 void led_init() {
+#if HAS_STATUS_LED
   neopixelWrite((uint8_t)LED_PIN, 0, 0, 0);
   Serial.printf("[LED] WS2812 状态灯 @ GPIO%d\n", LED_PIN);
+#else
+  Serial.println("[LED] 此板无可编程状态灯，状态灯功能已禁用");
+#endif
 }
 
 void led_set_mode(LedMode mode) {
   if (mode != s_mode) {
     s_mode = mode;
     // 切换时先灭灯一次，避免上一状态颜色残留
+#if HAS_STATUS_LED
     neopixelWrite((uint8_t)LED_PIN, 0, 0, 0);
+#endif
   }
 }
 
 void led_loop() {
+#if !HAS_STATUS_LED
+  return;
+#else
   uint32_t now = millis();
   if (now - s_last_ms < 30) return;   // 约 30ms 刷新一帧，RMT 开销可忽略
   s_last_ms = now;
@@ -72,4 +81,5 @@ void led_loop() {
       break;
   }
   neopixelWrite((uint8_t)LED_PIN, r, g, b);
+#endif
 }

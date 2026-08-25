@@ -1,9 +1,9 @@
 #pragma once
 // ============================================================
 // AudioManager —— 音频管理模块
-//   输入:  INMP441 I2S 数字麦克风（SD=GPIO7，L/R=GND 左声道）
-//   输出:  MAX98357A I2S 功放（DIN=GPIO15）+ 8Ω 喇叭
-//   总线:  INMP441 与 MAX98357A 共享 BCLK=GPIO5 / WS=GPIO6，
+//   输入:  板载双麦克风 + ES7210 ADC
+//   输出:  板载 ES8311 Codec + NS4150B 功放
+//   总线:  ES7210 与 ES8311 共享 MCLK/BCLK/WS，
 //          使用单个 I2S_NUM_0 全双工端口。
 //   采样:  16kHz 单声道 int16 PCM
 // ============================================================
@@ -27,7 +27,7 @@ class AudioManager {
   int  ringSize();
   void ringClear();
 
-  // ---- TTS 播放（MAX98357A）----
+  // ---- TTS 播放（ES8311）----
   void playPush(const uint8_t *src, uint32_t n);  // 线程安全（WS 回调线程调用）
   void playDrain();        // 播放任务的一次喂数；任务创建失败时由主循环兜底
   bool playTaskRunning();  // 独立 I2S 播放任务是否已启动

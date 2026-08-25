@@ -23,10 +23,10 @@ src/
 ├── hardware/
 │   └── hardware_config.h     # ⭐ 所有 GPIO/总线定义集中在这里
 ├── sensor/
-│   ├── sensor_manager.h      # SensorManager：SHT40 + BH1750 + 土壤湿度
+│   ├── sensor_manager.h      # SensorManager：板载 SHTC3 + 可选 BH1750 + 土壤湿度
 │   └── sensor_manager.cpp
 ├── audio/
-│   ├── audio_manager.h       # AudioManager：INMP441 + MAX98357A（共享 I2S 全双工）
+│   ├── audio_manager.h       # AudioManager：ES7210 + ES8311（共享 I2S 全双工）
 │   └── audio_manager.cpp
 ├── ai/
 │   ├── wake_word.h           # WakeWordManager 兼容接口（独立 VAD；唤醒由 AFE WakeNet 返回）
@@ -50,7 +50,6 @@ src/
 
 | 库 | 用途 |
 |----|------|
-| `adafruit/Adafruit SHT4x Library` | SHT40 温湿度（I2C） |
 | `claws/BH1750` | BH1750 光照（I2C，GY-302） |
 | `links2004/WebSockets` | WebSocket 客户端（连接 VioraServer） |
 | `bblanchon/ArduinoJson` | JSON 控制帧解析 |
@@ -88,12 +87,12 @@ sequenceDiagram
 
 | 模块 | 推荐型号 | 说明 |
 |------|----------|------|
-| 主控 | ESP32-S3 DevKitC | I2S / I2C / ADC 外设全 |
-| 麦克风 | INMP441 | I2S MEMS 数字麦克风，输出 24bit（取高 16bit） |
-| 功放+扬声器 | MAX98357A + 8Ω 喇叭 | I2S D 类功放，单声道 |
-| 土壤湿度 | 电容式土壤湿度传感器 | 模拟输出，接 ADC（GPIO4） |
-| 温湿度 | SHT40 | I2C（与 BH1750 共享总线） |
-| 光照 | GY-302（BH1750） | I2C |
+| 主控 | Waveshare ESP32-S3-RLCD-4.2 | N16R8，板载 RLCD 与音频 Codec |
+| 麦克风 | 板载双麦 + ES7210 | 16kHz、16bit 双声道 I2S，固件取 MIC1 |
+| 功放+扬声器 | 板载 ES8311 + NS4150B | 接板载 2Pin 扬声器座 |
+| 土壤湿度 | 电容式土壤湿度传感器 | 模拟输出，接排针 GPIO1 |
+| 温湿度 | 板载 SHTC3 | I2C 地址 0x70 |
+| 光照 | GY-302（BH1750，可选外接） | 与板载设备共享 I2C |
 
 ### 实际引脚连接（固定映射，与 `src/hardware/hardware_config.h` 一致）
 
@@ -101,26 +100,18 @@ sequenceDiagram
 
 | 外设 | 信号 | 引脚 | 说明 |
 |------|------|------|------|
-| SHT40 | SDA | GPIO 8 | I2C 数据（与 BH1750 共享） |
-| SHT40 | SCL | GPIO 9 | I2C 时钟（与 BH1750 共享） |
-| GY-302 (BH1750) | SDA | GPIO 8 | I2C 数据 |
-| GY-302 (BH1750) | SCL | GPIO 9 | I2C 时钟 |
-| 土壤湿度 | AO | GPIO 4 | 模拟 ADC（ADC1_CH3） |
-| INMP441 | SCK (BCLK) | GPIO 5 | 与 MAX98357A BCLK 共享 |
-| INMP441 | WS | GPIO 6 | 与 MAX98357A LRC 共享 |
-| INMP441 | SD | GPIO 7 | I2S 数据输入 |
-| INMP441 | L/R | GND | 拉低 = 左声道 |
-| INMP441 | VDD | 3.3V | 数字供电 |
-| MAX98357A | BCLK | GPIO 5 | 与 INMP441 SCK 共享 |
-| MAX98357A | LRC (WS) | GPIO 6 | 与 INMP441 WS 共享 |
-| MAX98357A | DIN | GPIO 15 | I2S 数据输出 |
-| MAX98357A | VIN | 5V | 功放供电（2.5~5.5V，5V 更响） |
-| MAX98357A | GAIN | 悬空 | 多数模块默认 9dB |
-| 板载 WS2812 状态灯 | DIN | GPIO 48 | 状态指示 |
+| 板载/扩展 I2C | SDA | GPIO 13 | SHTC3、Codec 与扩展排针共享 |
+| 板载/扩展 I2C | SCL | GPIO 14 | 400kHz，板载已有上拉 |
+| 土壤湿度 | AO | GPIO 1 | 排针 GP1（ADC1_CH0） |
+| ES7210/ES8311 | MCLK | GPIO 16 | 4.096MHz |
+| ES7210/ES8311 | BCLK | GPIO 9 | 共享音频时钟 |
+| ES7210/ES8311 | WS | GPIO 45 | 共享左右声道时钟 |
+| ES7210 | ASDOUT | GPIO 10 | 双麦录音输入 |
+| ES8311 | DSDIN | GPIO 8 | 扬声器播放输出 |
+| NS4150B 功放 | PA EN | GPIO 46 | Codec 初始化成功后拉高 |
 
-> ⚠️ **INMP441 与 MAX98357A 共享 BCLK/WS**：固件使用**单个 I2S 全双工端口**
-> （`I2S_NUM_0`）同时收发，不是两个独立 I2S 端口，接线时两者必须接到
-> 同一根 BCLK 与 WS 线上（见 `src/audio/audio_manager.cpp`）。
+> 屏幕固定占用 GPIO5/6/11/12/40/41；GPIO4 是板载电池电压检测，均不可再
+> 分配给传感器或音频。此板没有可编程 WS2812 状态灯。
 
 ---
 
@@ -132,35 +123,34 @@ sequenceDiagram
 ========== Vesper Hardware ==========
 ESP32-S3 Ready
 I2C:
-SDA GPIO8
-SCL GPIO9
+SDA GPIO13
+SCL GPIO14
 I2S:
-BCLK GPIO5
-WS GPIO6
+BCLK GPIO9
+WS GPIO45
 Sensors:
-SHT40 OK
+SHTC3 OK
 BH1750 OK
 Soil ADC OK
 Audio:
-INMP441 OK
-MAX98357 OK
+ES7210 dual MIC OK
+ES8311 speaker OK
 =====================================
 ```
 
 按顺序排查：
 
-1. **传感器（I2C）**：横幅中 `SHT40` / `BH1750` 若显示 `FAIL`，先确认
-   SDA=GPIO8、SCL=GPIO9 接对、上拉（模块自带）、供电 3.3V、地址正确
-   （SHT40=0x44，BH1750=0x23）。随后每 5 秒打印一行
+1. **传感器（I2C）**：板载 `SHTC3` 应显示 `OK`；外接 `BH1750` 未连接时
+   显示 `FAIL` 属正常。扩展 I2C 使用 SDA=GPIO13、SCL=GPIO14。随后每 5 秒打印一行
    `[SENSOR] temp=..C hum=..% light=..lx soil=..% (raw=..)`。
 2. **土壤湿度（ADC）**：看 `[SENSOR]` 行中的 `soil`/`raw`。手捏传感器数值应
    变化（干土 raw 高、湿土 raw 低）。校准：空气中读数设为 dry、泡水读数
    设为 wet，调用 `g_sensor.setSoilCalibration(dry, wet)`。
-3. **麦克风（INMP441）**：若 `INMP441 FAIL`，检查 SD=GPIO7、L/R=GND、
-   VDD=3.3V。正常说话时 `[HEALTH]` 日志的 `mic_peak`/`mic_rms` 会明显抬升
+3. **麦克风（ES7210）**：板载双麦无需外接线。正常说话时 `[HEALTH]`
+   日志的 `mic_peak`/`mic_rms` 会明显抬升
    （`config.h` 的 `ENABLE_HEALTH_LOG` 设为 1 开启）。
-4. **喇叭（MAX98357A）**：若 `MAX98357 FAIL`，检查 DIN=GPIO15、BCLK/WS 与
-   麦克风共享、VIN=5V。对设备说唤醒词“你好小鑫”，应听到确认音/回复。
+4. **喇叭（ES8311）**：将随板喇叭插入 2Pin 扬声器座。对设备说唤醒词
+   “你好小鑫”，应听到确认音/回复。
 5. **无线对话**：连上 VioraServer 后说“你好小鑫”+指令，走完整
    麦克风→唤醒→上传→ASR→LLM→TTS→播放 链路。
 
@@ -230,15 +220,8 @@ stateDiagram-v2
   每 32ms 恰好运行一次；AEC 参考另按播放顺序排队，识别计算偶发变慢也
   不会把应用缓冲仍充足的 TTS 播成沙沙断音。
 
-**板载状态灯（WS2812 RGB，GPIO48，`led.*` 已实现）**：
-
-| 灯色 | 状态 |
-|------|------|
-| 红闪 | 未连接服务器 |
-| 蓝呼吸 | 待唤醒（IDLE） |
-| 绿常亮 | 聆听中 |
-| 琥珀呼吸 | 等服务器处理 |
-| 青常亮 | 播放回复 |
+ESP32-S3-RLCD-4.2 没有可编程 RGB 状态灯，因此 `led.*` 在该板型上自动
+使用空实现；后续可将这些状态接入 RLCD 界面。
 
 ---
 
@@ -249,9 +232,9 @@ stateDiagram-v2
 ### `platformio.ini` 示例
 
 ```ini
-[env:esp32s3]
+[env:waveshare-esp32-s3-rlcd-42]
 platform = espressif32
-board = esp32-s3-devkitc-1
+board = waveshare-esp32-s3-rlcd-42
 framework = arduino
 monitor_speed = 115200
 
@@ -514,7 +497,7 @@ void loop() {
 1. **连不上**：确认 ESP32 与 Mac 同一局域网；Mac 上服务器已启动（`curl http://<Mac IP>:8765/health` 应返回 `{"service":"Viora","status":"ok"}`）。
 2. **收到 `{"type":"error","message":"服务器忙..."}`**：上一轮流水线还没结束，等收到 `tts_end` 后再发下一段语音。
 3. **上传后无回复**：检查麦克风采样率是否为 16k、位深 16bit、单声道；打印 `mic_read` 读到的样本数确认非 0。
-4. **播放声音小/杂音**：确认 MAX98357A 的 `GAIN` 引脚接法；INMP441 的 L/R 引脚接地表示左声道。
+4. **播放声音小/杂音**：确认喇叭插头已插紧，并查看启动日志中 ES8311 与 PA 是否均为 `OK/ON`。
 
 ---
 

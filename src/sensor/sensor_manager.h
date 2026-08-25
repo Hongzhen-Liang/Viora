@@ -1,9 +1,9 @@
 #pragma once
 // ============================================================
 // SensorManager —— 传感器管理模块
-//   SHT40  温湿度（I2C，0x44）
+//   SHTC3  板载温湿度（I2C，0x70）
 //   BH1750 光照   （I2C，0x23，GY-302）
-//   土壤湿度      （模拟 ADC，GPIO4）
+//   土壤湿度      （模拟 ADC，排针 GPIO1）
 // ============================================================
 #include <Arduino.h>
 
@@ -19,12 +19,12 @@ struct SensorData {
 
 class SensorManager {
  public:
-  // 初始化 I2C 总线 + SHT40 + BH1750 + 土壤 ADC。
+  // 初始化 I2C 总线 + 板载 SHTC3 + 可选 BH1750 + 土壤 ADC。
   // 任一传感器失败都会打印错误（[SENSOR] ...），返回 false。
   // 实现上把 I2C 初始化放进独立任务（4s 硬超时），总线异常不阻塞启动。
   bool begin();
 
-  // 真正的 I2C 初始化流程（总线预检→定向探测→SHT40×3 重试→BH1750 自动探测）。
+  // 真正的 I2C 初始化流程（总线预检→SHTC3 读取→BH1750 自动探测）。
   // 由 begin() 创建的 FreeRTOS 任务调用，需 public 供任务入口访问。
   void initI2cSensors();
 
@@ -35,7 +35,7 @@ class SensorManager {
   const SensorData &data() const;
 
   // 各传感器初始化/可用状态（供启动横幅显示 OK/FAIL）。
-  bool sht40_ok() const { return s_sht40_ok_; }
+  bool shtc3_ok() const { return s_shtc3_ok_; }
   bool bh1750_ok() const { return s_bh1750_ok_; }
   bool soil_ok() const { return s_soil_ok_; }
 
@@ -47,7 +47,7 @@ class SensorManager {
   void print() const;
 
  private:
-  void readSht40();
+  void readShtc3();
   void readBh1750();
   void readSoil();
   void initSoilAdc();
@@ -55,8 +55,7 @@ class SensorManager {
   uint8_t probeI2c(uint8_t addr, uint8_t cmd, uint8_t attempts = 3);
 
   SensorData s_data_;
-  bool s_sht40_ok_ = false;
-  uint8_t s_sht40_addr_ = 0x44;  // 0x44 主地址 / 0x45 ADDR 接 3V3 时
+  bool s_shtc3_ok_ = false;
   bool s_bh1750_ok_ = false;
   bool s_soil_ok_ = false;
   volatile bool s_i2c_init_done_ = false;  // I2C 初始化任务完成标志

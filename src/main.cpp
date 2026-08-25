@@ -534,12 +534,12 @@ static void print_hardware_banner(bool sensors_ok, bool audio_ok) {
   Serial.printf("BCLK GPIO%d\n", I2S_BCLK_PIN);
   Serial.printf("WS GPIO%d\n", I2S_WS_PIN);
   Serial.println("Sensors:");
-  Serial.printf("SHT40 %s\n", g_sensor.sht40_ok() ? "OK" : "FAIL");
+  Serial.printf("SHTC3 %s\n", g_sensor.shtc3_ok() ? "OK" : "FAIL");
   Serial.printf("BH1750 %s\n", g_sensor.bh1750_ok() ? "OK" : "FAIL");
   Serial.printf("Soil ADC %s\n", g_sensor.soil_ok() ? "OK" : "FAIL");
   Serial.println("Audio:");
-  Serial.printf("INMP441 %s\n", audio_ok ? "OK" : "FAIL");
-  Serial.printf("MAX98357 %s\n", audio_ok ? "OK" : "FAIL");
+  Serial.printf("ES7210 dual MIC %s\n", audio_ok ? "OK" : "FAIL");
+  Serial.printf("ES8311 speaker %s\n", audio_ok ? "OK" : "FAIL");
   Serial.println("=====================================");
   Serial.printf("[SYS] sensors=%s audio=%s\n", sensors_ok ? "OK" : "FAIL",
                 audio_ok ? "OK" : "FAIL");
@@ -549,9 +549,9 @@ void setup() {
   Serial.begin(115200);
   delay(200);
 
-  // 传感器（SHT40 / BH1750 / 土壤湿度）
+  // 传感器（板载 SHTC3 / 可选 BH1750 / 外接土壤湿度）
   const bool sensors_ok = g_sensor.begin();
-  // 音频（INMP441 + MAX98357A 共享 I2S 全双工总线）
+  // 音频（板载 ES7210 + ES8311 共享 I2S 全双工总线）
   const bool audio_ok = g_audio.begin();
   // 启动横幅
   print_hardware_banner(sensors_ok, audio_ok);
@@ -609,7 +609,7 @@ static void send_sensor_telemetry() {
 void loop() {
   net_loop();
 
-  // 周期读取传感器（SHT40 / BH1750 / 土壤湿度）并打印 + 上报服务端
+  // 周期读取传感器（SHTC3 / BH1750 / 土壤湿度）并打印 + 上报服务端
   static uint32_t s_last_sensor_ms = 0;
   const uint32_t sensor_now = millis();
   if (sensor_now - s_last_sensor_ms >= SENSOR_POLL_MS) {

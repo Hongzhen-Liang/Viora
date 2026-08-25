@@ -10,6 +10,7 @@
 
 #include "audio/audio_manager.h"
 #include "config.h"
+#include "hardware/rlcd_codec.h"
 
 // ---- PCM 环形缓存（唤醒/打断前置音频） ----
 static int16_t s_pcm[PCM_BUFFER_SIZE];
@@ -63,16 +64,14 @@ float AudioManager::getVolume() {
 }
 
 // ============================================================
-// 共享 I2S 总线（全双工：INMP441 RX + MAX98357A TX）
-//   INMP441 与 MAX98357A 共享 BCLK=GPIO5 / WS=GPIO6，因此必须用
-//   单个 I2S 端口同时收发，不能像旧硬件那样分两个独立端口。
+// 板载 Codec 共享 I2S 总线（全双工：ES7210 RX + ES8311 TX）
 // ============================================================
 bool AudioManager::initI2s() {
   i2s_config_t cfg = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX | I2S_MODE_RX),
     .sample_rate = SR_SAMPLE_RATE,
-    .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,  // INMP441 是 24bit，装在 32bit 帧里
-    .channel_format = I2S_CHANNEL_FMT_ONLY_LEFT,  // 麦克风 L/R=GND 左声道；功放播左声道
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
     // 12 × 256 帧 = 192ms DMA 余量；独立播放任务会持续填满它。
@@ -80,13 +79,14 @@ bool AudioManager::initI2s() {
     .dma_buf_len = 256,
     .use_apll = false,
     .tx_desc_auto_clear = true,  // TX 无数据时自动补零，喇叭保持静音
-    .fixed_mclk = 0,
+    .fixed_mclk = SR_SAMPLE_RATE * 256,
   };
   i2s_pin_config_t pins = {
-    .bck_io_num = I2S_BCLK_PIN,      // GPIO5（INMP441 SCK = MAX98357A BCLK）
-    .ws_io_num = I2S_WS_PIN,         // GPIO6（INMP441 WS = MAX98357A LRC）
-    .data_out_num = I2S_SPK_DATA_PIN,  // GPIO15 → MAX98357A DIN
-    .data_in_num = I2S_MIC_DATA_PIN,   // GPIO7 ← INMP441 SD
+    .mck_io_num = I2S_MCLK_PIN,
+    .bck_io_num = I2S_BCLK_PIN,
+    .ws_io_num = I2S_WS_PIN,
+    .data_out_num = I2S_SPK_DATA_PIN,
+    .data_in_num = I2S_MIC_DATA_PIN,
   };
   esp_err_t err = i2s_driver_install(I2S_PORT, &cfg, 0, nullptr);
   if (err != ESP_OK) {
@@ -99,10 +99,10 @@ bool AudioManager::initI2s() {
     return false;
   }
   Serial.printf(
-      "[AUDIO] 共享 I2S 全双工就绪: BCLK=%d WS=%d DIN=%d SD=%d @%dHz\n",
-      I2S_BCLK_PIN, I2S_WS_PIN, I2S_SPK_DATA_PIN, I2S_MIC_DATA_PIN,
-      SR_SAMPLE_RATE);
-  return true;
+      "[AUDIO] 板载 Codec I2S 就绪: MCLK=%d BCLK=%d WS=%d DOUT=%d DIN=%d @%dHz\n",
+      I2S_MCLK_PIN, I2S_BCLK_PIN, I2S_WS_PIN, I2S_SPK_DATA_PIN,
+      I2S_MIC_DATA_PIN, SR_SAMPLE_RATE);
+  return rlcdCodecBegin();
 }
 
 bool AudioManager::begin() {
@@ -145,21 +145,19 @@ bool AudioManager::begin() {
 // 麦克风采集（共享全双工总线，ONLY_LEFT 单声道）
 // ============================================================
 int AudioManager::capture(int16_t *pcm, int max_frames, int16_t *peak) {
-  static int32_t raw[1024];  // 512 帧 × 单声道 32bit（static 避免占 loopTask 栈）
+  static int16_t raw[2048];  // 1024 帧 × 双声道 16bit
   size_t bytes_read = 0;
-  if (i2s_read(I2S_PORT, raw, max_frames * sizeof(int32_t), &bytes_read,
+  if (i2s_read(I2S_PORT, raw, max_frames * 2 * sizeof(int16_t), &bytes_read,
                portMAX_DELAY) != ESP_OK)
     return 0;
-  int frames = bytes_read / sizeof(int32_t);  // ONLY_LEFT：每帧 = 1 个 32bit slot
+  int frames = bytes_read / (2 * sizeof(int16_t));
   if (frames > max_frames) frames = max_frames;
   int32_t vol = 0;
   uint64_t square_sum = 0;
   for (int i = 0; i < frames; i++) {
-    // 麦克风的 24-bit 二补码样本位于 32-bit I2S slot 高位。直接取高
-    // 16 bit；旧实现右移 14 位等于额外放大 4 倍，真人近讲时大量样本
-    // 被压到 +/-32767，削波后的谐波会显著拉低 KWS 分数。Log-Mel 在
-    // 每个窗口内会做均值/方差归一化，不需要用数字增益换灵敏度。
-    const int32_t sample = raw[i] >> 16;  // INMP441 L/R=GND → 左声道
+    // ES7210 输出 MIC1/MIC2 双声道。AFE 当前配置为单麦，使用 MIC1；
+    // 不直接平均双麦，避免声源角度造成相位抵消。
+    const int32_t sample = raw[i * 2];
     const int16_t l = static_cast<int16_t>(sample);
     pcm[i] = l;
     const int32_t al = sample < 0 ? -sample : sample;
@@ -381,22 +379,22 @@ void AudioManager::playDrain() {
     }
     s_play_last_write_us = write_started_us;
 
-    // 32bit 帧：int16 样本左移 16 位放入 32bit slot 高位（MAX98357A
-    // 取每帧前 16bit，等价于直接播放 int16 样本）
-    static int32_t tx_buf[512];
+    // ES8311 使用 16-bit stereo I2S；服务端 PCM 是单声道，复制到 L/R。
+    static int16_t tx_buf[1024];
     const int tx_samples = chunk / sizeof(int16_t);
     const int16_t *s16 = reinterpret_cast<const int16_t *>(buf);
     for (int i = 0; i < tx_samples; ++i) {
-      tx_buf[i] = static_cast<int32_t>(s16[i]) << 16;
+      tx_buf[i * 2] = s16[i];
+      tx_buf[i * 2 + 1] = s16[i];
     }
     size_t written = 0;
     const esp_err_t err =
-        i2s_write(I2S_PORT, tx_buf, tx_samples * sizeof(int32_t), &written,
+        i2s_write(I2S_PORT, tx_buf, tx_samples * 2 * sizeof(int16_t), &written,
                   portMAX_DELAY);
 
     portENTER_CRITICAL(&s_play_mux);
     if (err == ESP_OK && written > 0 && s_play_session_active) {
-      const uint32_t reference_frames = written / sizeof(int32_t);
+      const uint32_t reference_frames = written / (2 * sizeof(int16_t));
       if (s_play_reference_len + reference_frames > PLAY_REFERENCE_CAPACITY) {
         const uint32_t drop = s_play_reference_len + reference_frames -
                               PLAY_REFERENCE_CAPACITY;
@@ -423,11 +421,8 @@ void AudioManager::playDrain() {
     portEXIT_CRITICAL(&s_play_mux);
 
     if (s_play_write_mutex) xSemaphoreGive(s_play_write_mutex);
-    // 注意：i2s_write 以 32bit slot 计字节（tx_samples*4），而 chunk 是
-    // int16 PCM 字节数，两者相差 2 倍。比较/日志必须用实际请求的 tx_bytes，
-    // 否则每次全量写成功都会被误报成"写入异常"（written=2048/1024 刷屏）。
     const uint32_t tx_bytes =
-        static_cast<uint32_t>(tx_samples) * sizeof(int32_t);
+        static_cast<uint32_t>(tx_samples) * 2 * sizeof(int16_t);
     if (err != ESP_OK || written != tx_bytes) {
       Serial.printf("[I2S] 播放写入异常 err=%s written=%u/%uB\n",
                     esp_err_to_name(err), static_cast<unsigned>(written),

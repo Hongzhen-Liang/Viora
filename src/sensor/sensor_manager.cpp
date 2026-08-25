@@ -1,12 +1,10 @@
 // ============================================================
 // SensorManager 实现
 //   依赖 Arduino 库：
-//     - Adafruit SHT4X Library（adafruit/Adafruit SHT4X Library）
 //     - BH1750（claws/BH1750）
 // ============================================================
 #include "sensor/sensor_manager.h"
 
-#include <Adafruit_SHT4x.h>
 #include <BH1750.h>
 #include <Wire.h>
 
@@ -15,32 +13,48 @@
 SensorManager g_sensor;
 
 namespace {
-Adafruit_SHT4x s_sht4;
 BH1750 s_light_meter(0x23);  // GY-302 默认 0x23；ADDR 拉高则为 0x5C（init 自动探测）
 
 // 读失败日志节流：每 30s 最多打一次，避免刷屏
 constexpr uint32_t kFailLogIntervalMs = 30000;
-uint32_t s_last_sht40_fail_ms = 0;
+uint32_t s_last_shtc3_fail_ms = 0;
 uint32_t s_last_bh1750_fail_ms = 0;
 
-// SHT4x 手动读取（备用地址 0x45 时 Adafruit 库不支持改地址）。
-// 命令 0xFD = 高精度测量，~10ms 后读 6 字节。简化版跳过 CRC 校验（够用）。
-// 换算：T = -45 + 175*rawT/65535, RH = -6 + 125*rawH/65535
-bool sht40ReadManual(uint8_t addr, float &temp_c, float &hum_pct) {
-  Wire.beginTransmission(addr);
-  Wire.write(0xFD);
-  if (Wire.endTransmission() != 0) return false;
-  delay(10);
-  if (Wire.requestFrom(static_cast<uint16_t>(addr), static_cast<uint8_t>(6)) !=
-      6) {
-    return false;
+constexpr uint8_t kShtc3Addr = 0x70;
+
+uint8_t shtc3Crc(const uint8_t *data, size_t len) {
+  uint8_t crc = 0xFF;
+  for (size_t i = 0; i < len; ++i) {
+    crc ^= data[i];
+    for (uint8_t bit = 0; bit < 8; ++bit) {
+      crc = (crc & 0x80) ? static_cast<uint8_t>((crc << 1) ^ 0x31)
+                         : static_cast<uint8_t>(crc << 1);
+    }
   }
-  uint8_t buf[6] = {0};
-  for (int i = 0; i < 6; ++i) buf[i] = static_cast<uint8_t>(Wire.read());
+  return crc;
+}
+
+bool shtc3Command(uint16_t command) {
+  Wire.beginTransmission(kShtc3Addr);
+  Wire.write(static_cast<uint8_t>(command >> 8));
+  Wire.write(static_cast<uint8_t>(command));
+  return Wire.endTransmission() == 0;
+}
+
+bool shtc3Read(float &temp_c, float &hum_pct) {
+  if (!shtc3Command(0x3517)) return false;  // wakeup
+  delayMicroseconds(250);
+  if (!shtc3Command(0x7CA2)) return false;  // normal mode, high precision
+  delay(13);
+  if (Wire.requestFrom(kShtc3Addr, static_cast<uint8_t>(6)) != 6) return false;
+  uint8_t buf[6];
+  for (uint8_t &b : buf) b = static_cast<uint8_t>(Wire.read());
+  shtc3Command(0xB098);  // sleep; failure here does not invalidate the sample
+  if (shtc3Crc(buf, 2) != buf[2] || shtc3Crc(buf + 3, 2) != buf[5]) return false;
   const uint16_t rt = (static_cast<uint16_t>(buf[0]) << 8) | buf[1];
   const uint16_t rh = (static_cast<uint16_t>(buf[3]) << 8) | buf[4];
   temp_c = -45.0f + 175.0f * static_cast<float>(rt) / 65535.0f;
-  hum_pct = -6.0f + 125.0f * static_cast<float>(rh) / 65535.0f;
+  hum_pct = 100.0f * static_cast<float>(rh) / 65535.0f;
   return true;
 }
 
@@ -70,7 +84,7 @@ bool SensorManager::begin() {
       Serial.println("[SENSOR] I2C 初始化超时(4s)，跳过 I2C 传感器继续启动");
     }
   }
-  return s_sht40_ok_ || s_bh1750_ok_ || s_soil_ok_;
+  return s_shtc3_ok_ || s_bh1750_ok_ || s_soil_ok_;
 }
 
 // 带 1 字节数据的定向探测（等价于“该地址是否有 ACK”）。
@@ -90,7 +104,7 @@ uint8_t SensorManager::probeI2c(uint8_t addr, uint8_t cmd, uint8_t attempts) {
 }
 
 void SensorManager::initSoilAdc() {
-  // 土壤湿度 ADC（GPIO4 = ADC1_CH3，不依赖 I2C）
+  // 土壤湿度 ADC（GPIO1 = 排针 GP1 / ADC1_CH0，不依赖 I2C）
   s_soil_ok_ = false;
   analogSetPinAttenuation(SOIL_ADC_PIN, ADC_11db);  // 0~3.1V 量程
   const int raw = analogRead(SOIL_ADC_PIN);
@@ -112,7 +126,7 @@ void SensorManager::initI2cSensors() {
     Serial.printf("[SENSOR] I2C 预检失败: SDA=%s SCL=%s — 总线被拉低，"
                   "跳过 I2C 初始化（检查接线/短路/上拉）\n",
                   sda_low ? "LOW" : "HIGH", scl_low ? "LOW" : "HIGH");
-    s_sht40_ok_ = false;
+    s_shtc3_ok_ = false;
     s_bh1750_ok_ = false;
     s_i2c_init_done_ = true;
     return;
@@ -122,55 +136,21 @@ void SensorManager::initI2cSensors() {
   Wire.begin(I2C_SDA_PIN, I2C_SCL_PIN, I2C_FREQ_HZ);
   Wire.setTimeOut(50);
 
-  // ---- 2. 定向探测（带数据写，绝不卡死；每地址重试 3 次）----
-  // 0x44/0x45: SHT4x 软复位 0x89（ADDR 脚接 3V3 时地址变 0x45）
-  // 0x23/0x5C: BH1750 上电 0x01 —— 均为无害命令
-  const uint8_t r44 = probeI2c(0x44, 0x89);
-  const uint8_t r45 = probeI2c(0x45, 0x89);
+  // ---- 2. 板载 SHTC3 + 可选 BH1750 ----
   const uint8_t r23 = probeI2c(0x23, 0x01);
   const uint8_t r5c = probeI2c(0x5C, 0x01);
-  Serial.printf("[SENSOR] I2C probe: 0x44=%s 0x45=%s 0x23=%s 0x5C=%s\n",
-                r44 == 0 ? "ACK" : "NAK", r45 == 0 ? "ACK" : "NAK",
-                r23 == 0 ? "ACK" : "NAK", r5c == 0 ? "ACK" : "NAK");
-
-  // ---- 3. SHT40 - 主地址 0x44，备用地址 0x45（ADDR 接 3V3）----
-  s_sht40_ok_ = false;
-  s_sht40_addr_ = 0x44;
-  if (r44 != 0 && r45 != 0) {
-    Serial.println(
-        "[SENSOR] SHT40 跳过: 0x44/0x45 均无应答（查接线/3V3 供电/共地）");
-  } else if (r44 == 0) {
-    // 0x44：走 Adafruit 库（含 CRC 校验）
-    for (int attempt = 1; attempt <= 3 && !s_sht40_ok_; ++attempt) {
-      if (s_sht4.begin(&Wire)) {
-        s_sht40_ok_ = true;
-        s_sht4.setPrecision(SHT4X_HIGH_PRECISION);
-        s_sht4.setHeater(SHT4X_NO_HEATER);
-        Serial.printf("[SENSOR] SHT40 OK (addr=0x44, attempt=%d)\n", attempt);
-      } else {
-        Serial.printf("[SENSOR] SHT40 init attempt %d/3 failed\n", attempt);
-        delay(50);
-      }
-    }
-    if (!s_sht40_ok_) {
-      Serial.println(
-          "[SENSOR] SHT40 init failed (0x44 有 ACK 但初始化失败)");
-    }
+  float t = NAN, h = NAN;
+  s_shtc3_ok_ = shtc3Read(t, h);
+  if (s_shtc3_ok_) {
+    s_data_.temperature = t;
+    s_data_.humidity = h;
+    s_data_.updated_ms = millis();
+    Serial.printf("[SENSOR] 板载 SHTC3 OK (0x70, %.1fC %.1f%%)\n", t, h);
   } else {
-    // 0x45：Adafruit 库不支持改地址，走手动读取路径
-    s_sht40_addr_ = 0x45;
-    float t = NAN, h = NAN;
-    if (sht40ReadManual(0x45, t, h)) {
-      s_sht40_ok_ = true;
-      s_data_.temperature = t;
-      s_data_.humidity = h;
-      s_data_.updated_ms = millis();
-      Serial.println("[SENSOR] SHT40 OK (addr=0x45, 手动读取模式)");
-    } else {
-      Serial.println(
-          "[SENSOR] SHT40 init failed (0x45 有 ACK 但读取失败)");
-    }
+    Serial.println("[SENSOR] 板载 SHTC3 初始化失败 (0x70)");
   }
+  Serial.printf("[SENSOR] 可选 BH1750 probe: 0x23=%s 0x5C=%s\n",
+                r23 == 0 ? "ACK" : "NAK", r5c == 0 ? "ACK" : "NAK");
 
   // ---- 4. BH1750：按 probe 结果只试有应答的地址 ----
   s_bh1750_ok_ = false;
@@ -186,8 +166,8 @@ void SensorManager::initI2cSensors() {
                   bh_addr);
   }
 
-  if (!s_sht40_ok_ && !s_bh1750_ok_) {
-    Serial.println("[SENSOR] I2C 传感器全失败: 检查 SDA/SCL 接线、3V3 供电、4.7k 上拉");
+  if (!s_shtc3_ok_ && !s_bh1750_ok_) {
+    Serial.println("[SENSOR] I2C 传感器全失败");
   }
 
   s_i2c_init_done_ = true;
@@ -204,35 +184,17 @@ void SensorManager::setSoilCalibration(int dry_raw, int wet_raw) {
   }
 }
 
-void SensorManager::readSht40() {
-  if (!s_sht40_ok_) return;
-
-  // 0x45 备用地址：Adafruit 库不支持，走手动读取
-  if (s_sht40_addr_ == 0x45) {
-    float t = NAN, h = NAN;
-    if (sht40ReadManual(0x45, t, h)) {
-      s_data_.temperature = t;
-      s_data_.humidity = h;
-      s_data_.updated_ms = millis();
-    } else if (millis() - s_last_sht40_fail_ms > kFailLogIntervalMs) {
-      s_last_sht40_fail_ms = millis();
-      Serial.println("[SENSOR] SHT40 read failed (持续失败，检查接线/供电)");
-    }
-    return;
+void SensorManager::readShtc3() {
+  if (!s_shtc3_ok_) return;
+  float t = NAN, h = NAN;
+  if (shtc3Read(t, h)) {
+    s_data_.temperature = t;
+    s_data_.humidity = h;
+    s_data_.updated_ms = millis();
+  } else if (millis() - s_last_shtc3_fail_ms > kFailLogIntervalMs) {
+    s_last_shtc3_fail_ms = millis();
+    Serial.println("[SENSOR] 板载 SHTC3 读取失败");
   }
-
-  sensors_event_t humidity, temp;
-  // 失败重试一次（SHT40 偶发 CRC/总线错误可自愈）
-  if (!s_sht4.getEvent(&humidity, &temp) && !s_sht4.getEvent(&humidity, &temp)) {
-    if (millis() - s_last_sht40_fail_ms > kFailLogIntervalMs) {
-      s_last_sht40_fail_ms = millis();
-      Serial.println("[SENSOR] SHT40 read failed (持续失败，检查接线/供电)");
-    }
-    return;
-  }
-  s_data_.temperature = temp.temperature;
-  s_data_.humidity = humidity.relative_humidity;
-  s_data_.updated_ms = millis();
 }
 
 void SensorManager::readBh1750() {
@@ -271,7 +233,7 @@ void SensorManager::readSoil() {
 }
 
 void SensorManager::poll() {
-  readSht40();
+  readShtc3();
   readBh1750();
   readSoil();
 }

@@ -225,9 +225,7 @@ bool speech_init() {
   cfg.afe_ringbuf_size = 50;
   cfg.memory_alloc_mode = AFE_MEMORY_ALLOC_MORE_PSRAM;
   cfg.afe_linear_gain = 1.0f;
-  // Use Espressif's ASR default AGC. The INMP441 signal at normal speaking
-  // distance is only around -35 to -30 dBFS on this board; disabling AGC makes
-  // WakeNet miss otherwise clean speech.
+  // 使用 Espressif 的 ASR 默认 AGC，补偿不同说话距离与板载麦克风增益差异。
   cfg.agc_mode     = AFE_MN_PEAK_AGC_MODE_2;
   cfg.afe_ns_mode  = NS_MODE_SSP;
   cfg.pcm_config.total_ch_num = 2;             // 单麦 + 扬声器参考
