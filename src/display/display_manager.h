@@ -10,7 +10,7 @@ class DisplayManager {
 
  private:
   static constexpr uint8_t kMaxLines = 48;
-  static constexpr uint8_t kLinesPerPage = 4;
+  static constexpr uint8_t kLinesPerPage = 2;
 
   void wrapSubtitle(const char *text);
   void renderPage();
