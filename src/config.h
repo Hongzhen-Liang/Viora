@@ -27,6 +27,8 @@
 #define WAKE_ACK_CONT_VOICE_FRAMES 5 // 无静音分隔时需约 160ms 持续语音，抑制尾音
 #define WAKE_ACK_BARGE_GUARD_MS 64   // 短确认音开始后很快允许用户抢话
 #define WAKE_ACK_BARGE_VOICE_FRAMES 2 // AEC 后约 64ms 人声即停止确认音
+#define WAKE_ACK_CAPTURE_PEAK_MIN 600 // 不足以停播时，仍保留 AEC 后的普通音量句首
+#define WAKE_ACK_CAPTURE_RMS_MIN  140
 #define WAKE_ACK_BOUNDARY_PREROLL_MS 192 // 保留确认音边界附近首字，不带唤醒词
 #define WAKE_ACK_FOLLOWUP_GUARD_MS 64 // 确认音自然播完后的极短扬声器尾音保护
 // ============================================================
@@ -101,6 +103,10 @@
 #define AFE_ENERGY_FALLBACK_FRAMES   6   // AFE 无结果约192ms后才允许能量降级
 #define ENERGY_FALLBACK_PEAK_MIN     180 // 降级路径额外峰值门
 #define ENERGY_FALLBACK_RMS_MIN      70  // 降级路径额外 RMS 门
+// 连续对话中 ESP-SR VAD 偶尔只在句首产出一次稀疏命中。若该次同时
+// 有明显的原始能量，允许它直接锁定起声；低于此门限仍需要多次 VAD 命中。
+#define STRONG_NEURAL_START_PEAK_MIN 650
+#define STRONG_NEURAL_START_RMS_MIN  150
 // 自然断句参数：短回答多等一会儿；正常句约 0.85 秒静音即回复；
 // 用户曾在句内停顿后继续说时，会自动学习其节奏并放宽，最多 2.0 秒。
 // 2026-08-20：设备端神经 VAD 对正常音量近讲命中偏稀疏（常只命中句首、
@@ -123,13 +129,14 @@
 #define MIN_VOICE_FRAMES       5      // 少于约 160ms 视为短促噪声
 #define MAX_CONSEC_ERRORS 2    // 连续多次未识别/服务器错误（如背景音乐被当语音）→ 回待唤醒
 #define ENABLE_BARGE_IN        1      // 播放中说话可打断；依赖 AFE AEC
-#define BARGE_IN_GUARD_MS      450    // 回答刚开始时避免瞬态误打断
-#define BARGE_IN_VOICE_FRAMES  3      // 连续约 96ms 的近端强语音才打断
-// 正式 TTS 抢话还必须有当前原始麦克风能量。AFE VAD 单独命中可能只是
-// 未完全消除的扬声器回声。实机上个别 TTS 音节回采可达 687/312，
-// 因此按“宁可需要更响地抢话，也不允许设备自打断”的取舍提高峰值门限。
+#define BARGE_IN_GUARD_MS      700    // 避开开播瞬态与 AEC 收敛期
+#define BARGE_IN_VOICE_FRAMES  5      // 连续约 160ms 的近端强语音才打断
+// 抢话必须同时满足 AFE 神经 VAD、原始麦克风能量与近端双讲门。
+// 麦克风 RMS 相对扬声器参考太低时，判定为未消尽的自身回声。
 #define BARGE_IN_PEAK_MIN      850
 #define BARGE_IN_RMS_MIN       220
+#define BARGE_IN_REF_FLOOR_RMS 120    // 参考低于此值时视为扬声器静音间隙
+#define BARGE_IN_NEAR_REF_PERCENT 40  // 麦克风 RMS 至少为参考包络的 40%
 
 // 服务端/网络异常不能让设备永久卡在“处理中”或“播放中”。
 #define PROCESSING_TIMEOUT_MS      45000 // audio_end 后最久等待首个 tts_start

@@ -63,14 +63,32 @@ static int s_consec_errors = 0;
 static bool s_followup_keep_preroll = false;  // ack_done 后重开麦需保留前置音频
 static uint32_t s_wake_ack_start_ms = 0;      // 唤醒决定窗开始时刻
 static bool s_ack_playing = false;            // 决定窗已过，确认音播放中
+static bool s_ack_voice_captured = false;      // 确认音期间已捕获近端用户人声
 
 // 播放中 AEC/VAD 打断状态。
 static bool s_accept_tts_audio = false;
 static uint32_t s_playback_start_ms = 0;
 static uint32_t s_tts_received_bytes = 0;
 static uint16_t s_barge_voice_frames = 0;
+static uint16_t s_barge_ref_rms_hold = 0;
 static uint32_t s_tts_last_activity_ms = 0;
 static bool s_tts_end_received = false;
+
+static uint16_t pcm_rms(const int16_t *samples, int count) {
+  if (samples == nullptr || count <= 0) return 0;
+  uint64_t sum_squares = 0;
+  for (int i = 0; i < count; ++i) {
+    const int32_t sample = samples[i];
+    sum_squares += static_cast<uint64_t>(sample * sample);
+  }
+  return static_cast<uint16_t>(
+      sqrt(static_cast<double>(sum_squares) / count));
+}
+
+static void reset_barge_evidence() {
+  s_barge_voice_frames = 0;
+  s_barge_ref_rms_hold = 0;
+}
 
 // 周期健康日志：monitor 无需碰巧赶上启动阶段，也能确认固件、麦克风、
 // KWS 与温度是否正常。峰值/RMS 取最近一个日志窗口的最大值。
@@ -107,14 +125,16 @@ static void vad_smooth_reset() {
   s_vad_smoothed = false;
 }
 
-static bool vad_smooth_update(bool hit) {
+static bool vad_smooth_update(bool hit, bool strong_start = false) {
   s_vad_smooth_ring[s_vad_smooth_head] = hit;
   s_vad_smooth_head = (s_vad_smooth_head + 1) % kVadSmoothFrames;
   int hits = 0;
   for (int i = 0; i < kVadSmoothFrames; ++i) {
     if (s_vad_smooth_ring[i]) ++hits;
   }
-  if (hits >= 2) s_vad_smoothed = true;
+  // 普通稀疏命中仍需要窗口内两次互证；神经 VAD 与强能量同时
+  // 命中时可直接锁定，然后由 256ms 施密特保持推进起声状态机。
+  if (strong_start || hits >= 2) s_vad_smoothed = true;
   else if (hits == 0) s_vad_smoothed = false;
   return s_vad_smoothed;
 }
@@ -201,7 +221,7 @@ static void enter_listening(ListenOrigin origin, bool force_preroll = false,
   s_exit_pending = false;
   s_accept_tts_audio = false;
   s_tts_end_received = false;
-  s_barge_voice_frames = 0;
+  reset_barge_evidence();
   s_rec_max_vol = 0;
   s_preroll_ms = 0;
   s_uploaded_bytes = 0;
@@ -259,11 +279,12 @@ static void start_wake_ack() {
   }
   set_state(ST_WAKE_ACK);
   s_ack_playing = false;
+  s_ack_voice_captured = false;
   s_ack_speech.reset();
   speech_async_reset();
   s_exit_pending = false;
   s_accept_tts_audio = false;
-  s_barge_voice_frames = 0;
+  reset_barge_evidence();
   s_wake_ack_start_ms = millis();
   s_wake_ack_gate.reset(s_wake_ack_start_ms);
   Serial.printf(">>> 唤醒词命中：%s！决定窗 %dms 内判断是否紧跟指令\n",
@@ -469,7 +490,7 @@ static void on_server_text(const char *type, const char *user,
     s_tts_last_activity_ms = s_playback_start_ms;
     s_tts_end_received = false;
     s_tts_received_bytes = 0;
-    s_barge_voice_frames = 0;
+    reset_barge_evidence();
     speech_async_reset();
     g_audio.ringClear();
     g_audio.markTtsStart();
@@ -677,6 +698,12 @@ void loop() {
       s_state == ST_PLAYING || (s_state == ST_WAKE_ACK && s_ack_playing);
   if (playback_afe) {
     g_audio.playReference(playback_ref, frames);
+    // 参考包络快速上升、缓慢衰减，覆盖 I2S DMA、声学传播和板上
+    // 回声路径的小幅延迟，避免音节边界被误当成近端人声。
+    const uint16_t ref_rms = pcm_rms(playback_ref, frames);
+    const uint16_t decayed_ref = static_cast<uint16_t>(
+        (static_cast<uint32_t>(s_barge_ref_rms_hold) * 7U) / 8U);
+    s_barge_ref_rms_hold = ref_rms > decayed_ref ? ref_rms : decayed_ref;
   } else {
     memset(playback_ref, 0, frames * sizeof(int16_t));
   }
@@ -754,14 +781,27 @@ void loop() {
           local_ack ? WAKE_ACK_BARGE_GUARD_MS : BARGE_IN_GUARD_MS;
       const uint16_t required_frames =
           local_ack ? WAKE_ACK_BARGE_VOICE_FRAMES : BARGE_IN_VOICE_FRAMES;
+      const uint16_t mic_rms = g_audio.captureRms();
       const bool raw_voice =
-          vol_l >= BARGE_IN_PEAK_MIN &&
-          g_audio.captureRms() >= BARGE_IN_RMS_MIN;
-      // During playback the AFE VAD may either retain residual speaker echo or
-      // suppress a real near-end voice together with that echo. Sustained raw
-      // near-end energy is therefore the hard gate for both acknowledgement
-      // and normal TTS; measured self-echo stays below these thresholds.
-      const bool confirmed_voice = raw_voice;
+          vol_l >= BARGE_IN_PEAK_MIN && mic_rms >= BARGE_IN_RMS_MIN;
+      const bool speaker_quiet =
+          s_barge_ref_rms_hold < BARGE_IN_REF_FLOOR_RMS;
+      const bool near_end_dominant =
+          speaker_quiet ||
+          static_cast<uint32_t>(mic_rms) * 100U >=
+              static_cast<uint32_t>(s_barge_ref_rms_hold) *
+                  BARGE_IN_NEAR_REF_PERCENT;
+      // 原始能量不能单独证明用户开口，扬声器回采本身也有能量。
+      // 必须是 AEC 后仍判为人声，且麦克风明显压过扬声器参考。
+      const bool confirmed_voice =
+          playback_speech && raw_voice && near_end_dominant;
+      // 确认音很短：普通音量可以不足以立即停播，但不能把已由
+      // AEC/VAD 确认的用户句首丢掉。达到保留门后，播完会带前置进聆听。
+      if (local_ack && playback_speech && near_end_dominant &&
+          vol_l >= WAKE_ACK_CAPTURE_PEAK_MIN &&
+          mic_rms >= WAKE_ACK_CAPTURE_RMS_MIN) {
+        s_ack_voice_captured = true;
+      }
       const uint32_t now = millis();
       if (elapsed_at_least(now, s_playback_start_ms, guard_ms)) {
         if (confirmed_voice) ++s_barge_voice_frames;
@@ -788,6 +828,9 @@ void loop() {
           return;
         }
       }
+    } else if (playback_afe && s_barge_voice_frames > 0) {
+      // AFE 本帧无新结果时递减旧证据，避免零散回声慢慢凑满门限。
+      --s_barge_voice_frames;
     }
 #if ENABLE_HEALTH_LOG
     if (playback_afe) {
@@ -796,10 +839,11 @@ void loop() {
       if (barge_now - last_barge_log_ms >= 500) {
         last_barge_log_ms = barge_now;
         Serial.printf(
-            "[BARGE] afe=%d speech=%d peak=%d rms=%u evidence=%u\n",
+            "[BARGE] afe=%d speech=%d peak=%d rms=%u ref=%u evidence=%u\n",
             have_playback_result ? 1 : 0, playback_speech ? 1 : 0,
             static_cast<int>(vol_l),
             static_cast<unsigned>(g_audio.captureRms()),
+            static_cast<unsigned>(s_barge_ref_rms_hold),
             static_cast<unsigned>(s_barge_voice_frames));
       }
     }
@@ -868,7 +912,7 @@ void loop() {
         ack_elapsed >= WAKE_ACK_DECIDE_MS) {
       s_ack_playing = true;
       s_playback_start_ms = millis();
-      s_barge_voice_frames = 0;
+      reset_barge_evidence();
       // 只保留决定窗末端：覆盖用户在 350ms 边界抢先开口的首字，同时
       // 丢掉更早的唤醒词。后续上传使用 source=follow_up，不会误剥前缀。
       keep_latest_ring_audio(WAKE_ACK_BOUNDARY_PREROLL_MS);
@@ -887,9 +931,18 @@ void loop() {
     Serial.println(">>> 确认音结束，直接进入连续聆听（无需服务端判决）");
     // 协议语义是 source=follow_up + new_conversation=true：确认音已经
     // 本地完成，服务端无需再剥唤醒前缀/重复确认，但要开启新会话上下文。
-    // 无人抢话时不携带唤醒词/确认音残留，也不预置 speech 证据。
-    g_audio.ringClear();
-    enter_listening(LISTEN_FROM_WAKE_ACK);
+    // 确认音期间若已捕获用户开口，保留最近的 AEC 输出并预置
+    // speech 证据；无人说话时仍清空回声，不把确认音传给 ASR。
+    const bool keep_ack_speech = s_ack_voice_captured;
+    s_ack_voice_captured = false;
+    if (keep_ack_speech) {
+      keep_latest_ring_audio(AUDIO_PREROLL_MS);
+      Serial.println(">>> 已保留确认音期间的用户句首");
+      enter_listening(LISTEN_FROM_WAKE_ACK, true);
+    } else {
+      g_audio.ringClear();
+      enter_listening(LISTEN_FROM_WAKE_ACK);
+    }
   }
 
   if (s_state == ST_PLAYING && g_audio.playbackFinished()) {
@@ -953,8 +1006,23 @@ void loop() {
             static_cast<int>(vol_l),
             static_cast<unsigned>(g_audio.captureRms()));
       }
-      // 轮次状态机吃平滑后的信号：VAD 命中稀疏时不会整段被丢成噪声。
-      const bool turn_speech_smoothed = vad_smooth_update(turn_speech);
+      uint32_t start_guard_ms = 0;
+      if (s_listen_origin == LISTEN_FROM_FOLLOWUP) {
+        start_guard_ms = FOLLOWUP_GUARD_MS;
+      } else if (s_listen_origin == LISTEN_FROM_WAKE_ACK) {
+        start_guard_ms = WAKE_ACK_FOLLOWUP_GUARD_MS;
+      }
+      const bool past_speaker_tail =
+          elapsed_at_least(now, s_listen_start_ms, start_guard_ms);
+      const bool strong_neural_start =
+          !s_turn.speech_started() && past_speaker_tail && turn_speech &&
+          neural_speech && fallback_energy &&
+          vol_l >= STRONG_NEURAL_START_PEAK_MIN &&
+          g_audio.captureRms() >= STRONG_NEURAL_START_RMS_MIN;
+      // 轮次状态机吃平滑后的信号。强神经命中可以单次锁定，解决
+      // 连续对话句首只产生一个 VAD 结果时一直等到 idle timeout 的问题。
+      const bool turn_speech_smoothed =
+          vad_smooth_update(turn_speech, strong_neural_start);
       const TurnEvent event = s_turn.update(now, turn_speech_smoothed);
       if (event == TURN_EVENT_SPEECH_STARTED) {
         Serial.printf(
