@@ -33,6 +33,7 @@ static uint32_t s_play_overflows = 0;
 static int64_t  s_play_last_write_us = 0;
 static uint32_t s_play_max_write_gap_us = 0;
 static uint32_t s_play_late_writes = 0;
+static uint32_t s_play_written_source_bytes = 0;
 static portMUX_TYPE s_play_mux = portMUX_INITIALIZER_UNLOCKED;
 static SemaphoreHandle_t s_play_write_mutex = nullptr;
 static TaskHandle_t s_play_task = nullptr;
@@ -415,6 +416,8 @@ void AudioManager::playDrain() {
                (reference_frames - first) * sizeof(int16_t));
       }
       s_play_reference_len += reference_frames;
+      // written 是立体声 I2S 字节；源 PCM 是单声道，所以除以 2。
+      s_play_written_source_bytes += static_cast<uint32_t>(written / 2U);
       s_last_play_write_ms = millis();
     }
     s_play_write_in_flight = false;
@@ -471,6 +474,7 @@ void AudioManager::playDiscard() {
   s_play_write_in_flight = false;
   s_play_reference_head = 0;
   s_play_reference_len = 0;
+  s_play_written_source_bytes = 0;
   portEXIT_CRITICAL(&s_play_mux);
   // 打断时不仅清应用缓冲，也立即清掉 I2S DMA 中尚未播放的尾音。
   i2s_zero_dma_buffer(I2S_PORT);
@@ -492,7 +496,19 @@ void AudioManager::markTtsStart() {
   s_play_late_writes = 0;
   s_play_reference_head = 0;
   s_play_reference_len = 0;
+  s_play_written_source_bytes = 0;
   portEXIT_CRITICAL(&s_play_mux);
+}
+
+uint32_t AudioManager::playbackPositionBytes() {
+  portENTER_CRITICAL(&s_play_mux);
+  const uint32_t written = s_play_written_source_bytes;
+  portEXIT_CRITICAL(&s_play_mux);
+
+  // 12 个 DMA 块 × 256 帧，最多会比真实声音提前 192ms。
+  // 扣掉这部分后，字幕换段点与物理扬声器更接近。
+  constexpr uint32_t kDmaQueuedSourceBytes = 12U * 256U * sizeof(int16_t);
+  return written > kDmaQueuedSourceBytes ? written - kDmaQueuedSourceBytes : 0;
 }
 
 void AudioManager::markTtsEnd() {

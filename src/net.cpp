@@ -196,18 +196,20 @@ static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
       }
       const char *t = doc["type"] | "";
       if (strcmp(t, "text") == 0) {
-        if (s_cb.on_text) s_cb.on_text("text", doc["user"] | "", doc["reply"] | "", "", doc["op"] | "");
+        if (s_cb.on_text) s_cb.on_text("text", doc["user"] | "", doc["reply"] | "", "", doc["op"] | "", 0);
       } else if (strcmp(t, "tts_start") == 0) {
         Serial.println("[WS] TTS 开始");
-        if (s_cb.on_text) s_cb.on_text("tts_start", "", "", "", "");
+        if (s_cb.on_text) s_cb.on_text("tts_start", "", doc["subtitle"] | "", "", "", 0);
+      } else if (strcmp(t, "subtitle_cue") == 0) {
+        if (s_cb.on_text) s_cb.on_text("subtitle_cue", "", doc["text"] | "", "", "", doc["offset_bytes"] | 0U);
       } else if (strcmp(t, "tts_end") == 0) {
         Serial.println("[WS] TTS 结束");
-        if (s_cb.on_text) s_cb.on_text("tts_end", "", "", "", "");
+        if (s_cb.on_text) s_cb.on_text("tts_end", "", "", "", "", 0);
       } else if (strcmp(t, "error") == 0) {
         const char *msg = doc["message"] | "";
-        if (s_cb.on_text) s_cb.on_text("error", "", "", msg, "");
+        if (s_cb.on_text) s_cb.on_text("error", "", "", msg, "", 0);
       } else if (strcmp(t, "no_speech") == 0) {
-        if (s_cb.on_text) s_cb.on_text("no_speech", "", "", "", "");
+        if (s_cb.on_text) s_cb.on_text("no_speech", "", "", "", "", 0);
       } else {
         Serial.printf("[WS] 收到: %.*s\n", (int)length, payload);
       }

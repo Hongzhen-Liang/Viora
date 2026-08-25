@@ -37,6 +37,9 @@ class AudioManager {
   void playReference(int16_t *dst, int frames);
   void markTtsStart();  // 收到 tts_start 时调用
   void markTtsEnd();    // 收到 tts_end 时调用
+  // 估算已经真正送到扬声器的单声道 PCM 字节数。
+  // 扣除 I2S DMA 预填量，供字幕以音频字节边界精确换页。
+  uint32_t playbackPositionBytes();
   bool playbackFinished();  // 播完时返回一次 true
   void setVolume(float vol);  // 播放音量 0.1~1.0
   float getVolume();

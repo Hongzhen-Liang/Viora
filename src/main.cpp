@@ -216,6 +216,9 @@ static void enter_listening(ListenOrigin origin, bool force_preroll = false,
   // speaker-echo decision leak into the first silent frame after playback.
   wake_word.reset();
   set_state(ST_LISTENING);
+  // 播放完或异常恢复后不再把上一句永久挂在屏幕上。
+  // 这也给用户一个明确的“现在可以继续说”提示。
+  g_display.setSubtitle("我在听…");
   s_listen_origin = origin;
   s_listen_speech.reset();
   vad_smooth_reset();
@@ -303,6 +306,7 @@ static void end_active_session(const char *reason) {
   s_accept_tts_audio = false;
   s_tts_end_received = false;
   g_audio.ringClear();
+  g_display.setSubtitle("需要我时，叫我一声。");
 }
 
 static void commit_turn(uint32_t now_ms) {
@@ -462,7 +466,7 @@ static bool accept_server_event(const char *type, bool allowed) {
 
 static void on_server_text(const char *type, const char *user,
                            const char *reply, const char *msg,
-                           const char *op) {
+                           const char *op, uint32_t pcm_offset) {
   if (strcmp(type, "text") == 0) {
     if (!accept_server_event(type, s_state == ST_PROCESSING ||
                                       s_state == ST_PLAYING)) {
@@ -496,6 +500,15 @@ static void on_server_text(const char *type, const char *user,
     speech_async_reset();
     g_audio.ringClear();
     g_audio.markTtsStart();
+    if (reply[0] != '\0') {
+      g_display.beginTimedSubtitles(reply);
+    } else {
+      // 兼容还未下发字幕 cue 的旧服务端。
+      g_display.startSpeaking();
+    }
+  } else if (strcmp(type, "subtitle_cue") == 0) {
+    if (!accept_server_event(type, s_state == ST_PLAYING)) return;
+    g_display.queueTimedSubtitle(reply, pcm_offset);
   } else if (strcmp(type, "tts_end") == 0) {
     if (!accept_server_event(type,
                              s_state == ST_PLAYING && s_accept_tts_audio)) {
@@ -658,7 +671,7 @@ void loop() {
   else led_mode = LED_MODE_PLAYING;
   led_set_mode(led_mode);
   led_loop();
-  g_display.loop(s_state == ST_PLAYING);
+  g_display.loop(s_state == ST_PLAYING, g_audio.playbackPositionBytes());
 
   if (s_rearm_pending) {
     s_rearm_pending = false;

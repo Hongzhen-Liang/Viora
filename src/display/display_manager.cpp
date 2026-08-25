@@ -11,7 +11,9 @@ constexpr uint16_t kScreenWidth = 400;
 constexpr uint16_t kScreenHeight = 300;
 constexpr uint16_t kSubtitleWidth = 360;
 constexpr uint16_t kSubtitleTop = 233;
-constexpr uint32_t kSubtitlePageMs = 3600;
+constexpr uint32_t kSubtitleMsPerCharacter = 260;
+constexpr uint32_t kSubtitlePageMinMs = 4800;
+constexpr uint32_t kSubtitlePageMaxMs = 12000;
 
 // Software SPI keeps this display independent from future TF-card use.  The
 // ST7305 reflective LCD only transfers 15 KB for a full refresh, so updates
@@ -89,6 +91,8 @@ void DisplayManager::wrapSubtitle(const char *text) {
 
 void DisplayManager::setSubtitle(const char *text) {
   if (!ready_) return;
+  timed_mode_ = false;
+  timed_cue_count_ = 0;
   wrapSubtitle(text);
   page_ = 0;
   page_count_ = line_count_ == 0
@@ -98,10 +102,88 @@ void DisplayManager::setSubtitle(const char *text) {
   renderPage();
 }
 
-void DisplayManager::loop(bool speaking) {
-  if (!ready_ || !speaking || page_count_ <= 1) return;
+void DisplayManager::beginTimedSubtitles(const char *text) {
+  if (!ready_) return;
+  timed_mode_ = true;
+  timed_cue_count_ = 0;
+  wrapSubtitle(text);
+  page_ = 0;
+  page_count_ = line_count_ == 0
+                    ? 1
+                    : (line_count_ + kLinesPerPage - 1) / kLinesPerPage;
+  renderPage();
+}
+
+void DisplayManager::queueTimedSubtitle(const char *text,
+                                        uint32_t pcm_offset_bytes) {
+  if (!ready_ || text == nullptr || text[0] == '\0') return;
+  if (!timed_mode_) timed_mode_ = true;
+  if (timed_cue_count_ >= kMaxTimedCues) {
+    Serial.println("[DISPLAY] 字幕时间轴过长，已忽略末尾 cue");
+    return;
+  }
+  timed_cues_[timed_cue_count_].text = text;
+  timed_cues_[timed_cue_count_].pcm_offset_bytes = pcm_offset_bytes;
+  ++timed_cue_count_;
+}
+
+void DisplayManager::startSpeaking() {
+  if (!ready_) return;
+  // 文字通常比 TTS 音频更早到达。翻页时钟必须从扬声器这一轮
+  // 真正开始播放时重置，不能沿用收到文字时的旧时间。
+  page_ = 0;
+  last_page_ms_ = millis();
+  renderPage();
+}
+
+uint32_t DisplayManager::currentPageDurationMs() const {
+  const uint8_t first = page_ * kLinesPerPage;
+  const uint8_t remaining = line_count_ > first ? line_count_ - first : 0;
+  const uint8_t visible_lines =
+      remaining < kLinesPerPage ? remaining : kLinesPerPage;
+  uint16_t characters = 0;
+  for (uint8_t row = 0; row < visible_lines; ++row) {
+    const uint8_t *cursor = reinterpret_cast<const uint8_t *>(
+        lines_[first + row].c_str());
+    while (*cursor != 0) {
+      const size_t bytes = utf8CharBytes(*cursor);
+      size_t available = 0;
+      while (cursor[available] != 0 && available < bytes) ++available;
+      cursor += available > 0 ? available : 1;
+      ++characters;
+    }
+  }
+  uint32_t duration =
+      static_cast<uint32_t>(characters) * kSubtitleMsPerCharacter;
+  if (duration < kSubtitlePageMinMs) duration = kSubtitlePageMinMs;
+  if (duration > kSubtitlePageMaxMs) duration = kSubtitlePageMaxMs;
+  return duration;
+}
+
+void DisplayManager::loop(bool speaking, uint32_t playback_position_bytes) {
+  if (!ready_ || !speaking) return;
+
+  if (timed_mode_) {
+    while (timed_cue_count_ > 0 &&
+           playback_position_bytes >= timed_cues_[0].pcm_offset_bytes) {
+      String next = timed_cues_[0].text;
+      for (uint8_t i = 1; i < timed_cue_count_; ++i) {
+        timed_cues_[i - 1] = timed_cues_[i];
+      }
+      --timed_cue_count_;
+      wrapSubtitle(next.c_str());
+      page_ = 0;
+      page_count_ = line_count_ == 0
+                        ? 1
+                        : (line_count_ + kLinesPerPage - 1) / kLinesPerPage;
+      renderPage();
+    }
+    return;
+  }
+
+  if (page_count_ <= 1) return;
   const uint32_t now = millis();
-  if (now - last_page_ms_ < kSubtitlePageMs) return;
+  if (now - last_page_ms_ < currentPageDurationMs()) return;
   last_page_ms_ = now;
   if (page_ + 1 < page_count_) {
     ++page_;
