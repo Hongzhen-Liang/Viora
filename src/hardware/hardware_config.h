@@ -15,6 +15,11 @@
 #define I2C_SCL_PIN 14
 #define I2C_FREQ_HZ 400000
 
+// ---- 板载 SHTC3 温度补偿 ----
+// Waveshare 官方示例针对本板热源将 SHTC3 原始温度减去 4°C。
+// 若用同位置的可靠温度计重新标定，只需调整此值。
+#define SHTC3_TEMPERATURE_OFFSET_C (-4.0f)
+
 // ---- 土壤湿度（电容式，AOUT 接 GPIO1 / ADC1_CH0）----
 // ESP32-S3 的 GPIO0 不具备 ADC 功能，不能连接传感器 AOUT。
 #define SOIL_ADC_PIN 1

@@ -53,8 +53,12 @@ bool shtc3Read(float &temp_c, float &hum_pct) {
   if (shtc3Crc(buf, 2) != buf[2] || shtc3Crc(buf + 3, 2) != buf[5]) return false;
   const uint16_t rt = (static_cast<uint16_t>(buf[0]) << 8) | buf[1];
   const uint16_t rh = (static_cast<uint16_t>(buf[3]) << 8) | buf[4];
-  temp_c = -45.0f + 175.0f * static_cast<float>(rt) / 65535.0f;
-  hum_pct = 100.0f * static_cast<float>(rh) / 65535.0f;
+  // SHTC3 数据手册规定分母为 2^16。温度再叠加 Waveshare 针对
+  // ESP32-S3-RLCD-4.2 板载热源给出的 -4°C 补偿。
+  constexpr float kShtc3RawScale = 65536.0f;
+  temp_c = -45.0f + 175.0f * static_cast<float>(rt) / kShtc3RawScale +
+           SHTC3_TEMPERATURE_OFFSET_C;
+  hum_pct = 100.0f * static_cast<float>(rh) / kShtc3RawScale;
   return true;
 }
 
@@ -152,7 +156,9 @@ void SensorManager::initI2cSensors() {
     s_data_.temperature = t;
     s_data_.humidity = h;
     s_data_.updated_ms = millis();
-    Serial.printf("[SENSOR] 板载 SHTC3 OK (0x70, %.1fC %.1f%%)\n", t, h);
+    Serial.printf(
+        "[SENSOR] 板载 SHTC3 OK (0x70, %.1fC %.1f%%, temp_offset=%+.1fC)\n",
+        t, h, static_cast<double>(SHTC3_TEMPERATURE_OFFSET_C));
   } else {
     Serial.println("[SENSOR] 板载 SHTC3 初始化失败 (0x70)");
   }
