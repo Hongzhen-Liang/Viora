@@ -20,18 +20,16 @@ constexpr uint32_t kSubtitlePageMaxMs = 12000;
 constexpr uint32_t kIdleRefreshMs = 60000;
 constexpr uint32_t kUnsyncedClockRefreshMs = 10000;
 
-// 23x16、按 iPhone 状态栏 Wi-Fi 轮廓重画：两条等厚同心弧带，加
-// 一个向下收尖的圆润小扇形。16 行从顶到底都有有效像素，与左侧
-// 时间数字的实际字形高度一致，不再依赖透明边距做位置补偿。
-constexpr uint8_t kWifiIconWidth = 23;
-constexpr uint8_t kWifiIconHeight = 16;
+// 19x14 的紧凑状态栏 Wi-Fi 图标。时间是待机页的主信息，网络图标
+// 只作为辅助状态，因此刻意缩小一级，避免与时间争夺视觉注意力。
+constexpr uint8_t kWifiIconWidth = 19;
+constexpr uint8_t kWifiIconHeight = 14;
 const uint8_t kWifiIcon[] PROGMEM = {
-    0x00, 0x1c, 0x00, 0xc0, 0xff, 0x01, 0xf0, 0xff, 0x07,
-    0xfc, 0xff, 0x1f, 0x7e, 0x00, 0x3f, 0x1f, 0x00, 0x7c,
-    0x0f, 0x3e, 0x78, 0xc3, 0xff, 0x61, 0xe0, 0xff, 0x03,
-    0xf0, 0xc1, 0x07, 0x70, 0x00, 0x07, 0x30, 0x1c, 0x06,
-    0x00, 0x7f, 0x00, 0x00, 0x7f, 0x00, 0x00, 0x3e, 0x00,
-    0x00, 0x1c, 0x00,
+    0x00, 0x07, 0x00, 0xf0, 0x7f, 0x00, 0xfc, 0xff, 0x01,
+    0x7e, 0xf0, 0x03, 0x0f, 0x80, 0x07, 0x07, 0x02, 0x07,
+    0xe0, 0x3f, 0x00, 0xf0, 0x7f, 0x00, 0xf8, 0xf8, 0x00,
+    0x38, 0xe0, 0x00, 0x80, 0x0f, 0x00, 0x80, 0x0f, 0x00,
+    0x00, 0x07, 0x00, 0x00, 0x02, 0x00,
 };
 
 // Software SPI keeps this display independent from future TF-card use.  The
@@ -314,14 +312,14 @@ void DisplayManager::renderIdleDashboard() {
     s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
     s_lcd.drawUTF8(363, 20, "配网");
   } else {
-    constexpr uint16_t wifi_x = 376;
-    constexpr uint16_t wifi_y = 5;
+    constexpr uint16_t wifi_x = 380;
+    constexpr uint16_t wifi_y = 6;
     s_lcd.drawXBMP(wifi_x, wifi_y, kWifiIconWidth, kWifiIconHeight,
                    kWifiIcon);
 
     if (idle_network_state_ == DisplayNetworkState::kOffline) {
-      s_lcd.drawLine(375, 5, 399, 21);
-      s_lcd.drawLine(376, 5, 399, 20);
+      s_lcd.drawLine(379, 6, 399, 20);
+      s_lcd.drawLine(380, 6, 399, 19);
     } else if (idle_network_state_ ==
                DisplayNetworkState::kServiceConnecting) {
       s_lcd.setFont(u8g2_font_helvB12_tf);
