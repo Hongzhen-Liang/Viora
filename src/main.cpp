@@ -157,12 +157,20 @@ static const char *state_name(ConvState state) {
   return "PLAYING";
 }
 
+static DisplayNetworkState display_network_state() {
+  if (net_provisioning_active()) return DisplayNetworkState::kProvisioning;
+  if (!net_wifi_connected()) return DisplayNetworkState::kOffline;
+  if (!net_connected()) return DisplayNetworkState::kServiceConnecting;
+  return DisplayNetworkState::kOnline;
+}
+
 static void set_state(ConvState state) {
   s_state = state;
   s_state_since_ms = millis();
   if (state == ST_IDLE) {
     const SensorData &data = g_sensor.data();
-    g_display.showIdleDashboard(data.temperature, data.humidity, data.soil);
+    g_display.showIdleDashboard(data.temperature, data.humidity, data.soil,
+                                display_network_state());
   }
 }
 
@@ -638,7 +646,7 @@ void setup() {
   g_display.begin();
   const SensorData &initial_data = g_sensor.data();
   g_display.showIdleDashboard(initial_data.temperature, initial_data.humidity,
-                              initial_data.soil);
+                              initial_data.soil, display_network_state());
   // 启动横幅
   print_hardware_banner(sensors_ok, audio_ok);
 
@@ -707,7 +715,8 @@ void loop() {
 
   if (s_state == ST_IDLE) {
     const SensorData &data = g_sensor.data();
-    g_display.showIdleDashboard(data.temperature, data.humidity, data.soil);
+    g_display.showIdleDashboard(data.temperature, data.humidity, data.soil,
+                                display_network_state());
   }
 
   // 默认保持 WiFi 全性能，避免待唤醒阶段的 modem sleep 令 WebSocket

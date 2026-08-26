@@ -386,6 +386,10 @@ bool net_connected() {
   return s_ws_connected;
 }
 
+bool net_wifi_connected() {
+  return WiFi.status() == WL_CONNECTED;
+}
+
 bool net_provisioning_active() {
   return prov_active();
 }

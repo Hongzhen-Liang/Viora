@@ -2,10 +2,18 @@
 
 #include <Arduino.h>
 
+enum class DisplayNetworkState : uint8_t {
+  kOffline,
+  kProvisioning,
+  kServiceConnecting,
+  kOnline,
+};
+
 class DisplayManager {
  public:
   bool begin();
-  void showIdleDashboard(float temperature, float humidity, float soil);
+  void showIdleDashboard(float temperature, float humidity, float soil,
+                         DisplayNetworkState network_state);
   void setSubtitle(const char *text);
   void startSpeaking();
   void beginTimedSubtitles(const char *text);
@@ -33,6 +41,7 @@ class DisplayManager {
   float idle_humidity_ = NAN;
   float idle_soil_ = NAN;
   bool idle_clock_ready_ = false;
+  DisplayNetworkState idle_network_state_ = DisplayNetworkState::kOffline;
   uint32_t last_idle_render_ms_ = 0;
   String lines_[kMaxLines];
   uint8_t line_count_ = 0;

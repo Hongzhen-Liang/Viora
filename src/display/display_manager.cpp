@@ -20,6 +20,20 @@ constexpr uint32_t kSubtitlePageMaxMs = 12000;
 constexpr uint32_t kIdleRefreshMs = 60000;
 constexpr uint32_t kUnsyncedClockRefreshMs = 10000;
 
+// 23x16、按 iPhone 状态栏 Wi-Fi 轮廓重画：两条等厚同心弧带，加
+// 一个向下收尖的圆润小扇形。16 行从顶到底都有有效像素，与左侧
+// 时间数字的实际字形高度一致，不再依赖透明边距做位置补偿。
+constexpr uint8_t kWifiIconWidth = 23;
+constexpr uint8_t kWifiIconHeight = 16;
+const uint8_t kWifiIcon[] PROGMEM = {
+    0x00, 0x1c, 0x00, 0xc0, 0xff, 0x01, 0xf0, 0xff, 0x07,
+    0xfc, 0xff, 0x1f, 0x7e, 0x00, 0x3f, 0x1f, 0x00, 0x7c,
+    0x0f, 0x3e, 0x78, 0xc3, 0xff, 0x61, 0xe0, 0xff, 0x03,
+    0xf0, 0xc1, 0x07, 0x70, 0x00, 0x07, 0x30, 0x1c, 0x06,
+    0x00, 0x7f, 0x00, 0x00, 0x7f, 0x00, 0x00, 0x3e, 0x00,
+    0x00, 0x1c, 0x00,
+};
+
 // Software SPI keeps this display independent from future TF-card use.  The
 // ST7305 reflective LCD only transfers 15 KB for a full refresh, so updates
 // remain quick and happen outside the real-time audio task.
@@ -52,7 +66,8 @@ bool DisplayManager::begin() {
 }
 
 void DisplayManager::showIdleDashboard(float temperature, float humidity,
-                                       float soil) {
+                                       float soil,
+                                       DisplayNetworkState network_state) {
   if (!ready_) return;
   // 初始化后的第一次有效读数必须立即上屏，不能被一分钟的常规刷新节流
   // 挡住。否则串口已经有土壤百分比，屏幕仍会暂时显示“未连接”。
@@ -60,9 +75,11 @@ void DisplayManager::showIdleDashboard(float temperature, float humidity,
       (std::isnan(idle_temperature_) != std::isnan(temperature)) ||
       (std::isnan(idle_humidity_) != std::isnan(humidity)) ||
       (std::isnan(idle_soil_) != std::isnan(soil));
+  const bool network_state_changed = network_state != idle_network_state_;
   idle_temperature_ = temperature;
   idle_humidity_ = humidity;
   idle_soil_ = soil;
+  idle_network_state_ = network_state;
 
   const uint32_t now = millis();
   const bool clock_ready = time(nullptr) >= 1577836800;
@@ -78,8 +95,8 @@ void DisplayManager::showIdleDashboard(float temperature, float humidity,
   }
   const uint32_t refresh_ms =
       clock_ready ? kIdleRefreshMs : kUnsyncedClockRefreshMs;
-  if (idle_mode_ && !availability_changed && !clock_became_ready &&
-      now - last_idle_render_ms_ < refresh_ms) {
+  if (idle_mode_ && !availability_changed && !network_state_changed &&
+      !clock_became_ready && now - last_idle_render_ms_ < refresh_ms) {
     return;
   }
   idle_mode_ = true;
@@ -289,6 +306,28 @@ void DisplayManager::renderIdleDashboard() {
   }
   s_lcd.setFont(u8g2_font_helvB12_tf);
   s_lcd.drawStr(5, 20, time_text);
+
+  // 右上角显示“整机是否可用”，而不只是 Wi-Fi 关联状态。
+  // 正常时为克制的 Wi-Fi 图标；服务端未连时加 !；离线时加斜线；
+  // 配网模式直接显示“配网”，让用户知道下一步该做什么。
+  if (idle_network_state_ == DisplayNetworkState::kProvisioning) {
+    s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
+    s_lcd.drawUTF8(363, 20, "配网");
+  } else {
+    constexpr uint16_t wifi_x = 376;
+    constexpr uint16_t wifi_y = 5;
+    s_lcd.drawXBMP(wifi_x, wifi_y, kWifiIconWidth, kWifiIconHeight,
+                   kWifiIcon);
+
+    if (idle_network_state_ == DisplayNetworkState::kOffline) {
+      s_lcd.drawLine(375, 5, 399, 21);
+      s_lcd.drawLine(376, 5, 399, 20);
+    } else if (idle_network_state_ ==
+               DisplayNetworkState::kServiceConnecting) {
+      s_lcd.setFont(u8g2_font_helvB12_tf);
+      s_lcd.drawStr(356, 21, "!");
+    }
+  }
 
   s_lcd.drawHLine(24, kSubtitleTop, 352);
 

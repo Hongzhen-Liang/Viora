@@ -20,6 +20,7 @@ void net_loop();                         // WiFi 重连检查 + WS 收发（必�
 //（新保存的网络插在候选首位；配网模式下 AP+STA 共存，后台持续等待目标网络）
 void net_wifi_retry_now();
 bool net_connected();
+bool net_wifi_connected();              // WiFi 已关联，不代表服务端已连接
 bool net_provisioning_active();          // 是否处于配网热点模式
 // 待唤醒时允许 WiFi modem sleep；录音/处理/播放时恢复全性能。
 void net_set_idle_power_save(bool enabled);
