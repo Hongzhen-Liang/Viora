@@ -76,6 +76,12 @@ static uint32_t s_tts_last_activity_ms = 0;
 static bool s_tts_end_received = false;
 static uint32_t s_tts_end_received_ms = 0;
 static uint32_t s_tts_end_pending_bytes = 0;
+// text 事件携带完整回复，只作为无分段字幕服务端的播放兜底；正常显示
+// 由 tts_start/subtitle_cue 驱动，避免完整文本与同步字幕连续重画。
+static String s_pending_reply;
+static bool s_subtitle_stream_started = false;
+static bool s_subtitle_fallback_shown = false;
+static constexpr uint32_t kSubtitleFallbackDelayMs = 1500;
 
 static uint16_t pcm_rms(const int16_t *samples, int count) {
   if (samples == nullptr || count <= 0) return 0;
@@ -221,6 +227,7 @@ static void enter_listening(ListenOrigin origin, bool force_preroll = false,
   // 播放完或异常恢复后不再把上一句永久挂在屏幕上。
   // 这也给用户一个明确的“现在可以继续说”提示。
   g_display.setSubtitle("我在听…");
+  s_pending_reply = "";
   s_listen_origin = origin;
   s_listen_speech.reset();
   vad_smooth_reset();
@@ -491,7 +498,7 @@ static void on_server_text(const char *type, const char *user,
     }
     Serial.printf(">>> 你说: %s\n", user);
     Serial.printf(">>> Vesper: %s\n", reply);
-    g_display.setSubtitle(reply);
+    s_pending_reply = reply;
     s_consec_errors = 0;
     if (strcmp(op, "exit") == 0) {
       s_exit_pending = true;
@@ -515,18 +522,25 @@ static void on_server_text(const char *type, const char *user,
     s_tts_end_received_ms = 0;
     s_tts_end_pending_bytes = 0;
     s_tts_received_bytes = 0;
+    s_subtitle_stream_started = false;
+    s_subtitle_fallback_shown = false;
     reset_barge_evidence();
     speech_async_reset();
     g_audio.ringClear();
     g_audio.markTtsStart();
     if (reply[0] != '\0') {
       g_display.beginTimedSubtitles(reply);
+      s_subtitle_stream_started = true;
     } else {
-      // 兼容还未下发字幕 cue 的旧服务端。
+      // 暂时保留“正在思考…”，等待首个 subtitle_cue。
       g_display.startSpeaking();
     }
   } else if (strcmp(type, "subtitle_cue") == 0) {
     if (!accept_server_event(type, s_state == ST_PLAYING)) return;
+    // 1.5s 后若已启用完整文本兜底，本轮就固定使用该模式，避免迟到的
+    // cue 再次把两行完整文本切成较短片段。
+    if (s_subtitle_fallback_shown) return;
+    s_subtitle_stream_started = true;
     g_display.queueTimedSubtitle(reply, pcm_offset);
   } else if (strcmp(type, "tts_end") == 0) {
     if (!accept_server_event(type,
@@ -692,6 +706,17 @@ void loop() {
   else led_mode = LED_MODE_PLAYING;
   led_set_mode(led_mode);
   led_loop();
+
+  // 新协议优先等待与音频时间轴同步的字幕。若播放 1.5s 后仍完全没有
+  // subtitle，则判定为旧服务端，才显示 text 事件中的完整回复。
+  if (s_state == ST_PLAYING && !s_subtitle_stream_started &&
+      !s_subtitle_fallback_shown && s_pending_reply.length() > 0 &&
+      elapsed_at_least(millis(), s_playback_start_ms,
+                       kSubtitleFallbackDelayMs)) {
+    s_subtitle_fallback_shown = true;
+    g_display.setSubtitle(s_pending_reply.c_str());
+    g_display.startSpeaking();
+  }
   g_display.loop(s_state == ST_PLAYING, g_audio.playbackPositionBytes());
 
   if (s_rearm_pending) {
