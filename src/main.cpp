@@ -370,6 +370,9 @@ static void commit_turn(uint32_t now_ms) {
            static_cast<unsigned long>(clock_drift_ms));
   net_send_json(end_frame);
   set_state(ST_PROCESSING);
+  // 用户说完到服务端返回回复之间给出明确反馈，避免屏幕仍停留在
+  // “我在听…”而让用户误以为还需要继续说话。
+  g_display.setSubtitle("正在思考…");
 
   Serial.printf(
       ">>> 自动断句：录音=%lums 人声帧=%lu 句尾静音=%lums "
