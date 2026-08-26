@@ -90,7 +90,7 @@ sequenceDiagram
 | 主控 | Waveshare ESP32-S3-RLCD-4.2 | N16R8，板载 RLCD 与音频 Codec |
 | 麦克风 | 板载双麦 + ES7210 | 16kHz、16bit 双声道 I2S，固件取 MIC1 |
 | 功放+扬声器 | 板载 ES8311 + NS4150B | 接板载 2Pin 扬声器座 |
-| 土壤湿度 | 电容式土壤湿度传感器 | 模拟输出，接排针 GPIO1 |
+| 土壤湿度 | 电容式土壤湿度传感器 | AOUT 模拟输出接 GPIO1（GPIO0 不支持 ADC） |
 | 温湿度 | 板载 SHTC3 | I2C 地址 0x70 |
 | 光照 | GY-302（BH1750，可选外接） | 与板载设备共享 I2C |
 
@@ -102,7 +102,7 @@ sequenceDiagram
 |------|------|------|------|
 | 板载/扩展 I2C | SDA | GPIO 13 | SHTC3、Codec 与扩展排针共享 |
 | 板载/扩展 I2C | SCL | GPIO 14 | 400kHz，板载已有上拉 |
-| 土壤湿度 | AO | GPIO 1 | 排针 GP1（ADC1_CH0） |
+| 土壤湿度 | AOUT | GPIO 1 | ADC1_CH0；不可接 GPIO0 |
 | ES7210/ES8311 | MCLK | GPIO 16 | 4.096MHz |
 | ES7210/ES8311 | BCLK | GPIO 9 | 共享音频时钟 |
 | ES7210/ES8311 | WS | GPIO 45 | 共享左右声道时钟 |

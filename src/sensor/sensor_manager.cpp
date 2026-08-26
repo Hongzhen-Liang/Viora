@@ -104,8 +104,15 @@ uint8_t SensorManager::probeI2c(uint8_t addr, uint8_t cmd, uint8_t attempts) {
 }
 
 void SensorManager::initSoilAdc() {
-  // 土壤湿度 ADC（GPIO1 = 排针 GP1 / ADC1_CH0，不依赖 I2C）
+  // 土壤湿度 ADC（传感器 AOUT 接 GPIO1 / ADC1_CH0，不依赖 I2C）
   s_soil_ok_ = false;
+  s_data_.soil = NAN;
+  s_data_.soil_raw = -1;
+  if (digitalPinToAnalogChannel(SOIL_ADC_PIN) < 0) {
+    Serial.printf("[SENSOR] Soil ADC init failed: GPIO%d is not an ADC pin\n",
+                  SOIL_ADC_PIN);
+    return;
+  }
   analogSetPinAttenuation(SOIL_ADC_PIN, ADC_11db);  // 0~3.1V 量程
   const int raw = analogRead(SOIL_ADC_PIN);
   if (raw < 0 || raw > 4095) {

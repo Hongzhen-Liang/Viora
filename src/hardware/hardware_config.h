@@ -15,7 +15,8 @@
 #define I2C_SCL_PIN 14
 #define I2C_FREQ_HZ 400000
 
-// ---- 土壤湿度（电容式，模拟 ADC）----
+// ---- 土壤湿度（电容式，AOUT 接 GPIO1 / ADC1_CH0）----
+// ESP32-S3 的 GPIO0 不具备 ADC 功能，不能连接传感器 AOUT。
 #define SOIL_ADC_PIN 1
 
 // ---- 板载 Codec 共用 I2S 总线 ----

@@ -3,7 +3,7 @@
 // SensorManager —— 传感器管理模块
 //   SHTC3  板载温湿度（I2C，0x70）
 //   BH1750 光照   （I2C，0x23，GY-302）
-//   土壤湿度      （模拟 ADC，排针 GPIO1）
+//   土壤湿度      （模拟 ADC，传感器 AOUT 接 GPIO1）
 // ============================================================
 #include <Arduino.h>
 
@@ -13,7 +13,7 @@ struct SensorData {
   float humidity    = NAN;  // %
   float light       = NAN;  // lux
   float soil        = NAN;  // 0~100% 湿度百分比
-  int   soil_raw    = 0;    // 土壤原始 ADC 值（12bit，0~4095）
+  int   soil_raw    = -1;   // 土壤原始 ADC 值（12bit，0~4095；-1=不可用）
   uint32_t updated_ms = 0;  // 最近一次成功读取的毫秒时间戳
 };
 
