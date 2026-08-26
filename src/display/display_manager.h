@@ -5,6 +5,7 @@
 class DisplayManager {
  public:
   bool begin();
+  void showIdleDashboard(float temperature, float humidity, float soil);
   void setSubtitle(const char *text);
   void startSpeaking();
   void beginTimedSubtitles(const char *text);
@@ -17,6 +18,7 @@ class DisplayManager {
 
   void wrapSubtitle(const char *text);
   void renderPage();
+  void renderIdleDashboard();
   uint32_t currentPageDurationMs() const;
 
   struct TimedCue {
@@ -26,6 +28,12 @@ class DisplayManager {
   static constexpr uint8_t kMaxTimedCues = 16;
 
   bool ready_ = false;
+  bool idle_mode_ = false;
+  float idle_temperature_ = NAN;
+  float idle_humidity_ = NAN;
+  float idle_soil_ = NAN;
+  bool idle_clock_ready_ = false;
+  uint32_t last_idle_render_ms_ = 0;
   String lines_[kMaxLines];
   uint8_t line_count_ = 0;
   uint8_t page_ = 0;

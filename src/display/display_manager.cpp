@@ -1,7 +1,10 @@
 #include "display/display_manager.h"
 
 #include <U8g2lib.h>
+#include <cmath>
+#include <ctime>
 
+#include "config.h"
 #include "display/orchid_bitmap.h"
 #include "hardware/hardware_config.h"
 
@@ -14,6 +17,8 @@ constexpr uint16_t kSubtitleTop = 233;
 constexpr uint32_t kSubtitleMsPerCharacter = 260;
 constexpr uint32_t kSubtitlePageMinMs = 4800;
 constexpr uint32_t kSubtitlePageMaxMs = 12000;
+constexpr uint32_t kIdleRefreshMs = 60000;
+constexpr uint32_t kUnsyncedClockRefreshMs = 10000;
 
 // Software SPI keeps this display independent from future TF-card use.  The
 // ST7305 reflective LCD only transfers 15 KB for a full refresh, so updates
@@ -44,6 +49,44 @@ bool DisplayManager::begin() {
   Serial.printf("[DISPLAY] ST7305 就绪: %ux%u，蝴蝶兰角色已加载\n",
                 kScreenWidth, kScreenHeight);
   return true;
+}
+
+void DisplayManager::showIdleDashboard(float temperature, float humidity,
+                                       float soil) {
+  if (!ready_) return;
+  // 初始化后的第一次有效读数必须立即上屏，不能被一分钟的常规刷新节流
+  // 挡住。否则串口已经有土壤百分比，屏幕仍会暂时显示“未连接”。
+  const bool availability_changed =
+      (std::isnan(idle_temperature_) != std::isnan(temperature)) ||
+      (std::isnan(idle_humidity_) != std::isnan(humidity)) ||
+      (std::isnan(idle_soil_) != std::isnan(soil));
+  idle_temperature_ = temperature;
+  idle_humidity_ = humidity;
+  idle_soil_ = soil;
+
+  const uint32_t now = millis();
+  const bool clock_ready = time(nullptr) >= 1577836800;
+  const bool clock_became_ready = clock_ready && !idle_clock_ready_;
+  idle_clock_ready_ = clock_ready;
+  if (clock_became_ready) {
+    const time_t china_time = time(nullptr) + DEVICE_UTC_OFFSET_SECONDS;
+    struct tm china_tm;
+    gmtime_r(&china_time, &china_tm);
+    char synced_time[24];
+    strftime(synced_time, sizeof(synced_time), "%Y-%m-%d %H:%M:%S", &china_tm);
+    Serial.printf("[TIME] 校时完成，北京时间 %s\n", synced_time);
+  }
+  const uint32_t refresh_ms =
+      clock_ready ? kIdleRefreshMs : kUnsyncedClockRefreshMs;
+  if (idle_mode_ && !availability_changed && !clock_became_ready &&
+      now - last_idle_render_ms_ < refresh_ms) {
+    return;
+  }
+  idle_mode_ = true;
+  timed_mode_ = false;
+  timed_cue_count_ = 0;
+  last_idle_render_ms_ = now;
+  renderIdleDashboard();
 }
 
 void DisplayManager::wrapSubtitle(const char *text) {
@@ -91,6 +134,7 @@ void DisplayManager::wrapSubtitle(const char *text) {
 
 void DisplayManager::setSubtitle(const char *text) {
   if (!ready_) return;
+  idle_mode_ = false;
   timed_mode_ = false;
   timed_cue_count_ = 0;
   wrapSubtitle(text);
@@ -104,6 +148,7 @@ void DisplayManager::setSubtitle(const char *text) {
 
 void DisplayManager::beginTimedSubtitles(const char *text) {
   if (!ready_) return;
+  idle_mode_ = false;
   timed_mode_ = true;
   timed_cue_count_ = 0;
   wrapSubtitle(text);
@@ -220,5 +265,65 @@ void DisplayManager::renderPage() {
         text_width < kScreenWidth ? (kScreenWidth - text_width) / 2 : 0;
     s_lcd.drawUTF8(x, first_baseline + row * 29, lines_[line].c_str());
   }
+  s_lcd.sendBuffer();
+}
+
+void DisplayManager::renderIdleDashboard() {
+  s_lcd.clearBuffer();
+
+  const uint16_t image_x = (kScreenWidth - ORCHID_BITMAP_WIDTH) / 2;
+  s_lcd.drawXBMP(image_x, 0, ORCHID_BITMAP_WIDTH, ORCHID_BITMAP_HEIGHT,
+                 ORCHID_BITMAP);
+
+  // 时间占用植物线稿左侧的留白，不挤压角色主体。NTP 尚未校准时
+  // 明确显示占位符，避免把 1970 年的系统初始值误当成真实时间。
+  char time_text[6] = "--:--";
+  const time_t now = time(nullptr);
+  if (now >= 1577836800) {  // 2020-01-01，早于此值视为尚未校时
+    // 系统 epoch 始终按 UTC 保存；显示时显式加 8 小时，再用 gmtime_r
+    // 拆分。这样不依赖 C 运行库的 TZ 状态，也绝不会套用夏令时。
+    const time_t china_time = now + DEVICE_UTC_OFFSET_SECONDS;
+    struct tm china_tm;
+    gmtime_r(&china_time, &china_tm);
+    strftime(time_text, sizeof(time_text), "%H:%M", &china_tm);
+  }
+  s_lcd.setFont(u8g2_font_helvB12_tf);
+  s_lcd.drawStr(5, 20, time_text);
+
+  s_lcd.drawHLine(24, kSubtitleTop, 352);
+
+  char soil_value[12] = "--";
+  const char *soil_state = "传感器未连接";
+  if (!std::isnan(idle_soil_)) {
+    snprintf(soil_value, sizeof(soil_value), "%.0f%%", idle_soil_);
+    if (idle_soil_ < 30.0f) {
+      soil_state = "偏干";
+    } else if (idle_soil_ <= 75.0f) {
+      soil_state = "适宜";
+    } else {
+      soil_state = "偏湿";
+    }
+  }
+
+  char temperature[16] = "--";
+  char humidity[16] = "--";
+  if (!std::isnan(idle_temperature_)) {
+    snprintf(temperature, sizeof(temperature), "%.1f°C", idle_temperature_);
+  }
+  if (!std::isnan(idle_humidity_)) {
+    snprintf(humidity, sizeof(humidity), "%.0f%%", idle_humidity_);
+  }
+
+  s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
+  String soil_line = String("土壤湿度 ") + soil_value + "  " + soil_state;
+  uint16_t width = s_lcd.getUTF8Width(soil_line.c_str());
+  s_lcd.drawUTF8(width < kScreenWidth ? (kScreenWidth - width) / 2 : 0, 257,
+                 soil_line.c_str());
+
+  String environment_line =
+      String("温度 ") + temperature + "  空气湿度 " + humidity;
+  width = s_lcd.getUTF8Width(environment_line.c_str());
+  s_lcd.drawUTF8(width < kScreenWidth ? (kScreenWidth - width) / 2 : 0, 286,
+                 environment_line.c_str());
   s_lcd.sendBuffer();
 }

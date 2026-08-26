@@ -8,6 +8,7 @@
 #include <Arduino.h>
 #include <cmath>
 #include <string.h>
+#include <time.h>
 
 #include "ai/ai_manager.h"
 #include "ai/wake_word.h"
@@ -159,6 +160,10 @@ static const char *state_name(ConvState state) {
 static void set_state(ConvState state) {
   s_state = state;
   s_state_since_ms = millis();
+  if (state == ST_IDLE) {
+    const SensorData &data = g_sensor.data();
+    g_display.showIdleDashboard(data.temperature, data.humidity, data.soil);
+  }
 }
 
 static int16_t s_ring_scratch[512];
@@ -291,6 +296,7 @@ static void start_wake_ack() {
     return;
   }
   set_state(ST_WAKE_ACK);
+  g_display.setSubtitle("我在听…");
   s_ack_playing = false;
   s_ack_voice_captured = false;
   s_ack_speech.reset();
@@ -315,7 +321,6 @@ static void end_active_session(const char *reason) {
   s_accept_tts_audio = false;
   s_tts_end_received = false;
   g_audio.ringClear();
-  g_display.setSubtitle("需要我时，叫我一声。");
 }
 
 static void commit_turn(uint32_t now_ms) {
@@ -402,7 +407,12 @@ static void commit_turn(uint32_t now_ms) {
 // ============================================================
 // WebSocket 事件回调
 // ============================================================
-static void on_net_connected() {}
+static void on_net_connected() {
+  // 系统时钟保持 UTC，显示层再显式换算为中国标准时间 UTC+8。
+  // configTime 非阻塞；SNTP 在后台完成首次同步并定期校准。
+  configTime(0, 0, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
+  Serial.println("[TIME] 已启动网络校时，屏幕固定显示中国标准时间 UTC+8");
+}
 
 static void on_net_disconnected() {
   set_state(ST_IDLE);
@@ -626,6 +636,9 @@ void setup() {
   const bool audio_ok = g_audio.begin();
   // 4.2 英寸 ST7305 反射屏：蝴蝶兰角色 + 动态中文字幕。
   g_display.begin();
+  const SensorData &initial_data = g_sensor.data();
+  g_display.showIdleDashboard(initial_data.temperature, initial_data.humidity,
+                              initial_data.soil);
   // 启动横幅
   print_hardware_banner(sensors_ok, audio_ok);
 
@@ -690,6 +703,11 @@ void loop() {
     g_sensor.poll();
     g_sensor.print();
     send_sensor_telemetry();
+  }
+
+  if (s_state == ST_IDLE) {
+    const SensorData &data = g_sensor.data();
+    g_display.showIdleDashboard(data.temperature, data.humidity, data.soil);
   }
 
   // 默认保持 WiFi 全性能，避免待唤醒阶段的 modem sleep 令 WebSocket

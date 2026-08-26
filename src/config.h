@@ -90,6 +90,12 @@
 // ============================================================
 #define SENSOR_POLL_MS 5000  // 每 5s 读一次 SHTC3 / BH1750 / 土壤湿度
 
+// 联网后通过 SNTP 校时，固定使用中国标准时间 UTC+8（无夏令时）。
+#define DEVICE_UTC_OFFSET_SECONDS (8 * 60 * 60)
+#define NTP_SERVER_1 "ntp.aliyun.com"
+#define NTP_SERVER_2 "pool.ntp.org"
+#define NTP_SERVER_3 "time.cloudflare.com"
+
 // ============================================================
 // 录音 VAD 参数（神经 VAD 负责判定；能量阈值仅用于诊断）
 // ============================================================
