@@ -7,6 +7,7 @@
 
 #include <BH1750.h>
 #include <Wire.h>
+#include <cmath>
 
 #include "hardware/hardware_config.h"
 
@@ -21,6 +22,12 @@ uint32_t s_last_shtc3_fail_ms = 0;
 uint32_t s_last_bh1750_fail_ms = 0;
 
 constexpr uint8_t kShtc3Addr = 0x70;
+
+// Sensirion Magnus 公式中的温度项。把板载热源导致的温差补偿到环境温度
+// 时，常数 6.112 hPa 会在饱和水汽压比值中约掉。
+float saturationVaporPressureFactor(float temp_c) {
+  return std::exp(17.62f * temp_c / (243.12f + temp_c));
+}
 
 uint8_t shtc3Crc(const uint8_t *data, size_t len) {
   uint8_t crc = 0xFF;
@@ -56,9 +63,19 @@ bool shtc3Read(float &temp_c, float &hum_pct) {
   // SHTC3 数据手册规定分母为 2^16。温度再叠加 Waveshare 针对
   // ESP32-S3-RLCD-4.2 板载热源给出的 -4°C 补偿。
   constexpr float kShtc3RawScale = 65536.0f;
-  temp_c = -45.0f + 175.0f * static_cast<float>(rt) / kShtc3RawScale +
-           SHTC3_TEMPERATURE_OFFSET_C;
-  hum_pct = 100.0f * static_cast<float>(rh) / kShtc3RawScale;
+  const float sensor_temp_c =
+      -45.0f + 175.0f * static_cast<float>(rt) / kShtc3RawScale;
+  const float sensor_hum_pct =
+      100.0f * static_cast<float>(rh) / kShtc3RawScale;
+  temp_c = sensor_temp_c + SHTC3_TEMPERATURE_OFFSET_C;
+
+  // SHTC3 给出的是传感器自身温度下的 RH。温度减去板级热偏差后，按
+  // 水汽分压不变换算为环境温度下的 RH，避免只修温度却让湿度仍偏低。
+  hum_pct = sensor_hum_pct *
+            saturationVaporPressureFactor(sensor_temp_c) /
+            saturationVaporPressureFactor(temp_c);
+  if (hum_pct < 0.0f) hum_pct = 0.0f;
+  if (hum_pct > 100.0f) hum_pct = 100.0f;
   return true;
 }
 
@@ -123,7 +140,9 @@ void SensorManager::initSoilAdc() {
     Serial.println("[SENSOR] Soil ADC init failed (bad reading)");
   } else {
     s_soil_ok_ = true;
-    Serial.printf("[SENSOR] Soil ADC OK (GPIO%d, raw=%d)\n", SOIL_ADC_PIN, raw);
+    Serial.printf(
+        "[SENSOR] Soil ADC OK (GPIO%d, raw=%d, calibration dry=%d wet=%d)\n",
+        SOIL_ADC_PIN, raw, s_soil_dry_raw_, s_soil_wet_raw_);
   }
 }
 

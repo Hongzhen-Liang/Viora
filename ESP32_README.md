@@ -111,7 +111,8 @@ sequenceDiagram
 | NS4150B 功放 | PA EN | GPIO 46 | Codec 初始化成功后拉高 |
 
 > 板载 SHTC3 靠近板上热源，固件按 Waveshare 官方示例对温度应用
-> `-4.0°C` 补偿；可在 `src/hardware/hardware_config.h` 中重新标定。
+> `-4.0°C` 补偿，并按 Sensirion 水汽压公式同步修正相对湿度；温度偏移可在
+> `src/hardware/hardware_config.h` 中重新标定。
 
 > 屏幕固定占用 GPIO5/6/11/12/40/41；GPIO4 是板载电池电压检测，均不可再
 > 分配给传感器或音频。此板没有可编程 WS2812 状态灯。
