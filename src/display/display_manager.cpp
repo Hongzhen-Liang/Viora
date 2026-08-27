@@ -311,6 +311,7 @@ void DisplayManager::renderIdleDashboard() {
   // 时间占用植物线稿左侧的留白，不挤压角色主体。NTP 尚未校准时
   // 明确显示占位符，避免把 1970 年的系统初始值误当成真实时间。
   char time_text[6] = "--:--";
+  char date_text[32] = "";
   const time_t now = time(nullptr);
   if (now >= 1577836800) {  // 2020-01-01，早于此值视为尚未校时
     // 系统 epoch 始终按 UTC 保存；显示时显式加 8 小时，再用 gmtime_r
@@ -319,9 +320,20 @@ void DisplayManager::renderIdleDashboard() {
     struct tm china_tm;
     gmtime_r(&china_time, &china_tm);
     strftime(time_text, sizeof(time_text), "%H:%M", &china_tm);
+    // 中文 iPhone 锁屏采用“月日 + 星期”的自然顺序。这里把
+    // “8月27日 星期四”与时间同行，给中央植物线稿保留足够留白。
+    static const char *const kWeekdays[] = {
+        "星期日", "星期一", "星期二", "星期三",
+        "星期四", "星期五", "星期六"};
+    snprintf(date_text, sizeof(date_text), "%d月%d日 %s", china_tm.tm_mon + 1,
+             china_tm.tm_mday, kWeekdays[china_tm.tm_wday]);
   }
   s_lcd.setFont(u8g2_font_helvB12_tf);
   s_lcd.drawStr(5, 20, time_text);
+  if (date_text[0] != '\0') {
+    s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
+    s_lcd.drawUTF8(62, 20, date_text);
+  }
 
   // 右上角显示“整机是否可用”，而不只是 Wi-Fi 关联状态。
   // 正常时为克制的 Wi-Fi 图标；服务端未连时加 !；离线时加斜线；
