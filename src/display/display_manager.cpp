@@ -104,6 +104,24 @@ void DisplayManager::showIdleDashboard(float temperature, float humidity,
   renderIdleDashboard();
 }
 
+void DisplayManager::setUpdateAvailable(bool available) {
+  if (!ready_ || update_available_ == available) return;
+  update_available_ = available;
+  if (idle_mode_) {
+    last_idle_render_ms_ = millis();
+    renderIdleDashboard();
+  }
+}
+
+void DisplayManager::showOtaScreen(const char *line1, const char *line2) {
+  String text = line1 ? line1 : "";
+  if (line2 && line2[0] != '\0') {
+    text += '\n';
+    text += line2;
+  }
+  setSubtitle(text.c_str());
+}
+
 void DisplayManager::wrapSubtitle(const char *text) {
   line_count_ = 0;
   if (text == nullptr || text[0] == '\0') return;
@@ -325,6 +343,18 @@ void DisplayManager::renderIdleDashboard() {
       s_lcd.setFont(u8g2_font_helvB12_tf);
       s_lcd.drawStr(356, 21, "!");
     }
+  }
+
+  // 有新版本或已有固件待安装时，在 Wi-Fi 左侧显示“向下箭头进入托盘”。
+  // 图标完全由矢量线绘制，不占额外位图空间。
+  if (update_available_) {
+    constexpr uint16_t icon_x = 342;
+    constexpr uint16_t icon_y = 5;
+    s_lcd.drawRFrame(icon_x, icon_y, 24, 18, 4);
+    s_lcd.drawVLine(icon_x + 12, icon_y + 3, 7);
+    s_lcd.drawLine(icon_x + 8, icon_y + 7, icon_x + 12, icon_y + 11);
+    s_lcd.drawLine(icon_x + 16, icon_y + 7, icon_x + 12, icon_y + 11);
+    s_lcd.drawHLine(icon_x + 7, icon_y + 14, 11);
   }
 
   s_lcd.drawHLine(24, kSubtitleTop, 352);

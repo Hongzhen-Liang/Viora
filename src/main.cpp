@@ -165,10 +165,140 @@ static DisplayNetworkState display_network_state() {
   return DisplayNetworkState::kOnline;
 }
 
+enum class OtaScreenMode : uint8_t {
+  kNone,
+  kDetails,
+  kDownloading,
+  kReadyToInstall,
+  kInstalling,
+  kError,
+};
+
+static OtaScreenMode s_ota_screen_mode = OtaScreenMode::kNone;
+static uint32_t s_ota_screen_deadline_ms = 0;
+static bool s_key_raw_pressed = false;
+static bool s_key_stable_pressed = false;
+static uint32_t s_key_changed_ms = 0;
+
+static void show_ota_details() {
+  char line1[80];
+  snprintf(line1, sizeof(line1), "当前 %s  新版 %s", FIRMWARE_VERSION,
+           ota_available_version());
+  g_display.showOtaScreen(line1, "再按 KEY 下载更新");
+  s_ota_screen_mode = OtaScreenMode::kDetails;
+  s_ota_screen_deadline_ms = millis() + 20000UL;
+}
+
+static void on_ota_ui_event(OtaUiEvent event, const char *version,
+                            uint32_t value) {
+  char line1[80];
+  char line2[64];
+  switch (event) {
+    case OtaUiEvent::kAvailable:
+      g_display.setUpdateAvailable(true);
+      break;
+    case OtaUiEvent::kDownloading:
+      s_ota_screen_mode = OtaScreenMode::kDownloading;
+      s_ota_screen_deadline_ms = 0;
+      snprintf(line1, sizeof(line1), "正在下载版本 %s", version);
+      g_display.showOtaScreen(line1, "请保持设备通电");
+      break;
+    case OtaUiEvent::kDownloadProgress:
+      if (value != 100 && value % 5 != 0) break;
+      snprintf(line1, sizeof(line1), "正在下载版本 %s", version);
+      snprintf(line2, sizeof(line2), "下载进度 %lu%%",
+               static_cast<unsigned long>(value));
+      g_display.showOtaScreen(line1, line2);
+      break;
+    case OtaUiEvent::kReadyToInstall:
+      g_display.setUpdateAvailable(true);
+      s_ota_screen_mode = OtaScreenMode::kReadyToInstall;
+      s_ota_screen_deadline_ms = 0;
+      snprintf(line1, sizeof(line1), "版本 %s 已下载校验", version);
+      g_display.showOtaScreen(line1, "按 KEY 安装并重启");
+      break;
+    case OtaUiEvent::kInstalling:
+      s_ota_screen_mode = OtaScreenMode::kInstalling;
+      s_ota_screen_deadline_ms = 0;
+      snprintf(line1, sizeof(line1), "正在安装版本 %s", version);
+      g_display.showOtaScreen(line1, "设备即将自动重启");
+      break;
+    case OtaUiEvent::kUpToDate:
+      if (!ota_ready_to_install()) g_display.setUpdateAvailable(false);
+      break;
+    case OtaUiEvent::kError:
+      s_ota_screen_mode = OtaScreenMode::kError;
+      s_ota_screen_deadline_ms = millis() + 12000UL;
+      g_display.showOtaScreen("更新操作失败", ota_last_error());
+      break;
+  }
+}
+
+static void user_key_init() {
+  pinMode(USER_KEY_PIN, INPUT_PULLUP);
+  const bool pressed = digitalRead(USER_KEY_PIN) == USER_KEY_ACTIVE_LEVEL;
+  s_key_raw_pressed = pressed;
+  s_key_stable_pressed = pressed;
+  s_key_changed_ms = millis();
+  Serial.printf("[KEY] 用户按键 GPIO%d 就绪（低电平按下）\n", USER_KEY_PIN);
+}
+
+static bool user_key_pressed_event() {
+  const bool pressed = digitalRead(USER_KEY_PIN) == USER_KEY_ACTIVE_LEVEL;
+  const uint32_t now = millis();
+  if (pressed != s_key_raw_pressed) {
+    s_key_raw_pressed = pressed;
+    s_key_changed_ms = now;
+  }
+  if (pressed != s_key_stable_pressed && now - s_key_changed_ms >= 35) {
+    s_key_stable_pressed = pressed;
+    return pressed;
+  }
+  return false;
+}
+
+static void handle_ota_key() {
+  if (!user_key_pressed_event()) return;
+  if (s_state != ST_IDLE || ota_busy()) {
+    Serial.println("[KEY] 当前正忙，忽略 OTA 按键");
+    return;
+  }
+  if (ota_ready_to_install()) {
+    Serial.println("[KEY] 用户确认安装 OTA");
+    ota_request_install();
+    return;
+  }
+  if (!ota_update_available()) return;
+  if (s_ota_screen_mode == OtaScreenMode::kDetails) {
+    Serial.println("[KEY] 用户确认下载 OTA");
+    s_ota_screen_mode = OtaScreenMode::kDownloading;
+    s_ota_screen_deadline_ms = 0;
+    ota_request_download();
+  } else {
+    Serial.println("[KEY] 显示 OTA 版本详情");
+    show_ota_details();
+  }
+}
+
+static void ota_screen_loop() {
+  if (s_ota_screen_mode == OtaScreenMode::kNone ||
+      s_ota_screen_deadline_ms == 0 ||
+      static_cast<int32_t>(millis() - s_ota_screen_deadline_ms) < 0) {
+    return;
+  }
+  s_ota_screen_mode = OtaScreenMode::kNone;
+  s_ota_screen_deadline_ms = 0;
+  if (s_state == ST_IDLE) {
+    const SensorData &data = g_sensor.data();
+    g_display.showIdleDashboard(data.temperature, data.humidity, data.soil,
+                                display_network_state());
+  }
+}
+
 static void set_state(ConvState state) {
   s_state = state;
   s_state_since_ms = millis();
-  if (state == ST_IDLE) {
+  if (state == ST_IDLE && s_ota_screen_mode == OtaScreenMode::kNone) {
     const SensorData &data = g_sensor.data();
     g_display.showIdleDashboard(data.temperature, data.humidity, data.soil,
                                 display_network_state());
@@ -645,6 +775,8 @@ void setup() {
   const bool audio_ok = g_audio.begin();
   // 4.2 英寸 ST7305 反射屏：蝴蝶兰角色 + 动态中文字幕。
   g_display.begin();
+  user_key_init();
+  ota_set_ui_callback(on_ota_ui_event);
   const SensorData &initial_data = g_sensor.data();
   g_display.showIdleDashboard(initial_data.temperature, initial_data.humidity,
                               initial_data.soil, display_network_state());
@@ -711,6 +843,8 @@ static void send_sensor_telemetry() {
 void loop() {
   net_loop();
   ota_loop(s_state == ST_IDLE && !s_rearm_pending && !s_exit_pending);
+  handle_ota_key();
+  ota_screen_loop();
 
   // 周期读取传感器（SHTC3 / BH1750 / 土壤湿度）并打印 + 上报服务端
   static uint32_t s_last_sensor_ms = 0;
@@ -722,7 +856,7 @@ void loop() {
     send_sensor_telemetry();
   }
 
-  if (s_state == ST_IDLE) {
+  if (s_state == ST_IDLE && s_ota_screen_mode == OtaScreenMode::kNone) {
     const SensorData &data = g_sensor.data();
     g_display.showIdleDashboard(data.temperature, data.humidity, data.soil,
                                 display_network_state());

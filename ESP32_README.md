@@ -103,6 +103,7 @@ sequenceDiagram
 | 板载/扩展 I2C | SDA | GPIO 13 | SHTC3、Codec 与扩展排针共享 |
 | 板载/扩展 I2C | SCL | GPIO 14 | 400kHz，板载已有上拉 |
 | 土壤湿度 | AOUT | GPIO 1 | ADC1_CH0；不可接 GPIO0 |
+| 固件更新键 | 板载 KEY | GPIO 18 | 低电平按下；查看版本、下载、安装三段确认 |
 | ES7210/ES8311 | MCLK | GPIO 16 | 4.096MHz |
 | ES7210/ES8311 | BCLK | GPIO 9 | 共享音频时钟 |
 | ES7210/ES8311 | WS | GPIO 45 | 共享左右声道时钟 |

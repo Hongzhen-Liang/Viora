@@ -73,11 +73,11 @@
 
 // ============================================================
 // 固件版本与 OTA
-// OTA 默认关闭；只有 secrets.h 同时配置 HTTPS manifest URL
+// OTA 默认关闭；只有 ota_secrets.h（或兼容的 secrets.h）同时配置 HTTPS manifest URL
 // 和服务器根 CA 后才会启用。固件还会校验 RSA-3072 签名。
 // ============================================================
-#define FIRMWARE_VERSION       "1.0.2"
-#define FIRMWARE_BUILD         3
+#define FIRMWARE_VERSION       "1.0.4"
+#define FIRMWARE_BUILD         5
 #define FIRMWARE_HARDWARE      "waveshare-rlcd-42-v1"
 #define FIRMWARE_MODEL_VERSION 1
 #if __has_include("ota_secrets.h") || __has_include("secrets.h")

@@ -365,6 +365,13 @@ static String ota_page() {
   h += F("</p><p>更新状态：");
   h += ota_status();
   h += F("</p>");
+  if (ota_update_available()) {
+    h += F("<p>可用版本：<b>");
+    h += html_escape(ota_available_version());
+    h += F("</b> (build ");
+    h += String(ota_available_build());
+    h += F(")</p>");
+  }
   if (ota_last_error()[0] != '\0') {
     h += F("<p class=\"tip\">最近错误：");
     h += html_escape(ota_last_error());
@@ -372,9 +379,14 @@ static String ota_page() {
   }
   h += F("</div>");
   if (ota_enabled()) {
-    h += F("<form class=\"card\" method=\"post\" action=\"/ota/check\"><p class=\"tip\">设备会等到对话空闲，再从固定 HTTPS 服务器下载并校验签名。</p><button type=\"submit\">立即检查更新</button></form>");
+    h += F("<form class=\"card\" method=\"post\" action=\"/ota/check\"><p class=\"tip\">只检查版本信息，不会自动下载或重启。</p><button type=\"submit\">检查新版本</button></form>");
+    if (ota_ready_to_install()) {
+      h += F("<form class=\"card\" method=\"post\" action=\"/ota/install\"><p class=\"tip\">固件已下载并通过摘要、签名校验。安装会重启设备，并在健康检查失败时回滚。</p><button type=\"submit\">安装并重启</button></form>");
+    } else if (ota_update_available()) {
+      h += F("<form class=\"card\" method=\"post\" action=\"/ota/download\"><p class=\"tip\">下载期间请保持设备通电；下载完成后仍需再次确认安装。</p><button type=\"submit\">下载更新</button></form>");
+    }
   } else {
-    h += F("<div class=\"card\"><p class=\"tip\">OTA 尚未配置。需在固件 secrets.h 中设置 HTTPS manifest 地址、token 和根 CA。</p></div>");
+    h += F("<div class=\"card\"><p class=\"tip\">OTA 尚未配置。需在固件 ota_secrets.h 中设置 HTTPS manifest 地址、token 和根 CA。</p></div>");
   }
   h += F("<p class=\"tip\"><a href=\"/\" style=\"color:#60a5fa\">返回 WiFi 管理</a></p></body></html>");
   return h;
@@ -401,6 +413,26 @@ static void handle_ota_check() {
   s_web.send(303, "text/plain", "");
 }
 
+static void handle_ota_download() {
+  if (!basic_auth_ok()) {
+    send_unauthorized();
+    return;
+  }
+  ota_request_download();
+  s_web.sendHeader("Location", "/ota", true);
+  s_web.send(303, "text/plain", "");
+}
+
+static void handle_ota_install() {
+  if (!basic_auth_ok()) {
+    send_unauthorized();
+    return;
+  }
+  ota_request_install();
+  s_web.sendHeader("Location", "/ota", true);
+  s_web.send(303, "text/plain", "");
+}
+
 // ---------- 网页服务生命周期 ----------
 // 配网与联网两种状态共用同一个 80 端口网页：
 // 配网时经 192.168.4.1 访问；联网时经设备局域网 IP 访问，随时增删已保存 WiFi。
@@ -410,6 +442,8 @@ static void web_start() {
   s_web.on("/del", HTTP_GET, handle_del);
   s_web.on("/ota", HTTP_GET, handle_ota);
   s_web.on("/ota/check", HTTP_POST, handle_ota_check);
+  s_web.on("/ota/download", HTTP_POST, handle_ota_download);
+  s_web.on("/ota/install", HTTP_POST, handle_ota_install);
   s_web.onNotFound(handle_portal);
   s_web.begin();
   s_web_running = true;

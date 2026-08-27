@@ -37,6 +37,11 @@
 // 此板没有可编程 WS2812；板上绿色 LED 是电源状态灯。
 #define HAS_STATUS_LED 0
 
+// ---- 板载用户按键 ----
+// KEY 为独立功能键（GPIO18，按下接地）；GPIO0 的 BOOT 键保留给烧录。
+#define USER_KEY_PIN 18
+#define USER_KEY_ACTIVE_LEVEL LOW
+
 // ---- RLCD（预留给后续显示模块，避免其它外设撞脚）----
 #define RLCD_DC_PIN 5
 #define RLCD_TE_PIN 6
