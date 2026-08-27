@@ -16,6 +16,7 @@
 
 #include "config.h"
 #include "net.h"
+#include "ota_manager.h"
 #include "provisioning.h"
 
 static WebServer s_web(80);
@@ -194,6 +195,19 @@ static String portal_page() {
     h += F("\">删除</a></li>");
   }
   h += F("</ul></div>");
+  h += F("<div class=\"card\"><h2>固件</h2><p>当前：<b>");
+  h += FIRMWARE_VERSION;
+  h += F("</b> (build ");
+  h += String(FIRMWARE_BUILD);
+  h += F(") · 槽 ");
+  h += ota_running_slot();
+  h += F("</p><p class=\"tip\">状态：");
+  h += ota_status();
+  if (ota_last_error()[0] != '\0') {
+    h += F(" · ");
+    h += html_escape(ota_last_error());
+  }
+  h += F("</p><a href=\"/ota\" style=\"color:#60a5fa\">打开固件更新</a></div>");
   if (s_active) {
     h += F("<p class=\"tip\">若此页面未自动弹出，请在浏览器地址栏输入 192.168.4.1。</p>");
   } else {
@@ -340,6 +354,53 @@ static void handle_del() {
   s_web.send(302, "text/plain", "");
 }
 
+static String ota_page() {
+  String h = page_head("Viora 固件更新");
+  h += F("<h1>固件更新</h1><div class=\"card\"><h2>设备状态</h2><p>版本：<b>");
+  h += FIRMWARE_VERSION;
+  h += F("</b> (build ");
+  h += String(FIRMWARE_BUILD);
+  h += F(")</p><p>运行槽：");
+  h += ota_running_slot();
+  h += F("</p><p>更新状态：");
+  h += ota_status();
+  h += F("</p>");
+  if (ota_last_error()[0] != '\0') {
+    h += F("<p class=\"tip\">最近错误：");
+    h += html_escape(ota_last_error());
+    h += F("</p>");
+  }
+  h += F("</div>");
+  if (ota_enabled()) {
+    h += F("<form class=\"card\" method=\"post\" action=\"/ota/check\"><p class=\"tip\">设备会等到对话空闲，再从固定 HTTPS 服务器下载并校验签名。</p><button type=\"submit\">立即检查更新</button></form>");
+  } else {
+    h += F("<div class=\"card\"><p class=\"tip\">OTA 尚未配置。需在固件 secrets.h 中设置 HTTPS manifest 地址、token 和根 CA。</p></div>");
+  }
+  h += F("<p class=\"tip\"><a href=\"/\" style=\"color:#60a5fa\">返回 WiFi 管理</a></p></body></html>");
+  return h;
+}
+
+static void handle_ota() {
+  if (!page_access_ok()) {
+    send_unauthorized();
+    return;
+  }
+  s_web.sendHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  s_web.send(200, "text/html", ota_page());
+}
+
+static void handle_ota_check() {
+  // 升级操作始终需要 Basic 凭据，即使此时设备恰好也开着
+  // 配网热点；连上热点本身不应该获得固件控制权。
+  if (!basic_auth_ok()) {
+    send_unauthorized();
+    return;
+  }
+  ota_request_check();
+  s_web.sendHeader("Location", "/ota", true);
+  s_web.send(303, "text/plain", "");
+}
+
 // ---------- 网页服务生命周期 ----------
 // 配网与联网两种状态共用同一个 80 端口网页：
 // 配网时经 192.168.4.1 访问；联网时经设备局域网 IP 访问，随时增删已保存 WiFi。
@@ -347,6 +408,8 @@ static void web_start() {
   if (s_web_running) return;
   s_web.on("/save", HTTP_POST, handle_save);
   s_web.on("/del", HTTP_GET, handle_del);
+  s_web.on("/ota", HTTP_GET, handle_ota);
+  s_web.on("/ota/check", HTTP_POST, handle_ota_check);
   s_web.onNotFound(handle_portal);
   s_web.begin();
   s_web_running = true;

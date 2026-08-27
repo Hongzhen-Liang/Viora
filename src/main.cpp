@@ -18,6 +18,7 @@
 #include "hardware/hardware_config.h"
 #include "led.h"
 #include "net.h"
+#include "ota_manager.h"
 #include "sensor/sensor_manager.h"
 #include "speech.h"
 #include "turn_detector.h"
@@ -673,6 +674,10 @@ void setup() {
   ai_manager.begin();
 
   led_init();
+
+  // OTA 新固件只有在音频、AFE 和唤醒词都成功初始化后才会
+  // 在联网30秒后确认有效；否则 bootloader 回滚到上一槽。
+  ota_init(audio_ok && afe_ok && kws_ok);
 }
 
 // 周期上报传感器遥测（JSON 帧，约 110B/5s，走 WS 发送队列不阻塞主循环）。
@@ -692,16 +697,20 @@ static void send_sensor_telemetry() {
   fmt(h, sizeof(h), d.humidity, "%.1f");
   fmt(l, sizeof(l), d.light, "%.1f");
   fmt(s, sizeof(s), d.soil, "%.1f");
-  char buf[160];
+  char buf[256];
   snprintf(buf, sizeof(buf),
            "{\"type\":\"telemetry\",\"temp\":%s,\"hum\":%s,"
-           "\"light\":%s,\"soil\":%s,\"soil_raw\":%d}",
-           t, h, l, s, d.soil_raw);
+           "\"light\":%s,\"soil\":%s,\"soil_raw\":%d,"
+           "\"fw\":\"%s\",\"fw_build\":%u,\"ota\":\"%s\","
+           "\"ota_slot\":\"%s\"}",
+           t, h, l, s, d.soil_raw, FIRMWARE_VERSION, FIRMWARE_BUILD,
+           ota_status(), ota_running_slot());
   net_send_json(buf);
 }
 
 void loop() {
   net_loop();
+  ota_loop(s_state == ST_IDLE && !s_rearm_pending && !s_exit_pending);
 
   // 周期读取传感器（SHTC3 / BH1750 / 土壤湿度）并打印 + 上报服务端
   static uint32_t s_last_sensor_ms = 0;

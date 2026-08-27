@@ -26,6 +26,7 @@ components/esp-sr/lib/esp32s3_merged/
 
 # ---- 敏感配置（模板见 src/secrets.example.h，新克隆复制改名）----
 src/secrets.h
+src/ota_secrets.h
 
 # ---- 服务端 ----
 # 整体不跟踪；VioraServer/ 内有自己的 .gitignore，未来拆成独立仓库时生效

@@ -66,6 +66,43 @@
 #endif
 #define SERVER_PATH "/ws"
 
+// OTA 凭据单独存放，便于为每台赠送设备分配独立 token，且不改动 WiFi 凭据。
+#if __has_include("ota_secrets.h")
+#include "ota_secrets.h"
+#endif
+
+// ============================================================
+// 固件版本与 OTA
+// OTA 默认关闭；只有 secrets.h 同时配置 HTTPS manifest URL
+// 和服务器根 CA 后才会启用。固件还会校验 RSA-3072 签名。
+// ============================================================
+#define FIRMWARE_VERSION       "1.0.2"
+#define FIRMWARE_BUILD         3
+#define FIRMWARE_HARDWARE      "waveshare-rlcd-42-v1"
+#define FIRMWARE_MODEL_VERSION 1
+#if __has_include("ota_secrets.h") || __has_include("secrets.h")
+#ifndef SECRET_OTA_MANIFEST_URL
+#define SECRET_OTA_MANIFEST_URL ""
+#endif
+#ifndef SECRET_OTA_API_KEY
+#define SECRET_OTA_API_KEY ""
+#endif
+#ifndef SECRET_OTA_ROOT_CA
+#define SECRET_OTA_ROOT_CA ""
+#endif
+#define OTA_MANIFEST_URL SECRET_OTA_MANIFEST_URL
+#define OTA_API_KEY      SECRET_OTA_API_KEY
+#define OTA_ROOT_CA      SECRET_OTA_ROOT_CA
+#else
+#define OTA_MANIFEST_URL ""
+#define OTA_API_KEY      ""
+#define OTA_ROOT_CA      ""
+#endif
+#define OTA_INITIAL_CHECK_MS     60000UL
+#define OTA_CHECK_INTERVAL_MS 86400000UL
+#define OTA_RETRY_INTERVAL_MS   3600000UL
+#define OTA_VALIDATION_MS         30000UL
+
 // ============================================================
 // WiFi 配网与局域网管理页
 // 连不上 WiFi 超过 PROV_TIMEOUT_MS 后自动开启热点 PROV_AP_SSID，

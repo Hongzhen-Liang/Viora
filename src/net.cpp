@@ -12,6 +12,7 @@
 #include "config.h"
 #include "net.h"
 #include "provisioning.h"
+#include "ota_manager.h"
 
 static WebSocketsClient s_ws;
 // links2004/WebSocketsClient is not thread-safe. The main loop receives via
@@ -210,6 +211,10 @@ static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
         if (s_cb.on_text) s_cb.on_text("error", "", "", msg, "", 0);
       } else if (strcmp(t, "no_speech") == 0) {
         if (s_cb.on_text) s_cb.on_text("no_speech", "", "", "", "", 0);
+      } else if (strcmp(t, "ota_available") == 0) {
+        // WebSocket 只负责催更；URL、摘要和签名仍只从固定
+        // HTTPS manifest 取得，不信任消息里任意下发的链接。
+        ota_request_check();
       } else {
         Serial.printf("[WS] 收到: %.*s\n", (int)length, payload);
       }

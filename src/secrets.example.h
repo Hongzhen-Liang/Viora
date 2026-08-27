@@ -16,3 +16,15 @@
 
 // 与 VioraServer/.env 里的 API_KEY 保持一致；服务端留空则鉴权关闭。
 #define SECRET_API_KEY "your-api-key"
+
+// OTA：必须是 HTTPS。OTA token 建议与语音服务 API Key 分开。
+#define SECRET_OTA_MANIFEST_URL "https://your-server.example.com/api/firmware/manifest"
+#define SECRET_OTA_API_KEY "your-per-device-ota-token"
+
+// 粘贴签发 OTA 服务器 HTTPS 证书的根 CA PEM。不允许留空或跳过校验。
+static const char SECRET_OTA_ROOT_CA_VALUE[] = R"PEM(
+-----BEGIN CERTIFICATE-----
+replace-with-your-root-ca
+-----END CERTIFICATE-----
+)PEM";
+#define SECRET_OTA_ROOT_CA SECRET_OTA_ROOT_CA_VALUE
