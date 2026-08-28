@@ -131,12 +131,12 @@ uint8_t SensorManager::probeI2c(uint8_t addr, uint8_t cmd, uint8_t attempts) {
 }
 
 void SensorManager::initSoilAdc() {
-  // 土壤湿度 ADC（传感器 AOUT 接 GPIO1 / ADC1_CH0，不依赖 I2C）
+  // 土壤湿度 ADC（传感器 AOUT 接 GPIO17 / ADC2_CH6，不依赖 I2C）
   s_soil_ok_ = false;
   s_data_.soil = NAN;
   s_data_.soil_raw = -1;
 #if !ENABLE_SOIL_SENSOR
-  Serial.println("[SENSOR] Soil ADC disabled (GPIO1 reserved for LD2410S OT1)");
+  Serial.println("[SENSOR] Soil ADC disabled by hardware config");
   return;
 #endif
   if (digitalPinToAnalogChannel(SOIL_ADC_PIN) < 0) {

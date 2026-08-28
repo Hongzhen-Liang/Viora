@@ -12,7 +12,6 @@ namespace {
 HardwareSerial s_radar_uart(1);
 
 constexpr uint8_t kReportHeader[] = {0xF4, 0xF3, 0xF2, 0xF1};
-constexpr uint8_t kReportTail[] = {0xF8, 0xF7, 0xF6, 0xF5};
 
 bool hasPrefix(const uint8_t *data, size_t len, const uint8_t *prefix,
                size_t prefix_len) {
@@ -51,25 +50,20 @@ PresenceEvent PresenceManager::takeEvent() {
 }
 
 void PresenceManager::processFrame(const uint8_t *frame, size_t len) {
-  if (len < 13 || !hasPrefix(frame, len, kReportHeader, sizeof(kReportHeader)) ||
-      memcmp(frame + len - sizeof(kReportTail), kReportTail,
-             sizeof(kReportTail)) != 0) {
-    return;
-  }
-  const uint16_t payload_len =
-      static_cast<uint16_t>(frame[4]) |
-      (static_cast<uint16_t>(frame[5]) << 8);
-  if (len != 4U + 2U + payload_len + 4U || payload_len < 3) return;
+  Ld2410sReport report;
+  if (!parseLd2410sReport(frame, len, &report)) return;
 
-  const uint8_t target_state = frame[6];
-  if (target_state > 3) return;
-  const bool present = target_state >= 2;
-  const uint16_t distance_cm =
-      static_cast<uint16_t>(frame[7]) |
-      (static_cast<uint16_t>(frame[8]) << 8);
+  if (uart_format_ != report.format) {
+    uart_format_ = report.format;
+    Serial.printf("[PRESENCE] UART 上报格式=%s\n",
+                  report.format == Ld2410sReportFormat::kCompact
+                      ? "compact"
+                      : "standard");
+  }
   last_uart_ms_ = millis();
   data_.uart_online = true;
-  updateCandidate(present, present ? distance_cm : 0, true);
+  updateCandidate(report.present, report.present ? report.distance_cm : 0,
+                  true);
 }
 
 void PresenceManager::consumeUart() {
@@ -77,16 +71,18 @@ void PresenceManager::consumeUart() {
     const uint8_t byte = static_cast<uint8_t>(s_radar_uart.read());
     if (frame_len_ < sizeof(frame_)) frame_[frame_len_++] = byte;
 
-    // 丢弃头部噪声，但保留可能构成下一帧头的后缀。
-    while (frame_len_ > 0 &&
+    // 同时识别出厂默认的 5 字节极简帧和可视化工具使用的标准帧。
+    // 丢弃头部噪声时保留可能构成标准帧头的后缀。
+    while (frame_len_ > 0 && frame_[0] != 0x6E &&
            !hasPrefix(kReportHeader, sizeof(kReportHeader), frame_,
-                      frame_len_ < sizeof(kReportHeader)
-                          ? frame_len_
-                          : sizeof(kReportHeader))) {
+                      frame_len_ < sizeof(kReportHeader) ? frame_len_
+                                                         : sizeof(kReportHeader))) {
       memmove(frame_, frame_ + 1, --frame_len_);
       frame_expected_ = 0;
     }
-    if (frame_len_ >= 6 && frame_expected_ == 0) {
+    if (frame_len_ > 0 && frame_[0] == 0x6E) {
+      frame_expected_ = 5;
+    } else if (frame_len_ >= 6 && frame_expected_ == 0) {
       const uint16_t payload_len =
           static_cast<uint16_t>(frame_[4]) |
           (static_cast<uint16_t>(frame_[5]) << 8);
@@ -118,7 +114,7 @@ void PresenceManager::commitState(bool present, uint32_t now) {
     data_.absent_since_ms = now;
     data_.present_since_ms = 0;
     data_.distance_cm = 0;
-    near_ = false;
+    data_.near = false;
     queueEvent(PresenceEvent::kLeft);
     Serial.println("[PRESENCE] 已确认无人");
   }
@@ -140,13 +136,13 @@ void PresenceManager::updateCandidate(bool present, uint16_t distance_cm,
   if (now - candidate_since_ms_ >= confirm_ms) commitState(candidate_present_, now);
 
   if (data_.present && data_.distance_cm > 0) {
-    const bool new_near = near_
+    const bool new_near = data_.near
                               ? data_.distance_cm <=
                                     PRESENCE_NEAR_DISTANCE_CM +
                                         PRESENCE_DISTANCE_HYSTERESIS_CM
                               : data_.distance_cm <= PRESENCE_NEAR_DISTANCE_CM;
-    if (new_near && !near_) queueEvent(PresenceEvent::kApproached);
-    near_ = new_near;
+    if (new_near && !data_.near) queueEvent(PresenceEvent::kApproached);
+    data_.near = new_near;
   }
 }
 

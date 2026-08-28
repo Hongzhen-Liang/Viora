@@ -2,6 +2,8 @@
 
 #include <Arduino.h>
 
+#include "presence/ld2410s_protocol.h"
+
 enum class PresenceEvent : uint8_t {
   kNone,
   kEntered,
@@ -11,6 +13,7 @@ enum class PresenceEvent : uint8_t {
 
 struct PresenceData {
   bool present = false;
+  bool near = false;
   bool uart_online = false;
   uint16_t distance_cm = 0;
   uint32_t present_since_ms = 0;
@@ -45,7 +48,7 @@ class PresenceManager {
   bool candidate_initialized_ = false;
   uint32_t candidate_since_ms_ = 0;
   uint32_t last_uart_ms_ = 0;
-  bool near_ = false;
+  Ld2410sReportFormat uart_format_ = Ld2410sReportFormat::kUnknown;
 };
 
 extern PresenceManager g_presence;

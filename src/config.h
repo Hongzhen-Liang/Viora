@@ -76,8 +76,8 @@
 // OTA 默认关闭；只有 ota_secrets.h（或兼容的 secrets.h）同时配置 HTTPS manifest URL
 // 和服务器根 CA 后才会启用。固件还会校验 RSA-3072 签名。
 // ============================================================
-#define FIRMWARE_VERSION       "1.0.16"
-#define FIRMWARE_BUILD         17
+#define FIRMWARE_VERSION       "1.0.17"
+#define FIRMWARE_BUILD         18
 #define FIRMWARE_HARDWARE      "waveshare-rlcd-42-v1"
 #define FIRMWARE_MODEL_VERSION 1
 #if __has_include("ota_secrets.h") || __has_include("secrets.h")
@@ -132,15 +132,16 @@
 // ============================================================
 #define PRESENCE_UART_STALE_MS            3000UL
 #define PRESENCE_ENTER_CONFIRM_MS          800UL
-#define PRESENCE_LEAVE_CONFIRM_MS        20000UL
+#define PRESENCE_LEAVE_CONFIRM_MS         8000UL
 #define PRESENCE_NEAR_DISTANCE_CM            180
 #define PRESENCE_DISTANCE_HYSTERESIS_CM       30
 #define ENABLE_PROACTIVE_CALL                   1
 #define PROACTIVE_PRESENCE_DWELL_MS         3000UL
-#define PROACTIVE_MIN_ABSENCE_MS          300000UL  // 离开至少 5 分钟才欢迎
-#define PROACTIVE_CALL_COOLDOWN_MS       14400000UL  // 主动说话至少间隔 4 小时
-#define PROACTIVE_SILENT_START_HOUR             23
-#define PROACTIVE_SILENT_END_HOUR                7
+#define PROACTIVE_RETURN_WINDOW_MS          120000UL // 返回后 2 分钟内才问候
+#define PROACTIVE_MIN_ABSENCE_MS         1800000UL  // 真正离开至少 30 分钟
+#define PROACTIVE_CALL_COOLDOWN_SECONDS       43200ULL // 每 12 小时最多一次
+#define PROACTIVE_SILENT_START_HOUR             22
+#define PROACTIVE_SILENT_END_HOUR                8
 
 // 联网后通过 SNTP 校时，固定使用中国标准时间 UTC+8（无夏令时）。
 #define DEVICE_UTC_OFFSET_SECONDS (8 * 60 * 60)

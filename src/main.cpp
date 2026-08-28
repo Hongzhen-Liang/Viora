@@ -6,6 +6,7 @@
 //                    └── barge-in ─┘
 // ============================================================
 #include <Arduino.h>
+#include <Preferences.h>
 #include <cmath>
 #include <string.h>
 #include <time.h>
@@ -69,8 +70,35 @@ static uint32_t s_wake_ack_start_ms = 0;      // 唤醒决定窗开始时刻
 static bool s_ack_playing = false;            // 决定窗已过，确认音播放中
 static bool s_ack_voice_captured = false;      // 确认音期间已捕获近端用户人声
 static bool s_proactive_pending = false;       // 服务端主动呼叫请求/播放进行中
-static uint32_t s_proactive_candidate_ms = 0;  // 满足“久别返回”的候选起点
-static uint32_t s_last_proactive_call_ms = 0;
+static bool s_proactive_return_eligible = false;  // 已确认一次真实“久别返回”
+static bool s_presence_departure_observed = false;
+static uint32_t s_proactive_return_since_ms = 0;  // 返回候选只在短窗口内有效
+static uint32_t s_proactive_near_since_ms = 0;    // 连续处于社交距离的起点
+static uint64_t s_last_proactive_call_epoch = 0;  // NVS 持久化，重启不重置冷却
+
+static void load_proactive_cooldown() {
+  Preferences prefs;
+  if (!prefs.begin("presence", true)) return;
+  s_last_proactive_call_epoch = prefs.getULong64("last_call", 0);
+  prefs.end();
+  if (s_last_proactive_call_epoch != 0) {
+    Serial.printf("[PRESENCE] 已恢复主动呼叫冷却记录：%llu\n",
+                  static_cast<unsigned long long>(
+                      s_last_proactive_call_epoch));
+  }
+}
+
+static void remember_proactive_call(time_t now_epoch) {
+  if (now_epoch < 1577836800) return;
+  s_last_proactive_call_epoch = static_cast<uint64_t>(now_epoch);
+  Preferences prefs;
+  if (!prefs.begin("presence", false)) {
+    Serial.println("[PRESENCE] 无法保存主动呼叫冷却记录");
+    return;
+  }
+  prefs.putULong64("last_call", s_last_proactive_call_epoch);
+  prefs.end();
+}
 
 // 播放中 AEC/VAD 打断状态。
 static bool s_accept_tts_audio = false;
@@ -798,7 +826,7 @@ static void print_hardware_banner(bool sensors_ok, bool audio_ok) {
 #if ENABLE_SOIL_SENSOR
   Serial.printf("Soil ADC %s\n", g_sensor.soil_ok() ? "OK" : "FAIL");
 #else
-  Serial.println("Soil ADC DISABLED (GPIO1 -> LD2410S OT1)");
+  Serial.println("Soil ADC DISABLED by hardware config");
 #endif
   Serial.printf("LD2410S UART GPIO%d/%d OT2 GPIO%d\n", LD2410S_OT1_PIN,
                 LD2410S_RX_PIN, LD2410S_OT2_PIN);
@@ -817,6 +845,7 @@ void setup() {
   // 传感器（板载 SHTC3 / 可选 BH1750 / 外接土壤湿度）
   const bool sensors_ok = g_sensor.begin();
   g_presence.begin();
+  load_proactive_cooldown();
   // 音频（板载 ES7210 + ES8311 共享 I2S 全双工总线）
   const bool audio_ok = g_audio.begin();
   // 4.2 英寸 ST7305 反射屏：蝴蝶兰角色 + 动态中文字幕。
@@ -858,7 +887,7 @@ void setup() {
   ota_init(audio_ok && afe_ok && kws_ok);
 }
 
-// 周期上报传感器遥测（JSON 帧，约 110B/5s，走 WS 发送队列不阻塞主循环）。
+// 周期上报传感器遥测（JSON 帧，约 150B/30s，走 WS 发送队列不阻塞主循环）。
 // 未成功读到的传感器以 null 上报；服务端 plant_state 只收有效值。
 static void send_sensor_telemetry() {
   if (!net_connected()) return;
@@ -896,7 +925,8 @@ static void send_sensor_telemetry() {
 
 static bool proactive_quiet_hours() {
   const time_t now = time(nullptr);
-  if (now < 1577836800) return false;
+  // 未完成网络校时时无法可靠判断夜间，宁可不主动打扰。
+  if (now < 1577836800) return true;
   const time_t local_now = now + DEVICE_UTC_OFFSET_SECONDS;
   struct tm local_tm;
   gmtime_r(&local_now, &local_tm);
@@ -917,23 +947,50 @@ static void handle_presence_logic() {
   const PresenceEvent event = g_presence.takeEvent();
   if (event == PresenceEvent::kEntered) {
     const uint32_t absence_ms = now - p.absent_since_ms;
-    if (absence_ms >= PROACTIVE_MIN_ABSENCE_MS) {
-      s_proactive_candidate_ms = now;
+    if (s_presence_departure_observed &&
+        absence_ms >= PROACTIVE_MIN_ABSENCE_MS) {
+      s_proactive_return_eligible = true;
+      s_proactive_return_since_ms = now;
       Serial.printf("[PRESENCE] 久别返回候选：离开了 %lus\n",
                     static_cast<unsigned long>(absence_ms / 1000));
     }
   } else if (event == PresenceEvent::kLeft) {
-    s_proactive_candidate_ms = 0;
+    s_presence_departure_observed = true;
+    s_proactive_return_eligible = false;
+    s_proactive_return_since_ms = 0;
+    s_proactive_near_since_ms = 0;
+    if (s_proactive_pending && s_state != ST_IDLE) {
+      Serial.println("[PRESENCE] 主动呼叫期间已离开，停止播放并回到待机");
+      end_active_session("presence_left");
+      return;
+    }
   }
 
 #if ENABLE_PROACTIVE_CALL
-  const bool near = p.present && p.distance_cm > 0 &&
-                    p.distance_cm <= PRESENCE_NEAR_DISTANCE_CM;
+  if (s_proactive_return_eligible &&
+      now - s_proactive_return_since_ms > PROACTIVE_RETURN_WINDOW_MS) {
+    s_proactive_return_eligible = false;
+    s_proactive_return_since_ms = 0;
+    s_proactive_near_since_ms = 0;
+    Serial.println("[PRESENCE] 返回问候窗口已过，本次保持安静");
+  }
+
+  if (s_proactive_return_eligible && p.near) {
+    if (s_proactive_near_since_ms == 0) s_proactive_near_since_ms = now;
+  } else {
+    s_proactive_near_since_ms = 0;
+  }
+
+  const time_t now_epoch = time(nullptr);
+  const bool clock_ready = now_epoch >= 1577836800;
   const bool cooldown_ok =
-      s_last_proactive_call_ms == 0 ||
-      now - s_last_proactive_call_ms >= PROACTIVE_CALL_COOLDOWN_MS;
-  if (s_proactive_candidate_ms != 0 && near && cooldown_ok &&
-      now - s_proactive_candidate_ms >= PROACTIVE_PRESENCE_DWELL_MS &&
+      clock_ready &&
+      (s_last_proactive_call_epoch == 0 ||
+       (static_cast<uint64_t>(now_epoch) >= s_last_proactive_call_epoch &&
+        static_cast<uint64_t>(now_epoch) - s_last_proactive_call_epoch >=
+            PROACTIVE_CALL_COOLDOWN_SECONDS));
+  if (s_proactive_near_since_ms != 0 && cooldown_ok &&
+      now - s_proactive_near_since_ms >= PROACTIVE_PRESENCE_DWELL_MS &&
       s_state == ST_IDLE && !s_rearm_pending && !s_exit_pending &&
       !s_proactive_pending && net_connected() && !ota_busy() &&
       !proactive_quiet_hours()) {
@@ -945,8 +1002,10 @@ static void handle_presence_logic() {
              p.distance_cm,
              static_cast<unsigned long>(now - p.present_since_ms));
     s_proactive_pending = true;
-    s_proactive_candidate_ms = 0;
-    s_last_proactive_call_ms = now;
+    s_proactive_return_eligible = false;
+    s_proactive_return_since_ms = 0;
+    s_proactive_near_since_ms = 0;
+    remember_proactive_call(now_epoch);
     set_state(ST_PROCESSING);
     g_display.setSubtitle("注意到你回来啦…");
     net_send_json(frame);
