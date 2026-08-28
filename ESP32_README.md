@@ -115,9 +115,11 @@ sequenceDiagram
 | ES8311 | DSDIN | GPIO 8 | 扬声器播放输出 |
 | NS4150B 功放 | PA EN | GPIO 46 | Codec 初始化成功后拉高 |
 
-> 板载 SHTC3 靠近板上热源，固件按 Waveshare 官方示例对温度应用
-> `-4.0°C` 补偿，并按 Sensirion 水汽压公式同步修正相对湿度；温度偏移可在
-> `src/hardware/hardware_config.h` 中重新标定。
+> 板载 SHTC3 与 ESP32、Codec 和电源电路共板，会受 PCB 热传导影响。
+> 固件针对 Wi-Fi 与语音常开的工作负载应用 `-6.0°C` 经验补偿，并按
+> Sensirion 水汽压公式同步修正相对湿度；每 30 秒以低功耗模式测量一次。
+> 串口会同时打印 SHTC3 原始值与补偿值，最终可配合同位置的可靠温度计在
+> `src/hardware/hardware_config.h` 中微调偏移。
 
 > 屏幕固定占用 GPIO5/6/11/12/40/41；GPIO4 是板载电池电压检测，均不可再
 > 分配给传感器或音频。此板没有可编程 WS2812 状态灯。

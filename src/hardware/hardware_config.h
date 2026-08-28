@@ -16,9 +16,10 @@
 #define I2C_FREQ_HZ 400000
 
 // ---- 板载 SHTC3 温度补偿 ----
-// Waveshare 官方示例针对本板热源将 SHTC3 原始温度减去 4°C。
-// 若用同位置的可靠温度计重新标定，只需调整此值。
-#define SHTC3_TEMPERATURE_OFFSET_C (-4.0f)
+// 传感器与 ESP32、Codec 和电源电路共板，Wi-Fi + 语音常开时会受 PCB
+// 热传导影响。-6°C 是按本项目稳定运行时重新标定的起点；若有同位置的
+// 可靠温度计，最终仍应以实测温差微调此值。
+#define SHTC3_TEMPERATURE_OFFSET_C (-6.0f)
 
 // ---- 土壤湿度（暂时关闭）----
 // 保留原引脚定义方便以后恢复；关闭时 SensorManager 不配置或读取 GPIO1。

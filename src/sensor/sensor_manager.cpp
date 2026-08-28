@@ -20,6 +20,8 @@ BH1750 s_light_meter(0x23);  // GY-302 默认 0x23；ADDR 拉高则为 0x5C（in
 constexpr uint32_t kFailLogIntervalMs = 30000;
 uint32_t s_last_shtc3_fail_ms = 0;
 uint32_t s_last_bh1750_fail_ms = 0;
+float s_last_shtc3_raw_temp_c = NAN;
+float s_last_shtc3_raw_hum_pct = NAN;
 
 constexpr uint8_t kShtc3Addr = 0x70;
 
@@ -51,8 +53,10 @@ bool shtc3Command(uint16_t command) {
 bool shtc3Read(float &temp_c, float &hum_pct) {
   if (!shtc3Command(0x3517)) return false;  // wakeup
   delayMicroseconds(250);
-  if (!shtc3Command(0x7CA2)) return false;  // normal mode, high precision
-  delay(13);
+  // 低功耗模式仍保持足够的环境监测精度，测量只需约 0.7ms；相比
+  // 10.8ms 的普通模式可进一步降低传感器自身的瞬时发热。
+  if (!shtc3Command(0x6458)) return false;  // low power, T first
+  delay(2);
   if (Wire.requestFrom(kShtc3Addr, static_cast<uint8_t>(6)) != 6) return false;
   uint8_t buf[6];
   for (uint8_t &b : buf) b = static_cast<uint8_t>(Wire.read());
@@ -67,6 +71,8 @@ bool shtc3Read(float &temp_c, float &hum_pct) {
       -45.0f + 175.0f * static_cast<float>(rt) / kShtc3RawScale;
   const float sensor_hum_pct =
       100.0f * static_cast<float>(rh) / kShtc3RawScale;
+  s_last_shtc3_raw_temp_c = sensor_temp_c;
+  s_last_shtc3_raw_hum_pct = sensor_hum_pct;
   temp_c = sensor_temp_c + SHTC3_TEMPERATURE_OFFSET_C;
 
   // SHTC3 给出的是传感器自身温度下的 RH。温度减去板级热偏差后，按
@@ -281,8 +287,11 @@ const SensorData &SensorManager::data() const { return s_data_; }
 
 void SensorManager::print() const {
   Serial.printf(
-      "[SENSOR] temp=%.2fC hum=%.1f%% light=%.1flx soil=%.1f%% "
-      "(raw=%d)\n",
-      s_data_.temperature, s_data_.humidity, s_data_.light, s_data_.soil,
-      s_data_.soil_raw);
+      "[SENSOR] temp=%.2fC hum=%.1f%% "
+      "(sht_raw=%.2fC/%.1f%% offset=%+.1fC) "
+      "light=%.1flx soil=%.1f%% (soil_raw=%d)\n",
+      s_data_.temperature, s_data_.humidity, s_last_shtc3_raw_temp_c,
+      s_last_shtc3_raw_hum_pct,
+      static_cast<double>(SHTC3_TEMPERATURE_OFFSET_C), s_data_.light,
+      s_data_.soil, s_data_.soil_raw);
 }

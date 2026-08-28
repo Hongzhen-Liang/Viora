@@ -76,8 +76,8 @@
 // OTA 默认关闭；只有 ota_secrets.h（或兼容的 secrets.h）同时配置 HTTPS manifest URL
 // 和服务器根 CA 后才会启用。固件还会校验 RSA-3072 签名。
 // ============================================================
-#define FIRMWARE_VERSION       "1.0.15"
-#define FIRMWARE_BUILD         16
+#define FIRMWARE_VERSION       "1.0.16"
+#define FIRMWARE_BUILD         17
 #define FIRMWARE_HARDWARE      "waveshare-rlcd-42-v1"
 #define FIRMWARE_MODEL_VERSION 1
 #if __has_include("ota_secrets.h") || __has_include("secrets.h")
@@ -125,7 +125,7 @@
 // ============================================================
 // 传感器轮询间隔
 // ============================================================
-#define SENSOR_POLL_MS 5000  // 每 5s 读一次 SHTC3 / BH1750 / 土壤湿度
+#define SENSOR_POLL_MS 30000 // 环境量变化慢；每 30s 读取可减少总线与传感器发热
 
 // ============================================================
 // LD2410S 人体存在与主动呼叫
