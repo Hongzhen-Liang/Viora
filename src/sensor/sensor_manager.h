@@ -40,7 +40,7 @@ class SensorManager {
   bool soil_ok() const { return s_soil_ok_; }
 
   // 土壤湿度校准接口：在空气中读数存为 dry_raw（最干），
-  // 泡水/饱和后读数存为 wet_raw（最湿）。默认值见实现文件。
+  // 浇透并沥水后的盆土读数存为 wet_raw（最湿）。
   void setSoilCalibration(int dry_raw, int wet_raw);
 
   // 串口打印一行 [SENSOR] 读数。
@@ -59,9 +59,9 @@ class SensorManager {
   bool s_bh1750_ok_ = false;
   bool s_soil_ok_ = false;
   volatile bool s_i2c_init_done_ = false;  // I2C 初始化任务完成标志
-  // 校准参数：dry=空气中原始 ADC，wet=泡水后原始 ADC
-  int s_soil_dry_raw_ = 4095;  // 默认：空气 ≈ 满量程
-  int s_soil_wet_raw_ = 1000;  // 默认：泡水 ≈ 1000（需实测校准）
+  // 2026-08-29 按当前探头实测标定：空气=3177，浇透并沥水后的盆土=1301。
+  int s_soil_dry_raw_ = 3177;
+  int s_soil_wet_raw_ = 1301;
 };
 
 // 全局单例
