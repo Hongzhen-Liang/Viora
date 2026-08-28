@@ -107,7 +107,7 @@ sequenceDiagram
 | LD2410S | RX / UART RX | GPIO 2 | 接 ESP32 TX |
 | LD2410S | OT2 / 存在输出 | GPIO 3 | 高电平有人、低电平无人 |
 | 土壤湿度 | AOUT | — | 当前由 `ENABLE_SOIL_SENSOR=0` 停用 |
-| 固件更新键 | 板载 KEY | GPIO 18 | 低电平按下；查看版本、下载、安装三段确认 |
+| 对话取消 / 固件更新键 | 板载 KEY | GPIO 18 | 对话中按下立即退出；待机时用于查看、下载和安装更新 |
 | ES7210/ES8311 | MCLK | GPIO 16 | 4.096MHz |
 | ES7210/ES8311 | BCLK | GPIO 9 | 共享音频时钟 |
 | ES7210/ES8311 | WS | GPIO 45 | 共享左右声道时钟 |

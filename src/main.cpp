@@ -184,6 +184,8 @@ static bool s_key_raw_pressed = false;
 static bool s_key_stable_pressed = false;
 static uint32_t s_key_changed_ms = 0;
 
+static void end_active_session(const char *reason);
+
 static void show_ota_details() {
   char line1[80];
   snprintf(line1, sizeof(line1), "当前 %s  新版 %s", FIRMWARE_VERSION,
@@ -261,10 +263,20 @@ static bool user_key_pressed_event() {
   return false;
 }
 
-static void handle_ota_key() {
+static void handle_user_key() {
   if (!user_key_pressed_event()) return;
-  if (s_state != ST_IDLE || ota_busy()) {
-    Serial.println("[KEY] 当前正忙，忽略 OTA 按键");
+
+  // 对话中的 KEY 始终具有最高优先级：停止本地播放和录音上行，通知
+  // 服务端取消当前任务并清除会话上下文，然后直接回到待唤醒。
+  if (s_state != ST_IDLE || s_rearm_pending || s_proactive_pending) {
+    Serial.printf("[KEY] 用户取消对话（当前状态=%s）\n",
+                  state_name(s_state));
+    end_active_session("user_key");
+    return;
+  }
+
+  if (ota_busy()) {
+    Serial.println("[KEY] OTA 正在进行，按键暂不可用");
     return;
   }
   if (ota_ready_to_install()) {
@@ -454,16 +466,31 @@ static void start_wake_ack() {
 }
 
 static void end_active_session(const char *reason) {
+  // 先丢弃尚未发出的录音帧，保证 cancel 不会排在一长串旧 PCM 后面。
+  net_audio_flush();
   char frame[128];
   snprintf(frame, sizeof(frame),
            "{\"type\":\"cancel\",\"reason\":\"%s\","
            "\"end_session\":true}", reason);
   net_send_json(frame);
+
+  g_audio.playDiscard();
+  g_audio.ringClear();
+  speech_async_reset();
+  wake_word.reset();
+  s_rearm_pending = false;
+  s_followup_keep_preroll = false;
+  s_ack_playing = false;
+  s_ack_voice_captured = false;
+  s_proactive_pending = false;
   set_state(ST_IDLE);
   s_exit_pending = false;
   s_accept_tts_audio = false;
   s_tts_end_received = false;
-  g_audio.ringClear();
+  s_tts_end_pending_bytes = 0;
+  s_pending_reply = "";
+  s_consec_errors = 0;
+  reset_barge_evidence();
 }
 
 static void commit_turn(uint32_t now_ms) {
@@ -932,7 +959,7 @@ void loop() {
   net_loop();
   handle_presence_logic();
   ota_loop(s_state == ST_IDLE && !s_rearm_pending && !s_exit_pending);
-  handle_ota_key();
+  handle_user_key();
   ota_screen_loop();
 
   // 周期读取传感器（SHTC3 / BH1750 / 土壤湿度）并打印 + 上报服务端
