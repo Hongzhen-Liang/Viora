@@ -32,6 +32,17 @@ const uint8_t kWifiIcon[] PROGMEM = {
     0x00, 0x07, 0x00, 0x00, 0x02, 0x00,
 };
 
+// 16x16 的线稿人物图标。使用固定点阵可避免部分 ST7305/U8g2 组合
+// 在绘制实心圆角矩形时出现横向异常填充。
+constexpr uint8_t kPresenceIconWidth = 16;
+constexpr uint8_t kPresenceIconHeight = 16;
+const uint8_t kPresenceIcon[] PROGMEM = {
+    0xc0, 0x03, 0x20, 0x04, 0x10, 0x08, 0x10, 0x08,
+    0x20, 0x04, 0xc0, 0x03, 0x80, 0x01, 0xe0, 0x07,
+    0x18, 0x18, 0x04, 0x20, 0x02, 0x40, 0x02, 0x40,
+    0x02, 0x40, 0x04, 0x20, 0xf8, 0x1f, 0x00, 0x00,
+};
+
 // Software SPI keeps this display independent from future TF-card use.  The
 // ST7305 reflective LCD only transfers 15 KB for a full refresh, so updates
 // remain quick and happen outside the real-time audio task.
@@ -111,6 +122,13 @@ void DisplayManager::setUpdateAvailable(bool available) {
     last_idle_render_ms_ = millis();
     renderIdleDashboard();
   }
+}
+
+void DisplayManager::setPresence(bool present) {
+  if (!ready_) return;
+  idle_presence_ = present;
+  const bool presence_changed = idle_presence_ != rendered_presence_;
+  if (idle_mode_ && presence_changed) renderIdleDashboard();
 }
 
 void DisplayManager::showOtaScreen(const char *line1, const char *line2) {
@@ -361,7 +379,8 @@ void DisplayManager::renderIdleDashboard() {
   // 有新版本或已有固件待安装时，在 Wi-Fi 左侧显示“向下箭头进入托盘”。
   // 图标完全由矢量线绘制，不占额外位图空间。
   if (update_available_) {
-    constexpr uint16_t icon_x = 342;
+    // 人物图标出现时给它让位，保持右侧状态图标紧凑且不重叠。
+    const uint16_t icon_x = idle_presence_ ? 333 : 342;
     constexpr uint16_t icon_y = 5;
     s_lcd.drawRFrame(icon_x, icon_y, 24, 18, 4);
     s_lcd.drawVLine(icon_x + 12, icon_y + 3, 7);
@@ -369,6 +388,14 @@ void DisplayManager::renderIdleDashboard() {
     s_lcd.drawLine(icon_x + 16, icon_y + 7, icon_x + 12, icon_y + 11);
     s_lcd.drawHLine(icon_x + 7, icon_y + 14, 11);
   }
+
+  // 人在图标：仅显示小型线稿人物，不显示文字或距离。
+  if (idle_presence_) {
+    s_lcd.drawXBMP(363, 4, kPresenceIconWidth, kPresenceIconHeight,
+                   kPresenceIcon);
+  }
+
+  rendered_presence_ = idle_presence_;
 
   s_lcd.drawHLine(24, kSubtitleTop, 352);
 

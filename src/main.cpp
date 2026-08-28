@@ -885,6 +885,7 @@ static bool proactive_quiet_hours() {
 static void handle_presence_logic() {
   g_presence.poll();
   const PresenceData &p = g_presence.data();
+  g_display.setPresence(p.present);
   const uint32_t now = millis();
   const PresenceEvent event = g_presence.takeEvent();
   if (event == PresenceEvent::kEntered) {

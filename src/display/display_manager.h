@@ -14,6 +14,7 @@ class DisplayManager {
   bool begin();
   void showIdleDashboard(float temperature, float humidity, float soil,
                          DisplayNetworkState network_state);
+  void setPresence(bool present);
   void setUpdateAvailable(bool available);
   void showOtaScreen(const char *line1, const char *line2);
   void setSubtitle(const char *text);
@@ -43,6 +44,8 @@ class DisplayManager {
   float idle_temperature_ = NAN;
   float idle_humidity_ = NAN;
   float idle_soil_ = NAN;
+  bool idle_presence_ = false;
+  bool rendered_presence_ = false;
   bool idle_clock_ready_ = false;
   DisplayNetworkState idle_network_state_ = DisplayNetworkState::kOffline;
   uint32_t last_idle_render_ms_ = 0;
