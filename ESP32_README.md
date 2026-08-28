@@ -90,7 +90,8 @@ sequenceDiagram
 | 主控 | Waveshare ESP32-S3-RLCD-4.2 | N16R8，板载 RLCD 与音频 Codec |
 | 麦克风 | 板载双麦 + ES7210 | 16kHz、16bit 双声道 I2S，固件取 MIC1 |
 | 功放+扬声器 | 板载 ES8311 + NS4150B | 接板载 2Pin 扬声器座 |
-| 土壤湿度 | 电容式土壤湿度传感器 | AOUT 模拟输出接 GPIO1（GPIO0 不支持 ADC） |
+| 人体存在 | HLK-LD2410S | 3.3V 供电；OT1/RX/OT2 接 GPIO1/2/3 |
+| 土壤湿度 | 电容式土壤湿度传感器 | 当前停用，GPIO1 已让给 LD2410S |
 | 温湿度 | 板载 SHTC3 | I2C 地址 0x70 |
 | 光照 | GY-302（BH1750，可选外接） | 与板载设备共享 I2C |
 
@@ -102,7 +103,10 @@ sequenceDiagram
 |------|------|------|------|
 | 板载/扩展 I2C | SDA | GPIO 13 | SHTC3、Codec 与扩展排针共享 |
 | 板载/扩展 I2C | SCL | GPIO 14 | 400kHz，板载已有上拉 |
-| 土壤湿度 | AOUT | GPIO 1 | ADC1_CH0；不可接 GPIO0 |
+| LD2410S | OT1 / UART TX | GPIO 1 | 接 ESP32 RX |
+| LD2410S | RX / UART RX | GPIO 2 | 接 ESP32 TX |
+| LD2410S | OT2 / 存在输出 | GPIO 3 | 高电平有人、低电平无人 |
+| 土壤湿度 | AOUT | — | 当前由 `ENABLE_SOIL_SENSOR=0` 停用 |
 | 固件更新键 | 板载 KEY | GPIO 18 | 低电平按下；查看版本、下载、安装三段确认 |
 | ES7210/ES8311 | MCLK | GPIO 16 | 4.096MHz |
 | ES7210/ES8311 | BCLK | GPIO 9 | 共享音频时钟 |
@@ -136,7 +140,8 @@ WS GPIO45
 Sensors:
 SHTC3 OK
 BH1750 OK
-Soil ADC OK
+Soil ADC DISABLED (GPIO1 -> LD2410S OT1)
+LD2410S UART GPIO1/2 OT2 GPIO3
 Audio:
 ES7210 dual MIC OK
 ES8311 speaker OK
@@ -148,9 +153,9 @@ ES8311 speaker OK
 1. **传感器（I2C）**：板载 `SHTC3` 应显示 `OK`；外接 `BH1750` 未连接时
    显示 `FAIL` 属正常。扩展 I2C 使用 SDA=GPIO13、SCL=GPIO14。随后每 5 秒打印一行
    `[SENSOR] temp=..C hum=..% light=..lx soil=..% (raw=..)`。
-2. **土壤湿度（ADC）**：看 `[SENSOR]` 行中的 `soil`/`raw`。手捏传感器数值应
-   变化（干土 raw 高、湿土 raw 低）。校准：空气中读数设为 dry、泡水读数
-   设为 wet，调用 `g_sensor.setSoilCalibration(dry, wet)`。
+2. **LD2410S**：有人进入应打印 `[PRESENCE] 有人进入，距离=...cm`，离开并
+   持续 20 秒后打印 `[PRESENCE] 已确认无人`。UART 超过 3 秒无有效帧时自动
+   回退到 OT2，因此即使距离暂不可用仍能判断有人/无人。
 3. **麦克风（ES7210）**：板载双麦无需外接线。正常说话时 `[HEALTH]`
    日志的 `mic_peak`/`mic_rms` 会明显抬升
    （`config.h` 的 `ENABLE_HEALTH_LOG` 设为 1 开启）。
@@ -178,7 +183,8 @@ ES8311 speaker OK
 | 二进制 | PCM 字节 | 音频数据，可拆成多块连续发送 |
 | 文本 | `{"type":"audio_end","trim_start_ms":300,"trim_end_ms":650}` | 动态断句完成；首尾裁剪提示可减少 ASR 延迟 |
 | 文本 | `{"type":"cancel","reason":"barge_in"}` | 用户在回复播放中打断，立即取消当前回复 |
-| 文本 | `{"type":"telemetry","soil_moisture":23,"temp":26.5,"humidity":60,"light":4200}` | 传感器快照 |
+| 文本 | `{"type":"telemetry","temp":26.5,"presence":true,"presence_distance_cm":126}` | 传感器与人在状态快照 |
+| 文本 | `{"type":"proactive_call","reason":"presence_return","distance_cm":126}` | 久别后靠近且通过冷却/夜间规则时请求主动问候 |
 
 ### 3.2 服务器 → ESP32
 
@@ -218,6 +224,9 @@ stateDiagram-v2
 - 连续约 96ms 人声才确认开口；短回答最多等 1.2s，正常句约 0.85s，长句约 0.75s 静音即回复。
 - 用户在同一句中停顿后继续说时，设备学习本轮节奏，自动把后续等待放宽，最大 1.8s。
 - 回复播放完立即回到聆听；15s 没有新话题才结束会话。播放中经 AEC 后连续约 160ms 检出近端人声即可打断。
+- 人在状态需连续有人约 0.8 秒才进入，连续无人 20 秒才离开；离开至少 5 分钟、
+  回来后进入 1.8 米并停留 3 秒才允许主动问候。主动问候每 4 小时最多一次，
+  23:00～07:00 静音，且仅在设备待机、联网、未 OTA 时触发。
 - TTS 采用两级抖动缓冲：服务端先累积约 750ms PCM，设备收到约
   384ms 后开播；若播放中仍发生欠载，累积约 512ms 后再续播，避免
   Qwen 云端回调或局域网抖动变成反复爆音。

@@ -4,10 +4,10 @@
 //   所有引脚/硬件相关定义集中管理。以后修改硬件只修改本文件。
 //
 //   主控: Waveshare ESP32-S3-RLCD-4.2 (N16R8)
-//   传感器: 板载 SHTC3 / 可选 GY-302 BH1750 / 外接电容式土壤湿度
+//   传感器: 板载 SHTC3 / 可选 GY-302 BH1750 / LD2410S 人体存在雷达
 //   语音输入: 板载双麦克风 + ES7210 ADC
 //   语音输出: 板载 ES8311 Codec + NS4150B 功放
-//   已移除: LD2410B 人体传感器
+//   暂停使用: 外接电容式土壤湿度（GPIO1 已分配给 LD2410S）
 // ============================================================
 
 // ---- 板载 I2C 总线（SHTC3、ES7210、ES8311；也引出给可选 BH1750）----
@@ -20,9 +20,18 @@
 // 若用同位置的可靠温度计重新标定，只需调整此值。
 #define SHTC3_TEMPERATURE_OFFSET_C (-4.0f)
 
-// ---- 土壤湿度（电容式，AOUT 接 GPIO1 / ADC1_CH0）----
-// ESP32-S3 的 GPIO0 不具备 ADC 功能，不能连接传感器 AOUT。
+// ---- 土壤湿度（暂时关闭）----
+// 保留原引脚定义方便以后恢复；关闭时 SensorManager 不配置或读取 GPIO1。
+#define ENABLE_SOIL_SENSOR 0
 #define SOIL_ADC_PIN 1
+
+// ---- HLK-LD2410S 人体存在雷达（3.3V UART，115200 8N1）----
+// 模块 OT1 是 UART_TX，接到 ESP32 的 RX；模块 RX 接 ESP32 的 TX。
+// OT2 为存在状态输出：高电平=有人，低电平=无人。
+#define LD2410S_OT1_PIN 1  // LD2410S OT1/TX -> ESP32 RX
+#define LD2410S_RX_PIN  2  // LD2410S RX      <- ESP32 TX
+#define LD2410S_OT2_PIN 3  // LD2410S OT2     -> ESP32 GPIO input
+#define LD2410S_UART_BAUD 115200
 
 // ---- 板载 Codec 共用 I2S 总线 ----
 #define I2S_MCLK_PIN 16

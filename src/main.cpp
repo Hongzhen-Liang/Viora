@@ -19,6 +19,7 @@
 #include "led.h"
 #include "net.h"
 #include "ota_manager.h"
+#include "presence/presence_manager.h"
 #include "sensor/sensor_manager.h"
 #include "speech.h"
 #include "turn_detector.h"
@@ -67,6 +68,9 @@ static bool s_followup_keep_preroll = false;  // ack_done 后重开麦需保留�
 static uint32_t s_wake_ack_start_ms = 0;      // 唤醒决定窗开始时刻
 static bool s_ack_playing = false;            // 决定窗已过，确认音播放中
 static bool s_ack_voice_captured = false;      // 确认音期间已捕获近端用户人声
+static bool s_proactive_pending = false;       // 服务端主动呼叫请求/播放进行中
+static uint32_t s_proactive_candidate_ms = 0;  // 满足“久别返回”的候选起点
+static uint32_t s_last_proactive_call_ms = 0;
 
 // 播放中 AEC/VAD 打断状态。
 static bool s_accept_tts_audio = false;
@@ -560,6 +564,7 @@ static void on_net_disconnected() {
   s_accept_tts_audio = false;
   s_tts_end_received = false;
   s_consec_errors = 0;
+  s_proactive_pending = false;
   speech_async_reset();
   g_audio.ringClear();
   g_audio.playDiscard();
@@ -572,6 +577,13 @@ static void retry_listening_after_failure() {
   s_accept_tts_audio = false;
   s_tts_end_received = false;
   g_audio.playDiscard();
+  if (s_proactive_pending) {
+    s_proactive_pending = false;
+    s_rearm_pending = false;
+    set_state(ST_IDLE);
+    Serial.println("[PRESENCE] 主动呼叫失败，安静回到待机");
+    return;
+  }
   ++s_consec_errors;
   if (s_consec_errors >= MAX_CONSEC_ERRORS) {
     s_consec_errors = 0;
@@ -756,7 +768,13 @@ static void print_hardware_banner(bool sensors_ok, bool audio_ok) {
   Serial.println("Sensors:");
   Serial.printf("SHTC3 %s\n", g_sensor.shtc3_ok() ? "OK" : "FAIL");
   Serial.printf("BH1750 %s\n", g_sensor.bh1750_ok() ? "OK" : "FAIL");
+#if ENABLE_SOIL_SENSOR
   Serial.printf("Soil ADC %s\n", g_sensor.soil_ok() ? "OK" : "FAIL");
+#else
+  Serial.println("Soil ADC DISABLED (GPIO1 -> LD2410S OT1)");
+#endif
+  Serial.printf("LD2410S UART GPIO%d/%d OT2 GPIO%d\n", LD2410S_OT1_PIN,
+                LD2410S_RX_PIN, LD2410S_OT2_PIN);
   Serial.println("Audio:");
   Serial.printf("ES7210 dual MIC %s\n", audio_ok ? "OK" : "FAIL");
   Serial.printf("ES8311 speaker %s\n", audio_ok ? "OK" : "FAIL");
@@ -771,6 +789,7 @@ void setup() {
 
   // 传感器（板载 SHTC3 / 可选 BH1750 / 外接土壤湿度）
   const bool sensors_ok = g_sensor.begin();
+  g_presence.begin();
   // 音频（板载 ES7210 + ES8311 共享 I2S 全双工总线）
   const bool audio_ok = g_audio.begin();
   // 4.2 英寸 ST7305 反射屏：蝴蝶兰角色 + 动态中文字幕。
@@ -817,6 +836,7 @@ void setup() {
 static void send_sensor_telemetry() {
   if (!net_connected()) return;
   const SensorData &d = g_sensor.data();
+  const PresenceData &p = g_presence.data();
   char t[16], h[16], l[16], s[16];
   auto fmt = [](char *out, size_t sz, float v, const char *fmt) {
     if (std::isnan(v)) {
@@ -829,19 +849,87 @@ static void send_sensor_telemetry() {
   fmt(h, sizeof(h), d.humidity, "%.1f");
   fmt(l, sizeof(l), d.light, "%.1f");
   fmt(s, sizeof(s), d.soil, "%.1f");
-  char buf[256];
+  char distance[16];
+  if (p.present && p.distance_cm > 0) {
+    snprintf(distance, sizeof(distance), "%u", p.distance_cm);
+  } else {
+    snprintf(distance, sizeof(distance), "null");
+  }
+  char buf[320];
   snprintf(buf, sizeof(buf),
            "{\"type\":\"telemetry\",\"temp\":%s,\"hum\":%s,"
            "\"light\":%s,\"soil\":%s,\"soil_raw\":%d,"
+           "\"presence\":%s,\"presence_distance_cm\":%s,"
            "\"fw\":\"%s\",\"fw_build\":%u,\"ota\":\"%s\","
            "\"ota_slot\":\"%s\"}",
-           t, h, l, s, d.soil_raw, FIRMWARE_VERSION, FIRMWARE_BUILD,
-           ota_status(), ota_running_slot());
+           t, h, l, s, d.soil_raw, p.present ? "true" : "false", distance,
+           FIRMWARE_VERSION, FIRMWARE_BUILD, ota_status(), ota_running_slot());
   net_send_json(buf);
+}
+
+static bool proactive_quiet_hours() {
+  const time_t now = time(nullptr);
+  if (now < 1577836800) return false;
+  const time_t local_now = now + DEVICE_UTC_OFFSET_SECONDS;
+  struct tm local_tm;
+  gmtime_r(&local_now, &local_tm);
+  const int hour = local_tm.tm_hour;
+  if (PROACTIVE_SILENT_START_HOUR > PROACTIVE_SILENT_END_HOUR) {
+    return hour >= PROACTIVE_SILENT_START_HOUR ||
+           hour < PROACTIVE_SILENT_END_HOUR;
+  }
+  return hour >= PROACTIVE_SILENT_START_HOUR &&
+         hour < PROACTIVE_SILENT_END_HOUR;
+}
+
+static void handle_presence_logic() {
+  g_presence.poll();
+  const PresenceData &p = g_presence.data();
+  const uint32_t now = millis();
+  const PresenceEvent event = g_presence.takeEvent();
+  if (event == PresenceEvent::kEntered) {
+    const uint32_t absence_ms = now - p.absent_since_ms;
+    if (absence_ms >= PROACTIVE_MIN_ABSENCE_MS) {
+      s_proactive_candidate_ms = now;
+      Serial.printf("[PRESENCE] 久别返回候选：离开了 %lus\n",
+                    static_cast<unsigned long>(absence_ms / 1000));
+    }
+  } else if (event == PresenceEvent::kLeft) {
+    s_proactive_candidate_ms = 0;
+  }
+
+#if ENABLE_PROACTIVE_CALL
+  const bool near = p.present && p.distance_cm > 0 &&
+                    p.distance_cm <= PRESENCE_NEAR_DISTANCE_CM;
+  const bool cooldown_ok =
+      s_last_proactive_call_ms == 0 ||
+      now - s_last_proactive_call_ms >= PROACTIVE_CALL_COOLDOWN_MS;
+  if (s_proactive_candidate_ms != 0 && near && cooldown_ok &&
+      now - s_proactive_candidate_ms >= PROACTIVE_PRESENCE_DWELL_MS &&
+      s_state == ST_IDLE && !s_rearm_pending && !s_exit_pending &&
+      !s_proactive_pending && net_connected() && !ota_busy() &&
+      !proactive_quiet_hours()) {
+    char frame[192];
+    snprintf(frame, sizeof(frame),
+             "{\"type\":\"proactive_call\","
+             "\"reason\":\"presence_return\",\"distance_cm\":%u,"
+             "\"presence_ms\":%lu}",
+             p.distance_cm,
+             static_cast<unsigned long>(now - p.present_since_ms));
+    s_proactive_pending = true;
+    s_proactive_candidate_ms = 0;
+    s_last_proactive_call_ms = now;
+    set_state(ST_PROCESSING);
+    g_display.setSubtitle("注意到你回来啦…");
+    net_send_json(frame);
+    Serial.printf("[PRESENCE] 请求主动呼叫，距离=%ucm\n", p.distance_cm);
+  }
+#endif
 }
 
 void loop() {
   net_loop();
+  handle_presence_logic();
   ota_loop(s_state == ST_IDLE && !s_rearm_pending && !s_exit_pending);
   handle_ota_key();
   ota_screen_loop();
@@ -1183,12 +1271,14 @@ void loop() {
     s_accept_tts_audio = false;
     s_tts_end_received = false;
     g_audio.ringClear();
-    if (s_exit_pending) {
+    if (s_exit_pending || (s_proactive_pending && !g_presence.present())) {
       s_exit_pending = false;
+      s_proactive_pending = false;
       set_state(ST_IDLE);
-      Serial.println(">>> 已退出对话，回到待唤醒");
+      Serial.println(">>> 对话结束或现场无人，回到待唤醒");
     } else {
       // 回复播完立刻重开麦克风；不需要再次说唤醒词。
+      s_proactive_pending = false;
       enter_listening(LISTEN_FROM_FOLLOWUP);
     }
   }

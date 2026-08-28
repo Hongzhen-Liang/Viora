@@ -3,7 +3,7 @@
 // SensorManager —— 传感器管理模块
 //   SHTC3  板载温湿度（I2C，0x70）
 //   BH1750 光照   （I2C，0x23，GY-302）
-//   土壤湿度      （模拟 ADC，传感器 AOUT 接 GPIO1）
+//   土壤湿度      （模拟 ADC；当前由 ENABLE_SOIL_SENSOR 关闭）
 // ============================================================
 #include <Arduino.h>
 

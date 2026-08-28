@@ -129,6 +129,10 @@ void SensorManager::initSoilAdc() {
   s_soil_ok_ = false;
   s_data_.soil = NAN;
   s_data_.soil_raw = -1;
+#if !ENABLE_SOIL_SENSOR
+  Serial.println("[SENSOR] Soil ADC disabled (GPIO1 reserved for LD2410S OT1)");
+  return;
+#endif
   if (digitalPinToAnalogChannel(SOIL_ADC_PIN) < 0) {
     Serial.printf("[SENSOR] Soil ADC init failed: GPIO%d is not an ADC pin\n",
                   SOIL_ADC_PIN);
@@ -243,6 +247,9 @@ void SensorManager::readBh1750() {
 }
 
 void SensorManager::readSoil() {
+#if !ENABLE_SOIL_SENSOR
+  return;
+#endif
   if (!s_soil_ok_) return;
   // 多次采样取平均，降低 ADC 抖动
   int64_t sum = 0;
