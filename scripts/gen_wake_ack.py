@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """生成固件本地唤醒确认音资源（src/wake_ack_data.{h,cpp}）。
 
-KWS 命中时固件立即本地播放这段确认音（如"嗯？"），无需等待服务器，
+KWS 命中时固件立即本地播放这段确认音（默认“Hi，主人”），无需等待服务器，
 实现 Siri 式的即时响应。音频用 VioraServer 当前的 TTS provider/voice
 合成，保证与对话回复音色一致；换音色或换文案后重跑本脚本再编译固件。
 
 用法（在 VioraServer 目录下运行以加载 .env）：
-    .venv/bin/python ../scripts/gen_wake_ack.py "嗯？"
+    .venv/bin/python ../scripts/gen_wake_ack.py "Hi，主人"
 """
 
 import argparse
@@ -107,7 +107,7 @@ async def synthesize(text: str, min_ms: int) -> bytes:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("text", nargs="?", default="嗯？", help="确认音文案")
+    parser.add_argument("text", nargs="?", default="Hi，主人", help="确认音文案")
     parser.add_argument("--min-ms", type=int, default=350, help="最短时长(ms)")
     args = parser.parse_args()
     pcm = asyncio.run(synthesize(args.text, args.min_ms))
