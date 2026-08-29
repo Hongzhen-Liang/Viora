@@ -79,7 +79,7 @@ bool make_aad(uint32_t sequence, uint64_t captured_at, char *out, size_t out_siz
 bool secure_telemetry_init() {
   if (s_ready) return true;
   device_id_from_efuse();
-  if (!s_prefs.begin("viora-sec", false)) {
+  if (!s_prefs.begin("viora_sec", false)) {
     Serial.println("[SEC] 无法打开 NVS，遥测加密停用");
     return false;
   }
@@ -122,7 +122,7 @@ uint32_t secure_telemetry_next_sequence() {
   ++s_sequence;
   // 每条遥测都保存序号，避免断电后重放同一序号。NVS 自带磨损均衡，
   // 默认 30 秒一条时写入量约为每天 2880 次，远低于常见寿命预算。
-  if (s_prefs.begin("viora-sec", false)) {
+  if (s_prefs.begin("viora_sec", false)) {
     s_prefs.putULong("sequence", s_sequence);
     s_prefs.end();
   }
