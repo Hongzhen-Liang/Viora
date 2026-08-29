@@ -8,6 +8,8 @@
 #include <mbedtls/md.h>
 #include <mbedtls/sha256.h>
 
+#include "config.h"
+
 namespace {
 
 constexpr size_t kKeyBytes = 32;
@@ -72,6 +74,24 @@ bool make_aad(uint32_t sequence, uint64_t captured_at, char *out, size_t out_siz
                                static_cast<unsigned long long>(captured_at),
                                static_cast<unsigned>(kKeyVersion));
   return written > 0 && static_cast<size_t>(written) < out_size;
+}
+
+bool append_url_encoded(String &out, const char *value) {
+  if (value == nullptr) return false;
+  for (const char *cursor = value; *cursor != '\0'; ++cursor) {
+    const char c = *cursor;
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+        (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' ||
+        c == '~') {
+      out += c;
+    } else {
+      char escaped[4] = {};
+      snprintf(escaped, sizeof(escaped), "%%%02X",
+               static_cast<unsigned char>(c));
+      out += escaped;
+    }
+  }
+  return true;
 }
 
 }  // namespace
@@ -185,4 +205,23 @@ bool secure_telemetry_build_pairing(char *out, size_t out_size) {
       s_device_id, s_pairing_code, s_key_fingerprint,
       static_cast<unsigned>(kKeyVersion));
   return written > 0 && static_cast<size_t>(written) < out_size;
+}
+
+bool secure_telemetry_build_binding_url(char *out, size_t out_size) {
+  if (!s_ready || !out || out_size == 0 || BINDING_WEB_URL[0] == '\0') {
+    return false;
+  }
+  // Keep the viewing key after #. Browsers do not include fragments in the
+  // HTTP request, so the Web server never receives the raw AES key.
+  String url = BINDING_WEB_URL;
+  if (url.indexOf('#') >= 0) return false;
+  url += "#device_id=";
+  if (!append_url_encoded(url, s_device_id)) return false;
+  url += "&pairing_code=";
+  if (!append_url_encoded(url, s_pairing_code)) return false;
+  url += "&viewing_key=";
+  if (!append_url_encoded(url, s_viewing_key)) return false;
+  if (url.length() + 1 > out_size) return false;
+  strlcpy(out, url.c_str(), out_size);
+  return true;
 }

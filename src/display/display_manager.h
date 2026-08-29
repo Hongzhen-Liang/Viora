@@ -16,6 +16,7 @@ class DisplayManager {
                          DisplayNetworkState network_state);
   void setPresence(bool present);
   void setUpdateAvailable(bool available);
+  void showBindingQr(const char *url, const char *pairing_code);
   void showOtaScreen(const char *line1, const char *line2);
   void setSubtitle(const char *text);
   void startSpeaking();
@@ -30,6 +31,7 @@ class DisplayManager {
   void wrapSubtitle(const char *text);
   void renderPage();
   void renderIdleDashboard();
+  void renderBindingQrExpired();
   uint32_t currentPageDurationMs() const;
 
   struct TimedCue {
@@ -55,6 +57,8 @@ class DisplayManager {
   uint8_t page_count_ = 1;
   uint32_t last_page_ms_ = 0;
   bool timed_mode_ = false;
+  bool binding_qr_active_ = false;
+  uint32_t binding_qr_deadline_ms_ = 0;
   TimedCue timed_cues_[kMaxTimedCues];
   uint8_t timed_cue_count_ = 0;
 };

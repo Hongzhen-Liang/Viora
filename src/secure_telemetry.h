@@ -22,3 +22,7 @@ bool secure_telemetry_encrypt(const char *plaintext_json,
 // 连接 WebSocket 后发送一次设备登记信息。登记信息不包含设备密钥，
 // 只包含用于配对校验的指纹。
 bool secure_telemetry_build_pairing(char *out, size_t out_size);
+
+// 生成给设备屏幕二维码使用的绑定页 URL。查看码只放在 URL fragment
+// （# 后），不会被浏览器作为 HTTP 请求发送给 Web 服务器。
+bool secure_telemetry_build_binding_url(char *out, size_t out_size);

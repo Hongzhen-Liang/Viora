@@ -65,7 +65,7 @@ ESP-IDF 组件（本地 `components/`，`scripts/fetch_components.py` 拉取）�
 ```mermaid
 sequenceDiagram
     participant E as ESP32
-    participant S as Mac 服务器(8765)
+    participant S as HTTPS/WSS 服务器(11451)
 
     Note over E: WakeNet 唤醒词“你好小鑫”命中
     E->>S: {"type":"audio_start"}
@@ -174,7 +174,7 @@ ES8311 speaker OK
 
 ## 3. 通信协议（重要，必须严格遵守）
 
-- 端点：`ws://<Mac IP>:8765/ws`
+- 端点：`wss://<服务器域名>:11451/ws`（必须使用 TLS）
 - 音频规格：**16kHz / 16bit / 单声道 / little-endian PCM**，每样本 2 字节。
 - 帧分两类：**文本帧 = JSON 控制消息**，**二进制帧 = 音频数据**。
 
@@ -307,8 +307,8 @@ cp src/secrets.example.h src/secrets.h   # 复制模板后填写
 ```cpp
 #define SECRET_WIFI_SSID    "你的WiFi名"
 #define SECRET_WIFI_PASS    "你的WiFi密码"
-#define SECRET_SERVER_HOST  "your-server-host"   // 域名需局域网 DNS 能解析，或直接填 IP
-#define SECRET_SERVER_PORT  8765
+#define SECRET_SERVER_HOST  "your-server-host"   // 证书域名需能解析
+#define SECRET_SERVER_PORT  11451
 #define SECRET_API_KEY      "与 VioraServer/.env 的 API_KEY 一致"
 ```
 
@@ -514,7 +514,7 @@ void loop() {
 
 ## 9. 调试清单
 
-1. **连不上**：确认 ESP32 与 Mac 同一局域网；Mac 上服务器已启动（`curl http://<Mac IP>:8765/health` 应返回 `{"service":"Viora","status":"ok"}`）。
+1. **连不上**：确认 ESP32 与服务器网络可达；服务器已启动（`curl -k https://<服务器域名>:11451/health` 应返回 `{"service":"Viora","status":"ok"}`）。检查固件中的 `SERVER_ROOT_CA` 与证书签发机构是否匹配。
 2. **收到 `{"type":"error","message":"服务器忙..."}`**：上一轮流水线还没结束，等收到 `tts_end` 后再发下一段语音。
 3. **上传后无回复**：检查麦克风采样率是否为 16k、位深 16bit、单声道；打印 `mic_read` 读到的样本数确认非 0。
 4. **播放声音小/杂音**：确认喇叭插头已插紧，并查看启动日志中 ES8311 与 PA 是否均为 `OK/ON`。
@@ -525,7 +525,7 @@ void loop() {
 
 | 项 | 约定 |
 |----|------|
-| 端点 | `ws://<Mac IP>:8765/ws` |
+| 端点 | `wss://<服务器域名>:11451/ws` |
 | 采样率 | 16000 Hz |
 | 位深 | 16 bit |
 | 声道 | 单声道 |

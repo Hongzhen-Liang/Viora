@@ -3,6 +3,7 @@
 #include <U8g2lib.h>
 #include <cmath>
 #include <ctime>
+#include <qrcode.h>
 
 #include "config.h"
 #include "display/orchid_bitmap.h"
@@ -19,6 +20,8 @@ constexpr uint32_t kSubtitlePageMinMs = 4800;
 constexpr uint32_t kSubtitlePageMaxMs = 12000;
 constexpr uint32_t kIdleRefreshMs = 60000;
 constexpr uint32_t kUnsyncedClockRefreshMs = 10000;
+constexpr uint32_t kBindingQrDurationMs = 120000;
+constexpr uint8_t kBindingQrScale = 3;
 
 // 19x14 的紧凑状态栏 Wi-Fi 图标。时间是待机页的主信息，网络图标
 // 只作为辅助状态，因此刻意缩小一级，避免与时间争夺视觉注意力。
@@ -50,6 +53,47 @@ U8G2_ST7305_300X400_F_4W_SW_SPI s_lcd(
     U8G2_R1, RLCD_SCK_PIN, RLCD_MOSI_PIN, RLCD_CS_PIN, RLCD_DC_PIN,
     RLCD_RST_PIN);
 
+char s_binding_qr_pairing_code[13] = {};
+
+void render_qr_callback(esp_qrcode_handle_t qrcode) {
+  const int modules = esp_qrcode_get_size(qrcode);
+  if (modules <= 0 || modules > 177) return;
+
+  const int quiet_zone = 4 * kBindingQrScale;
+  const int qr_pixels = modules * kBindingQrScale;
+  const int total_pixels = qr_pixels + quiet_zone * 2;
+  const int x = (kScreenWidth - total_pixels) / 2;
+  const int y = 29;
+
+  s_lcd.clearBuffer();
+  s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
+  const char *title = "扫描二维码绑定";
+  const uint16_t title_width = s_lcd.getUTF8Width(title);
+  s_lcd.drawUTF8((kScreenWidth - title_width) / 2, 18, title);
+  s_lcd.setDrawColor(0);
+  s_lcd.drawBox(x, y, total_pixels, total_pixels);
+  s_lcd.setDrawColor(1);
+  for (int row = 0; row < modules; ++row) {
+    for (int col = 0; col < modules; ++col) {
+      if (esp_qrcode_get_module(qrcode, col, row)) {
+        s_lcd.drawBox(x + quiet_zone + col * kBindingQrScale,
+                      y + quiet_zone + row * kBindingQrScale,
+                      kBindingQrScale, kBindingQrScale);
+      }
+    }
+  }
+  s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
+  char pairing_line[40] = {};
+  snprintf(pairing_line, sizeof(pairing_line), "配对码 %s",
+           s_binding_qr_pairing_code);
+  const uint16_t pairing_width = s_lcd.getUTF8Width(pairing_line);
+  s_lcd.drawUTF8((kScreenWidth - pairing_width) / 2, 266, pairing_line);
+  const char *hint = "扫描后登录即可绑定";
+  const uint16_t hint_width = s_lcd.getUTF8Width(hint);
+  s_lcd.drawUTF8((kScreenWidth - hint_width) / 2, 291, hint);
+  s_lcd.sendBuffer();
+}
+
 size_t utf8CharBytes(uint8_t lead) {
   if ((lead & 0x80U) == 0) return 1;
   if ((lead & 0xE0U) == 0xC0U) return 2;
@@ -78,6 +122,7 @@ void DisplayManager::showIdleDashboard(float temperature, float humidity,
                                        float soil,
                                        DisplayNetworkState network_state) {
   if (!ready_) return;
+  if (binding_qr_active_) return;
   // 初始化后的第一次有效读数必须立即上屏，不能被一分钟的常规刷新节流
   // 挡住。否则串口已经有土壤百分比，屏幕仍会暂时显示“未连接”。
   const bool availability_changed =
@@ -129,6 +174,31 @@ void DisplayManager::setPresence(bool present) {
   idle_presence_ = present;
   const bool presence_changed = idle_presence_ != rendered_presence_;
   if (idle_mode_ && presence_changed) renderIdleDashboard();
+}
+
+void DisplayManager::showBindingQr(const char *url, const char *pairing_code) {
+  if (!ready_ || url == nullptr || url[0] == '\0') return;
+  idle_mode_ = false;
+  timed_mode_ = false;
+  timed_cue_count_ = 0;
+  binding_qr_active_ = true;
+  binding_qr_deadline_ms_ = millis() + kBindingQrDurationMs;
+  strlcpy(s_binding_qr_pairing_code, pairing_code ? pairing_code : "",
+          sizeof(s_binding_qr_pairing_code));
+
+  esp_qrcode_config_t config = ESP_QRCODE_CONFIG_DEFAULT();
+  config.display_func = render_qr_callback;
+  config.max_qrcode_version = 10;
+  config.qrcode_ecc_level = ESP_QRCODE_ECC_LOW;
+  const esp_err_t result = esp_qrcode_generate(&config, url);
+  if (result != ESP_OK) {
+    binding_qr_active_ = false;
+    binding_qr_deadline_ms_ = 0;
+    Serial.printf("[DISPLAY] 二维码生成失败: %s\n", esp_err_to_name(result));
+    setSubtitle("二维码生成失败，请使用网页手动绑定");
+    return;
+  }
+  Serial.println("[DISPLAY] 已显示绑定二维码（120 秒后返回待机）");
 }
 
 void DisplayManager::showOtaScreen(const char *line1, const char *line2) {
@@ -185,6 +255,8 @@ void DisplayManager::wrapSubtitle(const char *text) {
 
 void DisplayManager::setSubtitle(const char *text) {
   if (!ready_) return;
+  binding_qr_active_ = false;
+  binding_qr_deadline_ms_ = 0;
   idle_mode_ = false;
   timed_mode_ = false;
   timed_cue_count_ = 0;
@@ -257,7 +329,16 @@ uint32_t DisplayManager::currentPageDurationMs() const {
 }
 
 void DisplayManager::loop(bool speaking, uint32_t playback_position_bytes) {
-  if (!ready_ || !speaking) return;
+  if (!ready_) return;
+  if (binding_qr_active_) {
+    if (static_cast<int32_t>(millis() - binding_qr_deadline_ms_) >= 0) {
+      binding_qr_active_ = false;
+      binding_qr_deadline_ms_ = 0;
+      renderBindingQrExpired();
+    }
+    return;
+  }
+  if (!speaking) return;
 
   if (timed_mode_) {
     while (timed_cue_count_ > 0 &&
@@ -285,6 +366,12 @@ void DisplayManager::loop(bool speaking, uint32_t playback_position_bytes) {
     ++page_;
     renderPage();
   }
+}
+
+void DisplayManager::renderBindingQrExpired() {
+  idle_mode_ = true;
+  last_idle_render_ms_ = millis();
+  renderIdleDashboard();
 }
 
 void DisplayManager::renderPage() {

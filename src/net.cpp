@@ -250,7 +250,16 @@ static void start_websocket() {
   } else {
     Serial.printf("[WS] 域名 %s 解析失败，重连时会重试解析\n", SERVER_HOST);
   }
+#if SERVER_TLS_ENABLED
+  if (SERVER_ROOT_CA[0] == '\0') {
+    Serial.println("[WS] 已启用 WSS，但没有配置 SERVER_ROOT_CA；请补充服务器根证书");
+    s_target_ready = true;
+    return;
+  }
+  s_ws.beginSslWithCA(SERVER_HOST, SERVER_PORT, SERVER_PATH, SERVER_ROOT_CA);
+#else
   s_ws.begin(SERVER_HOST, SERVER_PORT, SERVER_PATH);
+#endif
   s_ws.setReconnectInterval(3000);
   // 心跳放宽：长 TTS 流播放期间偶尔的收包停顿不应直接判死断连。
   // 15s ping / 10s 超时 / 连续 4 次才断开（约 40s 无 pong）。
@@ -281,8 +290,13 @@ static void start_websocket() {
     Serial.printf("[WS] 已附加设备标识头 device=%s\n", s_device_id);
   }
   s_target_ready = true;
-  Serial.printf("[WS] 目标服务器: ws://%s:%d%s（心跳 15s）\n", SERVER_HOST,
-                SERVER_PORT, SERVER_PATH);
+#if SERVER_TLS_ENABLED
+  Serial.printf("[WS] 目标服务器: wss://%s:%d%s（心跳 15s，TLS 已验证）\n",
+                SERVER_HOST, SERVER_PORT, SERVER_PATH);
+#else
+  Serial.printf("[WS] 目标服务器: ws://%s:%d%s（心跳 15s，明文模式）\n",
+                SERVER_HOST, SERVER_PORT, SERVER_PATH);
+#endif
 }
 
 // ============================================================
@@ -397,6 +411,18 @@ bool net_wifi_connected() {
 
 bool net_provisioning_active() {
   return prov_active();
+}
+
+void net_release_tls_for_ota() {
+  if (!s_ws_connected) return;
+  net_audio_flush();
+  if (s_ws_mutex) xSemaphoreTakeRecursive(s_ws_mutex, portMAX_DELAY);
+  s_ws.disconnect();
+  if (s_ws_mutex) xSemaphoreGiveRecursive(s_ws_mutex);
+  // WiFiClientSecure 在 disconnect 后释放 mbedTLS 缓冲；给清理回调一个调度窗口，
+  // 避免 OTA HTTPS 紧接着分配第二套 TLS 状态而耗尽内部 RAM。
+  delay(50);
+  Serial.println("[OTA] 已暂时释放 WSS TLS 内存，检查结束后自动重连");
 }
 
 void net_set_idle_power_save(bool enabled) {

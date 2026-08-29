@@ -14,6 +14,7 @@
 #include <time.h>
 
 #include "config.h"
+#include "net.h"
 #include "ota_public_key.h"
 
 // Arduino-ESP32 默认会在 setup() 之前立刻确认新 OTA 镜像。覆盖其弱符号，
@@ -522,12 +523,14 @@ void ota_loop(bool idle) {
   if (time(nullptr) < 1700000000) return;  // TLS 证书校验需要正确时间
   if (s_download_requested) {
     s_download_requested = false;
+    net_release_tls_for_ota();
     download_now();
     return;
   }
   const uint32_t now = millis();
   if (!s_manual_check && !elapsed(now, s_next_check_ms)) return;
   s_manual_check = false;
+  net_release_tls_for_ota();
   check_now();
 }
 

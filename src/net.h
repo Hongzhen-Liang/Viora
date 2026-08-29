@@ -22,6 +22,8 @@ void net_wifi_retry_now();
 bool net_connected();
 bool net_wifi_connected();              // WiFi 已关联，不代表服务端已连接
 bool net_provisioning_active();          // 是否处于配网热点模式
+// OTA 需要独占 ESP32 的 TLS 内存；释放当前 WSS 连接，下一轮 net_loop 会自动重连。
+void net_release_tls_for_ota();
 // 待唤醒时允许 WiFi modem sleep；录音/处理/播放时恢复全性能。
 void net_set_idle_power_save(bool enabled);
 // 返回 WebSocket 是否实际接受该二进制帧，便于端侧发现上行丢帧。

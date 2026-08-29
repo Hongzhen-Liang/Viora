@@ -66,7 +66,7 @@ sequenceDiagram
 
 ## 4. WebSocket 通信协议（重要，必须严格遵守）
 
-- 端点：`ws://<Mac IP>:8765/ws`
+- 端点：`wss://<服务器域名>:11451/ws`（必须使用 TLS）
 - 音频规格：**16kHz / 16bit / 单声道 / little-endian PCM**，每样本 2 字节。
 - 帧分两类：**文本帧 = JSON 控制消息**，**二进制帧 = 音频数据**。
 
@@ -160,8 +160,13 @@ pydub
 `.env` 示例：
 
 ```env
-# 服务监听端口（ESP32 连接 ws://<Mac IP>:8765/ws）
-SERVER_PORT=8765
+# 服务监听端口（ESP32 连接 wss://<服务器域名>:11451/ws）
+SERVER_HOST=0.0.0.0
+SERVER_PORT=11451
+
+# HTTPS 证书（fullchain + 私钥；证书域名须包含服务器域名）
+SERVER_TLS_CERTFILE=/path/to/fullchain.pem
+SERVER_TLS_KEYFILE=/path/to/privkey.pem
 
 # DeepSeek
 DEEPSEEK_API_KEY=sk-xxxx
@@ -252,11 +257,12 @@ def build_system_prompt(state: dict) -> str:
 ## 10. 运行
 
 ```bash
-source .venv/bin/activate
-uvicorn main:app --host 0.0.0.0 --port 8765
+./start.sh
 ```
 
-验证：ESP32 端把 WebSocket 地址填成 `ws://<Mac 局域网 IP>:8765/ws`。可用 `curl` 或浏览器控制台快速自测握手。
+验证：`curl -k https://127.0.0.1:11451/health`，并确认 ESP32 使用
+`wss://<服务器域名>:11451/ws`。生产环境不要关闭证书校验；ESP32 固件会校验
+`SERVER_ROOT_CA`（默认复用 OTA 的 ISRG Root X1）。
 
 ---
 

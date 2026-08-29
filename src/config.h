@@ -61,9 +61,17 @@
 #define WIFI_SSID     ""
 #define WIFI_PASS     ""
 #define SERVER_HOST   "127.0.0.1"
-#define SERVER_PORT   8765
+#define SERVER_PORT   11451
 #define SERVER_API_KEY ""
 #endif
+#ifndef SECRET_BINDING_WEB_URL
+#define SECRET_BINDING_WEB_URL ""
+#endif
+#define BINDING_WEB_URL SECRET_BINDING_WEB_URL
+#ifndef SECRET_SERVER_TLS_ENABLED
+#define SECRET_SERVER_TLS_ENABLED 1
+#endif
+#define SERVER_TLS_ENABLED SECRET_SERVER_TLS_ENABLED
 #define SERVER_PATH "/ws"
 
 // OTA 凭据单独存放，便于为每台赠送设备分配独立 token，且不改动 WiFi 凭据。
@@ -98,6 +106,10 @@
 #define OTA_API_KEY      ""
 #define OTA_ROOT_CA      ""
 #endif
+#ifndef SECRET_SERVER_ROOT_CA
+#define SECRET_SERVER_ROOT_CA OTA_ROOT_CA
+#endif
+#define SERVER_ROOT_CA SECRET_SERVER_ROOT_CA
 #define OTA_INITIAL_CHECK_MS     60000UL
 #define OTA_CHECK_INTERVAL_MS 86400000UL
 #define OTA_RETRY_INTERVAL_MS   3600000UL

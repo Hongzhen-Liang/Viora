@@ -313,7 +313,17 @@ static void handle_user_key() {
     ota_request_install();
     return;
   }
-  if (!ota_update_available()) return;
+  if (!ota_update_available()) {
+    char binding_url[512] = {};
+    if (secure_telemetry_build_binding_url(binding_url, sizeof(binding_url))) {
+      Serial.println("[PAIR] 用户按键呼出绑定二维码");
+      g_display.showBindingQr(binding_url, secure_telemetry_pairing_code());
+    } else {
+      Serial.println("[PAIR] 未配置 SECRET_BINDING_WEB_URL，无法显示二维码");
+      g_display.setSubtitle("请在 secrets.h 配置绑定网址");
+    }
+    return;
+  }
   if (s_ota_screen_mode == OtaScreenMode::kDetails) {
     Serial.println("[KEY] 用户确认下载 OTA");
     s_ota_screen_mode = OtaScreenMode::kDownloading;
