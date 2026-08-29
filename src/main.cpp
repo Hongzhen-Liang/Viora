@@ -22,6 +22,7 @@
 #include "ota_manager.h"
 #include "presence/presence_manager.h"
 #include "sensor/sensor_manager.h"
+#include "secure_telemetry.h"
 #include "speech.h"
 #include "turn_detector.h"
 #include "vad.h"
@@ -610,6 +611,11 @@ static void on_net_connected() {
   // configTime 非阻塞；SNTP 在后台完成首次同步并定期校准。
   configTime(0, 0, NTP_SERVER_1, NTP_SERVER_2, NTP_SERVER_3);
   Serial.println("[TIME] 已启动网络校时，屏幕固定显示中国标准时间 UTC+8");
+  // 登记帧只含设备 ID、一次性配对码和查看码指纹，不含 AES 密钥。
+  char pairing[320] = {};
+  if (secure_telemetry_build_pairing(pairing, sizeof(pairing))) {
+    net_send_json(pairing);
+  }
 }
 
 static void on_net_disconnected() {
@@ -858,6 +864,10 @@ void setup() {
   // 启动横幅
   print_hardware_banner(sensors_ok, audio_ok);
 
+  if (!secure_telemetry_init()) {
+    Serial.println("[SEC] 端到端遥测初始化失败：不会上传传感器数据");
+  }
+
   NetCallbacks cbs = {on_net_connected, on_net_disconnected,
                       on_server_text, on_net_audio};
   net_init(cbs);
@@ -887,10 +897,11 @@ void setup() {
   ota_init(audio_ok && afe_ok && kws_ok);
 }
 
-// 周期上报传感器遥测（JSON 帧，约 150B/30s，走 WS 发送队列不阻塞主循环）。
-// 未成功读到的传感器以 null 上报；服务端 plant_state 只收有效值。
+// 周期上报传感器遥测。传感器 JSON 先在 ESP32 上使用 AES-256-GCM 加密，
+// Server 只能盲转发 telemetry_encrypted 帧；旧的明文 telemetry 默认停用。
+// 未成功读到的传感器以 null 加密上报。
 static void send_sensor_telemetry() {
-  if (!net_connected()) return;
+  if (!net_connected() || !secure_telemetry_device_id()[0]) return;
   const SensorData &d = g_sensor.data();
   const PresenceData &p = g_presence.data();
   char t[16], h[16], l[16], s[16];
@@ -911,16 +922,27 @@ static void send_sensor_telemetry() {
   } else {
     snprintf(distance, sizeof(distance), "null");
   }
-  char buf[320];
-  snprintf(buf, sizeof(buf),
-           "{\"type\":\"telemetry\",\"temp\":%s,\"hum\":%s,"
+  char payload[360];
+  snprintf(payload, sizeof(payload),
+           "{\"temp\":%s,\"hum\":%s,"
            "\"light\":%s,\"soil\":%s,\"soil_raw\":%d,"
            "\"presence\":%s,\"presence_distance_cm\":%s,"
            "\"fw\":\"%s\",\"fw_build\":%u,\"ota\":\"%s\","
            "\"ota_slot\":\"%s\"}",
            t, h, l, s, d.soil_raw, p.present ? "true" : "false", distance,
            FIRMWARE_VERSION, FIRMWARE_BUILD, ota_status(), ota_running_slot());
-  net_send_json(buf);
+  const time_t now = time(nullptr);
+  const uint64_t captured_at = now >= 1577836800
+                                   ? static_cast<uint64_t>(now) * 1000ULL
+                                   : static_cast<uint64_t>(millis());
+  const uint32_t sequence = secure_telemetry_next_sequence();
+  char envelope[1024] = {};
+  if (secure_telemetry_encrypt(payload, sequence, captured_at, envelope,
+                               sizeof(envelope))) {
+    net_send_json(envelope);
+  } else {
+    Serial.println("[SEC] 遥测加密失败，已丢弃本次数据");
+  }
 }
 
 static bool proactive_quiet_hours() {
