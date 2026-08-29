@@ -88,7 +88,7 @@ void render_qr_callback(esp_qrcode_handle_t qrcode) {
            s_binding_qr_pairing_code);
   const uint16_t pairing_width = s_lcd.getUTF8Width(pairing_line);
   s_lcd.drawUTF8((kScreenWidth - pairing_width) / 2, 266, pairing_line);
-  const char *hint = "扫描后登录即可绑定";
+  const char *hint = "扫描绑定 · 按 KEY 退出";
   const uint16_t hint_width = s_lcd.getUTF8Width(hint);
   s_lcd.drawUTF8((kScreenWidth - hint_width) / 2, 291, hint);
   s_lcd.sendBuffer();
@@ -199,6 +199,17 @@ void DisplayManager::showBindingQr(const char *url, const char *pairing_code) {
     return;
   }
   Serial.println("[DISPLAY] 已显示绑定二维码（120 秒后返回待机）");
+}
+
+void DisplayManager::hideBindingQr() {
+  if (!ready_ || !binding_qr_active_) return;
+  binding_qr_active_ = false;
+  binding_qr_deadline_ms_ = 0;
+  s_binding_qr_pairing_code[0] = '\0';
+  Serial.println("[DISPLAY] 用户退出二维码配对");
+  idle_mode_ = false;
+  showIdleDashboard(idle_temperature_, idle_humidity_, idle_soil_,
+                    idle_network_state_);
 }
 
 void DisplayManager::showOtaScreen(const char *line1, const char *line2) {

@@ -17,6 +17,8 @@ class DisplayManager {
   void setPresence(bool present);
   void setUpdateAvailable(bool available);
   void showBindingQr(const char *url, const char *pairing_code);
+  bool bindingQrActive() const { return binding_qr_active_; }
+  void hideBindingQr();
   void showOtaScreen(const char *line1, const char *line2);
   void setSubtitle(const char *text);
   void startSpeaking();

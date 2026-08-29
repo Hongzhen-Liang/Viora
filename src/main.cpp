@@ -313,6 +313,10 @@ static void handle_user_key() {
     ota_request_install();
     return;
   }
+  if (g_display.bindingQrActive()) {
+    g_display.hideBindingQr();
+    return;
+  }
   if (!ota_update_available()) {
     char binding_url[512] = {};
     if (secure_telemetry_build_binding_url(binding_url, sizeof(binding_url))) {
