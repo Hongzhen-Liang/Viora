@@ -27,6 +27,11 @@ constexpr uint32_t kThinkingExpressionFrameMs = 900;
 constexpr uint32_t kSpeakingExpressionFrameMs = 1500;
 constexpr uint32_t kBindingQrDurationMs = 120000;
 constexpr uint8_t kBindingQrScale = 3;
+constexpr uint16_t kExpressionRightMargin = 20;
+constexpr uint16_t kExpressionTop = 10;
+constexpr uint16_t kPresenceStatusX = 103;
+constexpr uint16_t kWifiStatusX = 126;
+constexpr uint16_t kStatusIconTop = 10;
 
 // 19x14 的紧凑状态栏 Wi-Fi 图标。时间是待机页的主信息，网络图标
 // 只作为辅助状态，因此刻意缩小一级，避免与时间争夺视觉注意力。
@@ -453,8 +458,8 @@ void DisplayManager::renderPage() {
   s_lcd.clearBuffer();
 
   const uint16_t image_x =
-      (kScreenWidth - ORCHID_EXPRESSION_WIDTH) / 2;
-  s_lcd.drawXBMP(image_x, 0, ORCHID_EXPRESSION_WIDTH,
+      kScreenWidth - ORCHID_EXPRESSION_WIDTH - kExpressionRightMargin;
+  s_lcd.drawXBMP(image_x, kExpressionTop, ORCHID_EXPRESSION_WIDTH,
                  ORCHID_EXPRESSION_HEIGHT, expressionBitmap());
 
   // A quiet frame and tiny status label make the illustration feel like a
@@ -473,10 +478,9 @@ void DisplayManager::renderPage() {
   } else if (visual_state_ == DisplayVisualState::kSpeaking) {
     state_label = "SPEAKING";
   }
-  const uint16_t state_width = s_lcd.getStrWidth(state_label);
-  s_lcd.drawStr(380 - state_width, 26, state_label);
+  s_lcd.drawStr(20, 48, state_label);
   s_lcd.drawHLine(20, 34, 34);
-  s_lcd.drawHLine(346, 34, 34);
+  s_lcd.drawHLine(20, 56, 86);
 
   // 一条带中央菱形的细分隔线，比标题、边框和页码更克制，也与
   // 上方植物线稿的气质一致。
@@ -556,8 +560,8 @@ void DisplayManager::renderIdleDashboard() {
   s_lcd.clearBuffer();
 
   const uint16_t image_x =
-      (kScreenWidth - ORCHID_EXPRESSION_WIDTH) / 2;
-  s_lcd.drawXBMP(image_x, 0, ORCHID_EXPRESSION_WIDTH,
+      kScreenWidth - ORCHID_EXPRESSION_WIDTH - kExpressionRightMargin;
+  s_lcd.drawXBMP(image_x, kExpressionTop, ORCHID_EXPRESSION_WIDTH,
                  ORCHID_EXPRESSION_HEIGHT, expressionBitmap());
 
   s_lcd.drawRFrame(10, 8, 380, 216, 12);
@@ -587,34 +591,37 @@ void DisplayManager::renderIdleDashboard() {
   s_lcd.setFont(u8g2_font_6x10_tf);
   s_lcd.drawStr(20, 91, date_text[0] != '\0' ? date_text : "--/--");
 
-  // 右上角显示“整机是否可用”，而不只是 Wi-Fi 关联状态。
+  // 将“有人”和 Wi-Fi 组成左上角状态组，避免它们分散在花的两侧。
   // 正常时为克制的 Wi-Fi 图标；服务端未连时加 !；离线时加斜线；
   // 配网模式直接显示“配网”，让用户知道下一步该做什么。
   if (idle_network_state_ == DisplayNetworkState::kProvisioning) {
     s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
-    s_lcd.drawUTF8(363, 20, "配网");
+    s_lcd.drawUTF8(105, 23, "配网");
   } else {
-    constexpr uint16_t wifi_x = 380;
-    constexpr uint16_t wifi_y = 6;
-    s_lcd.drawXBMP(wifi_x, wifi_y, kWifiIconWidth, kWifiIconHeight,
+    s_lcd.drawXBMP(kWifiStatusX, kStatusIconTop + 1, kWifiIconWidth,
+                   kWifiIconHeight,
                    kWifiIcon);
 
     if (idle_network_state_ == DisplayNetworkState::kOffline) {
-      s_lcd.drawLine(379, 6, 399, 20);
-      s_lcd.drawLine(380, 6, 399, 19);
+      s_lcd.drawLine(kWifiStatusX - 1, kStatusIconTop,
+                     kWifiStatusX + kWifiIconWidth - 1,
+                     kStatusIconTop + kWifiIconHeight);
+      s_lcd.drawLine(kWifiStatusX, kStatusIconTop,
+                     kWifiStatusX + kWifiIconWidth - 1,
+                     kStatusIconTop + kWifiIconHeight - 1);
     } else if (idle_network_state_ ==
                DisplayNetworkState::kServiceConnecting) {
       s_lcd.setFont(u8g2_font_helvB12_tf);
-      s_lcd.drawStr(356, 21, "!");
+      s_lcd.drawStr(137, 23, "!");
     }
   }
 
-  // 有新版本或已有固件待安装时，在 Wi-Fi 左侧显示“向下箭头进入托盘”。
+  // 有新版本或已有固件待安装时，在左侧状态区显示“向下箭头进入托盘”。
   // 图标完全由矢量线绘制，不占额外位图空间。
   if (update_available_) {
-    // 人物图标出现时给它让位，保持右侧状态图标紧凑且不重叠。
-    const uint16_t icon_x = idle_presence_ ? 333 : 342;
-    constexpr uint16_t icon_y = 5;
+    // 人物图标出现时给它让位，保持左侧状态图标紧凑且不重叠。
+    const uint16_t icon_x = idle_presence_ ? 68 : 76;
+    constexpr uint16_t icon_y = kStatusIconTop;
     s_lcd.drawRFrame(icon_x, icon_y, 24, 18, 4);
     s_lcd.drawVLine(icon_x + 12, icon_y + 3, 7);
     s_lcd.drawLine(icon_x + 8, icon_y + 7, icon_x + 12, icon_y + 11);
@@ -624,7 +631,8 @@ void DisplayManager::renderIdleDashboard() {
 
   // 人在图标：仅显示小型线稿人物，不显示文字或距离。
   if (idle_presence_) {
-    s_lcd.drawXBMP(363, 4, kPresenceIconWidth, kPresenceIconHeight,
+    s_lcd.drawXBMP(kPresenceStatusX, kStatusIconTop, kPresenceIconWidth,
+                   kPresenceIconHeight,
                    kPresenceIcon);
   }
 

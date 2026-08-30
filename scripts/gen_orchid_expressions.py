@@ -7,8 +7,8 @@ import sys
 from PIL import Image, ImageChops, ImageEnhance, ImageOps
 
 
-WIDTH = 286
-HEIGHT = 230
+WIDTH = 230
+HEIGHT = 210
 THRESHOLD = 190
 
 EXPRESSIONS = (
