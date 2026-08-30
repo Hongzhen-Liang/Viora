@@ -628,6 +628,17 @@ static void ota_screen_loop() {
 static void set_state(ConvState state) {
   s_state = state;
   s_state_since_ms = millis();
+  if (state == ST_IDLE) {
+    g_display.setVisualState(DisplayVisualState::kIdle);
+  } else if (state == ST_WAKE_ACK) {
+    g_display.setVisualState(DisplayVisualState::kSensing);
+  } else if (state == ST_LISTENING) {
+    g_display.setVisualState(DisplayVisualState::kListening);
+  } else if (state == ST_PROCESSING) {
+    g_display.setVisualState(DisplayVisualState::kThinking);
+  } else {
+    g_display.setVisualState(DisplayVisualState::kSpeaking);
+  }
   if (state == ST_IDLE && s_ota_screen_mode == OtaScreenMode::kNone &&
       !s_settings_menu_active && !s_manual_provisioning &&
       s_transient_screen_deadline_ms == 0) {

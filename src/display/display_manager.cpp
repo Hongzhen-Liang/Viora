@@ -6,7 +6,7 @@
 #include <qrcode.h>
 
 #include "config.h"
-#include "display/orchid_bitmap.h"
+#include "display/orchid_expressions.h"
 #include "hardware/hardware_config.h"
 
 namespace {
@@ -20,6 +20,11 @@ constexpr uint32_t kSubtitlePageMinMs = 4800;
 constexpr uint32_t kSubtitlePageMaxMs = 12000;
 constexpr uint32_t kIdleRefreshMs = 60000;
 constexpr uint32_t kUnsyncedClockRefreshMs = 10000;
+constexpr uint32_t kIdleExpressionFrameMs = 2400;
+constexpr uint32_t kSensingExpressionFrameMs = 650;
+constexpr uint32_t kListeningExpressionFrameMs = 1800;
+constexpr uint32_t kThinkingExpressionFrameMs = 900;
+constexpr uint32_t kSpeakingExpressionFrameMs = 1500;
 constexpr uint32_t kBindingQrDurationMs = 120000;
 constexpr uint8_t kBindingQrScale = 3;
 
@@ -118,6 +123,12 @@ bool DisplayManager::begin() {
   return true;
 }
 
+void DisplayManager::setVisualState(DisplayVisualState state) {
+  if (visual_state_ == state) return;
+  visual_state_ = state;
+  last_expression_render_ms_ = millis();
+}
+
 void DisplayManager::showIdleDashboard(float temperature, float humidity,
                                        float soil,
                                        DisplayNetworkState network_state) {
@@ -181,6 +192,7 @@ void DisplayManager::showBindingQr(const char *url, const char *pairing_code) {
   idle_mode_ = false;
   timed_mode_ = false;
   timed_cue_count_ = 0;
+  animated_screen_ = false;
   binding_qr_active_ = true;
   binding_qr_deadline_ms_ = millis() + kBindingQrDurationMs;
   strlcpy(s_binding_qr_pairing_code, pairing_code ? pairing_code : "",
@@ -229,6 +241,7 @@ void DisplayManager::showSettingsMenu(uint8_t selected, bool update_available,
   idle_mode_ = false;
   timed_mode_ = false;
   timed_cue_count_ = 0;
+  animated_screen_ = false;
 
   const char *items[] = {"绑定设备", "连接网络", "系统更新"};
   s_lcd.clearBuffer();
@@ -304,6 +317,7 @@ void DisplayManager::setSubtitle(const char *text) {
   idle_mode_ = false;
   timed_mode_ = false;
   timed_cue_count_ = 0;
+  animated_screen_ = true;
   wrapSubtitle(text);
   page_ = 0;
   page_count_ = line_count_ == 0
@@ -318,6 +332,7 @@ void DisplayManager::beginTimedSubtitles(const char *text) {
   idle_mode_ = false;
   timed_mode_ = true;
   timed_cue_count_ = 0;
+  animated_screen_ = true;
   wrapSubtitle(text);
   page_ = 0;
   page_count_ = line_count_ == 0
@@ -382,6 +397,21 @@ void DisplayManager::loop(bool speaking, uint32_t playback_position_bytes) {
     }
     return;
   }
+
+  // The new artwork is a small, low-cost animation system. Re-render only
+  // when the current expression changes so the LCD and the audio loop stay
+  // independent.
+  if (animated_screen_) {
+    const uint32_t now = millis();
+    if (now - last_expression_render_ms_ >= expressionFrameMs()) {
+      last_expression_render_ms_ = now;
+      if (idle_mode_) {
+        renderIdleDashboard();
+      } else {
+        renderPage();
+      }
+    }
+  }
   if (!speaking) return;
 
   if (timed_mode_) {
@@ -419,11 +449,34 @@ void DisplayManager::renderBindingQrExpired() {
 }
 
 void DisplayManager::renderPage() {
+  animated_screen_ = true;
   s_lcd.clearBuffer();
 
-  const uint16_t image_x = (kScreenWidth - ORCHID_BITMAP_WIDTH) / 2;
-  s_lcd.drawXBMP(image_x, 0, ORCHID_BITMAP_WIDTH, ORCHID_BITMAP_HEIGHT,
-                 ORCHID_BITMAP);
+  const uint16_t image_x =
+      (kScreenWidth - ORCHID_EXPRESSION_WIDTH) / 2;
+  s_lcd.drawXBMP(image_x, 0, ORCHID_EXPRESSION_WIDTH,
+                 ORCHID_EXPRESSION_HEIGHT, expressionBitmap());
+
+  // A quiet frame and tiny status label make the illustration feel like a
+  // designed product surface instead of a debug screen.
+  s_lcd.drawRFrame(10, 8, 380, 216, 12);
+  s_lcd.setFont(u8g2_font_helvB12_tf);
+  s_lcd.drawStr(20, 26, "VIORA");
+  s_lcd.setFont(u8g2_font_6x10_tf);
+  const char *state_label = "READY";
+  if (visual_state_ == DisplayVisualState::kSensing) {
+    state_label = "SENSING";
+  } else if (visual_state_ == DisplayVisualState::kListening) {
+    state_label = "LISTENING";
+  } else if (visual_state_ == DisplayVisualState::kThinking) {
+    state_label = "THINKING";
+  } else if (visual_state_ == DisplayVisualState::kSpeaking) {
+    state_label = "SPEAKING";
+  }
+  const uint16_t state_width = s_lcd.getStrWidth(state_label);
+  s_lcd.drawStr(380 - state_width, 26, state_label);
+  s_lcd.drawHLine(20, 34, 34);
+  s_lcd.drawHLine(346, 34, 34);
 
   // 一条带中央菱形的细分隔线，比标题、边框和页码更克制，也与
   // 上方植物线稿的气质一致。
@@ -450,17 +503,73 @@ void DisplayManager::renderPage() {
   s_lcd.sendBuffer();
 }
 
+uint32_t DisplayManager::expressionFrameMs() const {
+  switch (visual_state_) {
+    case DisplayVisualState::kSensing:
+      return kSensingExpressionFrameMs;
+    case DisplayVisualState::kListening:
+      return kListeningExpressionFrameMs;
+    case DisplayVisualState::kThinking:
+      return kThinkingExpressionFrameMs;
+    case DisplayVisualState::kSpeaking:
+      return kSpeakingExpressionFrameMs;
+    case DisplayVisualState::kIdle:
+    default:
+      return kIdleExpressionFrameMs;
+  }
+}
+
+const uint8_t *DisplayManager::expressionBitmap() const {
+  const uint8_t frame = static_cast<uint8_t>(
+      (millis() / expressionFrameMs()) % 3U);
+  switch (visual_state_) {
+    case DisplayVisualState::kSensing:
+      if (frame == 0) return ORCHID_SENSE_01;
+      if (frame == 1) return ORCHID_SENSE_02;
+      return ORCHID_SENSE_HOLD;
+    case DisplayVisualState::kListening:
+      return frame == 1 ? ORCHID_LISTEN_BLINK : ORCHID_LISTEN_NORMAL;
+    case DisplayVisualState::kThinking:
+      return frame == 1 ? ORCHID_THINK_02 : ORCHID_THINK_01;
+    case DisplayVisualState::kSpeaking:
+      return frame == 2 ? ORCHID_SPEAK_PLEASED : ORCHID_SPEAK_NEUTRAL;
+    case DisplayVisualState::kIdle:
+    default: {
+      const time_t now = time(nullptr);
+      if (now >= 1577836800) {
+        const time_t china_time = now + DEVICE_UTC_OFFSET_SECONDS;
+        struct tm china_tm;
+        gmtime_r(&china_time, &china_tm);
+        if (china_tm.tm_hour >= 23 || china_tm.tm_hour < 6) {
+          return ORCHID_SLEEP;
+        }
+      }
+      if (frame == 1) return ORCHID_IDLE_BLINK;
+      if (frame == 2) return ORCHID_IDLE_LOOK;
+      return ORCHID_IDLE_NORMAL;
+    }
+  }
+}
+
 void DisplayManager::renderIdleDashboard() {
+  animated_screen_ = true;
   s_lcd.clearBuffer();
 
-  const uint16_t image_x = (kScreenWidth - ORCHID_BITMAP_WIDTH) / 2;
-  s_lcd.drawXBMP(image_x, 0, ORCHID_BITMAP_WIDTH, ORCHID_BITMAP_HEIGHT,
-                 ORCHID_BITMAP);
+  const uint16_t image_x =
+      (kScreenWidth - ORCHID_EXPRESSION_WIDTH) / 2;
+  s_lcd.drawXBMP(image_x, 0, ORCHID_EXPRESSION_WIDTH,
+                 ORCHID_EXPRESSION_HEIGHT, expressionBitmap());
+
+  s_lcd.drawRFrame(10, 8, 380, 216, 12);
+  s_lcd.setFont(u8g2_font_helvB12_tf);
+  s_lcd.drawStr(20, 26, "VIORA");
+  s_lcd.setFont(u8g2_font_6x10_tf);
+  s_lcd.drawStr(20, 40, "ORCHID");
 
   // 时间占用植物线稿左侧的留白，不挤压角色主体。NTP 尚未校准时
   // 明确显示占位符，避免把 1970 年的系统初始值误当成真实时间。
   char time_text[6] = "--:--";
-  char date_text[24] = "";
+  char date_text[8] = "";
   const time_t now = time(nullptr);
   if (now >= 1577836800) {  // 2020-01-01，早于此值视为尚未校时
     // 系统 epoch 始终按 UTC 保存；显示时显式加 8 小时，再用 gmtime_r
@@ -469,21 +578,14 @@ void DisplayManager::renderIdleDashboard() {
     struct tm china_tm;
     gmtime_r(&china_time, &china_tm);
     strftime(time_text, sizeof(time_text), "%H:%M", &china_tm);
-    // 使用“周四 8/27”这种紧凑中文格式。它与英文短日期宽度接近，
-    // 并可复用界面已有的中文字库，避免为小字号字库额外占用 Flash。
-    static const char *const kWeekdays[] = {
-        "周日", "周一", "周二", "周三", "周四", "周五", "周六"};
-    snprintf(date_text, sizeof(date_text), "%s %d/%d",
-             kWeekdays[china_tm.tm_wday], china_tm.tm_mon + 1,
+    // Numeric date keeps this tiny side label crisp on the reflective LCD.
+    snprintf(date_text, sizeof(date_text), "%02d/%02d", china_tm.tm_mon + 1,
              china_tm.tm_mday);
   }
   s_lcd.setFont(u8g2_font_helvB12_tf);
-  s_lcd.drawStr(5, 20, time_text);
-  if (date_text[0] != '\0') {
-    const uint16_t date_x = 5 + s_lcd.getStrWidth(time_text) + 9;
-    s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
-    s_lcd.drawUTF8(date_x, 19, date_text);
-  }
+  s_lcd.drawStr(20, 78, time_text);
+  s_lcd.setFont(u8g2_font_6x10_tf);
+  s_lcd.drawStr(20, 91, date_text[0] != '\0' ? date_text : "--/--");
 
   // 右上角显示“整机是否可用”，而不只是 Wi-Fi 关联状态。
   // 正常时为克制的 Wi-Fi 图标；服务端未连时加 !；离线时加斜线；
@@ -528,7 +630,7 @@ void DisplayManager::renderIdleDashboard() {
 
   rendered_presence_ = idle_presence_;
 
-  s_lcd.drawHLine(24, kSubtitleTop, 352);
+  s_lcd.drawHLine(20, kSubtitleTop, 360);
 
   char soil_value[12] = "--";
   const char *soil_state = "传感器未连接";
@@ -552,16 +654,25 @@ void DisplayManager::renderIdleDashboard() {
     snprintf(humidity, sizeof(humidity), "%.0f%%", idle_humidity_);
   }
 
+  // Three compact metric columns keep the useful plant data visible while
+  // leaving the artwork and status chrome clean.
+  s_lcd.drawVLine(132, 241, 43);
+  s_lcd.drawVLine(264, 241, 43);
+  s_lcd.setFont(u8g2_font_6x10_tf);
+  s_lcd.drawStr(22, 251, "AIR HUMIDITY");
+  s_lcd.drawStr(154, 251, "SOIL MOISTURE");
+  s_lcd.drawStr(286, 251, "TEMPERATURE");
+  s_lcd.setFont(u8g2_font_helvB12_tf);
+  s_lcd.drawStr(22, 273, humidity);
+  s_lcd.drawStr(154, 273, soil_value);
+  s_lcd.drawStr(286, 273, temperature);
+  String status_line = String(soil_state) + "  ·  " +
+                       (idle_presence_ ? "有人在附近" : "安静待机");
   s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
-  String soil_line = String("土壤湿度 ") + soil_value + "  " + soil_state;
-  uint16_t width = s_lcd.getUTF8Width(soil_line.c_str());
-  s_lcd.drawUTF8(width < kScreenWidth ? (kScreenWidth - width) / 2 : 0, 257,
-                 soil_line.c_str());
-
-  String environment_line =
-      String("温度 ") + temperature + "  空气湿度 " + humidity;
-  width = s_lcd.getUTF8Width(environment_line.c_str());
-  s_lcd.drawUTF8(width < kScreenWidth ? (kScreenWidth - width) / 2 : 0, 286,
-                 environment_line.c_str());
+  const uint16_t status_width = s_lcd.getUTF8Width(status_line.c_str());
+  s_lcd.drawUTF8(status_width < kScreenWidth
+                     ? (kScreenWidth - status_width) / 2
+                     : 0,
+                 297, status_line.c_str());
   s_lcd.sendBuffer();
 }

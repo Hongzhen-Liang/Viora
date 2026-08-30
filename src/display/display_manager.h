@@ -9,9 +9,20 @@ enum class DisplayNetworkState : uint8_t {
   kOnline,
 };
 
+// The expression set is intentionally separate from the conversation state so
+// each interaction phase can select the right illustration frame.
+enum class DisplayVisualState : uint8_t {
+  kIdle,
+  kSensing,
+  kListening,
+  kThinking,
+  kSpeaking,
+};
+
 class DisplayManager {
  public:
   bool begin();
+  void setVisualState(DisplayVisualState state);
   void showIdleDashboard(float temperature, float humidity, float soil,
                          DisplayNetworkState network_state);
   void setPresence(bool present);
@@ -37,6 +48,8 @@ class DisplayManager {
   void renderIdleDashboard();
   void renderBindingQrExpired();
   uint32_t currentPageDurationMs() const;
+  const uint8_t *expressionBitmap() const;
+  uint32_t expressionFrameMs() const;
 
   struct TimedCue {
     String text;
@@ -55,6 +68,9 @@ class DisplayManager {
   bool idle_clock_ready_ = false;
   DisplayNetworkState idle_network_state_ = DisplayNetworkState::kOffline;
   uint32_t last_idle_render_ms_ = 0;
+  uint32_t last_expression_render_ms_ = 0;
+  DisplayVisualState visual_state_ = DisplayVisualState::kIdle;
+  bool animated_screen_ = false;
   String lines_[kMaxLines];
   uint8_t line_count_ = 0;
   uint8_t page_ = 0;
