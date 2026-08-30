@@ -21,6 +21,7 @@
 #include "net.h"
 #include "ota_manager.h"
 #include "presence/presence_manager.h"
+#include "provisioning.h"
 #include "sensor/sensor_manager.h"
 #include "secure_telemetry.h"
 #include "speech.h"
@@ -71,6 +72,7 @@ static uint32_t s_wake_ack_start_ms = 0;      // 唤醒决定窗开始时刻
 static bool s_ack_playing = false;            // 决定窗已过，确认音播放中
 static bool s_ack_voice_captured = false;      // 确认音期间已捕获近端用户人声
 static bool s_proactive_pending = false;       // 服务端主动呼叫请求/播放进行中
+static bool s_farewell_pending = false;        // 按键告别请求/播放进行中
 static bool s_proactive_return_eligible = false;  // 已确认一次真实“久别返回”
 static bool s_presence_departure_observed = false;
 static uint32_t s_proactive_return_since_ms = 0;  // 返回候选只在短窗口内有效
@@ -200,6 +202,7 @@ static DisplayNetworkState display_network_state() {
 
 enum class OtaScreenMode : uint8_t {
   kNone,
+  kChecking,
   kDetails,
   kDownloading,
   kReadyToInstall,
@@ -209,17 +212,56 @@ enum class OtaScreenMode : uint8_t {
 
 static OtaScreenMode s_ota_screen_mode = OtaScreenMode::kNone;
 static uint32_t s_ota_screen_deadline_ms = 0;
-static bool s_key_raw_pressed = false;
-static bool s_key_stable_pressed = false;
-static uint32_t s_key_changed_ms = 0;
+static bool s_manual_ota_check = false;
+static bool s_settings_menu_active = false;
+static uint8_t s_settings_menu_item = 0;
+static uint32_t s_settings_menu_deadline_ms = 0;
+static bool s_manual_provisioning = false;
+static uint32_t s_transient_screen_deadline_ms = 0;
+
+struct ButtonState {
+  ButtonState(uint8_t gpio, uint8_t level) : pin(gpio), active_level(level) {}
+
+  uint8_t pin;
+  uint8_t active_level;
+  bool raw_pressed = false;
+  bool stable_pressed = false;
+  bool pressed_event = false;
+  bool released_event = false;
+  bool consumed = false;
+  uint32_t changed_ms = 0;
+  uint32_t pressed_ms = 0;
+};
+
+static ButtonState s_key{USER_KEY_PIN, USER_KEY_ACTIVE_LEVEL};
+static ButtonState s_boot{BOOT_KEY_PIN, BOOT_KEY_ACTIVE_LEVEL};
+static constexpr uint32_t kButtonDebounceMs = 35;
+static constexpr uint32_t kBootProvisionHoldMs = 3000;
+static constexpr uint32_t kMenuTimeoutMs = 15000;
+static constexpr uint32_t kMenuExitHoldMs = 1500;
 
 static void end_active_session(const char *reason);
+static void set_state(ConvState state);
+static void enter_listening(ListenOrigin origin, bool force_preroll = false,
+                            bool tx_already_flushed = false);
+
+static void show_idle_dashboard() {
+  const SensorData &data = g_sensor.data();
+  g_display.showIdleDashboard(data.temperature, data.humidity, data.soil,
+                              display_network_state());
+}
+
+static void show_temporary_message(const char *message,
+                                   uint32_t duration_ms = 5000) {
+  s_transient_screen_deadline_ms = millis() + duration_ms;
+  g_display.setSubtitle(message);
+}
 
 static void show_ota_details() {
   char line1[80];
   snprintf(line1, sizeof(line1), "当前 %s  新版 %s", FIRMWARE_VERSION,
            ota_available_version());
-  g_display.showOtaScreen(line1, "再按 KEY 下载更新");
+  g_display.showOtaScreen(line1, "KEY 下载 · BOOT 返回");
   s_ota_screen_mode = OtaScreenMode::kDetails;
   s_ota_screen_deadline_ms = millis() + 20000UL;
 }
@@ -231,6 +273,8 @@ static void on_ota_ui_event(OtaUiEvent event, const char *version,
   switch (event) {
     case OtaUiEvent::kAvailable:
       g_display.setUpdateAvailable(true);
+      if (s_manual_ota_check) show_ota_details();
+      s_manual_ota_check = false;
       break;
     case OtaUiEvent::kDownloading:
       s_ota_screen_mode = OtaScreenMode::kDownloading;
@@ -250,7 +294,7 @@ static void on_ota_ui_event(OtaUiEvent event, const char *version,
       s_ota_screen_mode = OtaScreenMode::kReadyToInstall;
       s_ota_screen_deadline_ms = 0;
       snprintf(line1, sizeof(line1), "版本 %s 已下载校验", version);
-      g_display.showOtaScreen(line1, "按 KEY 安装并重启");
+      g_display.showOtaScreen(line1, "KEY 安装 · BOOT 返回");
       break;
     case OtaUiEvent::kInstalling:
       s_ota_screen_mode = OtaScreenMode::kInstalling;
@@ -260,8 +304,15 @@ static void on_ota_ui_event(OtaUiEvent event, const char *version,
       break;
     case OtaUiEvent::kUpToDate:
       if (!ota_ready_to_install()) g_display.setUpdateAvailable(false);
+      if (s_manual_ota_check) {
+        s_ota_screen_mode = OtaScreenMode::kNone;
+        s_ota_screen_deadline_ms = 0;
+        show_temporary_message("已是最新版本");
+      }
+      s_manual_ota_check = false;
       break;
     case OtaUiEvent::kError:
+      s_manual_ota_check = false;
       s_ota_screen_mode = OtaScreenMode::kError;
       s_ota_screen_deadline_ms = millis() + 12000UL;
       g_display.showOtaScreen("更新操作失败", ota_last_error());
@@ -269,73 +320,296 @@ static void on_ota_ui_event(OtaUiEvent event, const char *version,
   }
 }
 
-static void user_key_init() {
-  pinMode(USER_KEY_PIN, INPUT_PULLUP);
-  const bool pressed = digitalRead(USER_KEY_PIN) == USER_KEY_ACTIVE_LEVEL;
-  s_key_raw_pressed = pressed;
-  s_key_stable_pressed = pressed;
-  s_key_changed_ms = millis();
-  Serial.printf("[KEY] 用户按键 GPIO%d 就绪（低电平按下）\n", USER_KEY_PIN);
+static void button_init(ButtonState &button) {
+  pinMode(button.pin, INPUT_PULLUP);
+  button.raw_pressed = digitalRead(button.pin) == button.active_level;
+  button.stable_pressed = button.raw_pressed;
+  button.changed_ms = millis();
+  button.pressed_ms = button.raw_pressed ? millis() : 0;
 }
 
-static bool user_key_pressed_event() {
-  const bool pressed = digitalRead(USER_KEY_PIN) == USER_KEY_ACTIVE_LEVEL;
+static void buttons_init() {
+  button_init(s_key);
+  button_init(s_boot);
+  Serial.printf("[KEY] KEY GPIO%d、BOOT GPIO%d 就绪（低电平按下）\n",
+                USER_KEY_PIN, BOOT_KEY_PIN);
+}
+
+static void button_poll(ButtonState &button) {
+  button.pressed_event = false;
+  button.released_event = false;
+  const bool pressed = digitalRead(button.pin) == button.active_level;
   const uint32_t now = millis();
-  if (pressed != s_key_raw_pressed) {
-    s_key_raw_pressed = pressed;
-    s_key_changed_ms = now;
+  if (pressed != button.raw_pressed) {
+    button.raw_pressed = pressed;
+    button.changed_ms = now;
   }
-  if (pressed != s_key_stable_pressed && now - s_key_changed_ms >= 35) {
-    s_key_stable_pressed = pressed;
-    return pressed;
+  if (pressed != button.stable_pressed &&
+      now - button.changed_ms >= kButtonDebounceMs) {
+    button.stable_pressed = pressed;
+    if (pressed) {
+      button.pressed_event = true;
+      button.pressed_ms = now;
+    } else {
+      button.released_event = true;
+    }
   }
-  return false;
 }
 
-static void handle_user_key() {
-  if (!user_key_pressed_event()) return;
+static void close_settings_menu() {
+  s_settings_menu_active = false;
+  s_settings_menu_deadline_ms = 0;
+  show_idle_dashboard();
+}
 
-  // 对话中的 KEY 始终具有最高优先级：停止本地播放和录音上行，通知
-  // 服务端取消当前任务并清除会话上下文，然后直接回到待唤醒。
-  if (s_state != ST_IDLE || s_rearm_pending || s_proactive_pending) {
-    Serial.printf("[KEY] 用户取消对话（当前状态=%s）\n",
-                  state_name(s_state));
-    end_active_session("user_key");
+static void open_settings_menu() {
+  s_settings_menu_active = true;
+  s_settings_menu_item = 0;
+  s_settings_menu_deadline_ms = millis() + kMenuTimeoutMs;
+  g_display.showSettingsMenu(s_settings_menu_item, ota_update_available(),
+                             net_connected());
+  Serial.println("[KEY] 已打开设备设置");
+}
+
+static void start_manual_provisioning() {
+  s_settings_menu_active = false;
+  s_settings_menu_deadline_ms = 0;
+  s_manual_provisioning = true;
+  prov_begin(true);
+  g_display.setSubtitle("连接热点 Viora-Setup\n打开 192.168.4.1");
+  Serial.println("[KEY] 已进入手动配网，BOOT 可退出");
+}
+
+static void select_settings_item() {
+  s_settings_menu_active = false;
+  s_settings_menu_deadline_ms = 0;
+  if (s_settings_menu_item == 0) {
+    if (!net_connected()) {
+      show_temporary_message("设备尚未联网\n请先选择连接网络");
+      return;
+    }
+    char binding_url[512] = {};
+    if (secure_telemetry_build_binding_url(binding_url, sizeof(binding_url))) {
+      Serial.println("[PAIR] 设置菜单呼出绑定二维码");
+      g_display.showBindingQr(binding_url, secure_telemetry_pairing_code());
+    } else {
+      show_temporary_message("绑定网址尚未配置");
+    }
+    return;
+  }
+  if (s_settings_menu_item == 1) {
+    start_manual_provisioning();
+    return;
+  }
+  if (ota_ready_to_install()) {
+    s_ota_screen_mode = OtaScreenMode::kReadyToInstall;
+    g_display.showOtaScreen("更新已下载并校验", "KEY 安装 · BOOT 返回");
+  } else if (ota_update_available()) {
+    show_ota_details();
+  } else if (!net_wifi_connected()) {
+    show_temporary_message("网络未连接，无法检查更新");
+  } else {
+    s_manual_ota_check = true;
+    s_ota_screen_mode = OtaScreenMode::kChecking;
+    s_ota_screen_deadline_ms = millis() + 30000UL;
+    g_display.showOtaScreen("正在检查更新…", "请稍候");
+    ota_request_check();
+  }
+}
+
+static bool conversation_active() {
+  return s_state != ST_IDLE || s_rearm_pending || s_proactive_pending;
+}
+
+static void request_button_farewell(const char *button) {
+  // 当前 PCM/TTS 立即在本地静音，但不直接回待机；服务端会先取消旧流水线，
+  // 随后下发带 op=exit 的短告别语，播完才真正结束会话。
+  net_audio_flush();
+  char frame[128];
+  snprintf(frame, sizeof(frame),
+           "{\"type\":\"farewell\",\"reason\":\"%s\"}", button);
+  net_send_json(frame);
+  g_audio.playDiscard();
+  g_audio.ringClear();
+  speech_async_reset();
+  wake_word.reset();
+  s_rearm_pending = false;
+  s_followup_keep_preroll = false;
+  s_ack_playing = false;
+  s_ack_voice_captured = false;
+  s_proactive_pending = false;
+  s_farewell_pending = true;
+  s_exit_pending = false;
+  s_accept_tts_audio = false;
+  s_tts_end_received = false;
+  s_tts_end_pending_bytes = 0;
+  s_pending_reply = "";
+  reset_barge_evidence();
+  set_state(ST_PROCESSING);
+  g_display.setSubtitle("那就先聊到这里…");
+  Serial.printf("[KEY] %s 请求自然结束会话\n", button);
+}
+
+static void start_button_topic() {
+  if (!net_connected()) {
+    show_temporary_message("服务暂未连接\n请稍后再试");
+    return;
+  }
+  const PresenceData &presence = g_presence.data();
+  char frame[192];
+  snprintf(frame, sizeof(frame),
+           "{\"type\":\"proactive_call\",\"reason\":\"button_topic\","
+           "\"distance_cm\":%u}", presence.distance_cm);
+  s_proactive_pending = true;
+  set_state(ST_PROCESSING);
+  g_display.setSubtitle("让我想想聊点什么…");
+  net_send_json(frame);
+  Serial.println("[KEY] 邀请 Viora 主动发起话题");
+}
+
+static void handle_buttons() {
+  button_poll(s_key);
+  button_poll(s_boot);
+
+  if (s_key.released_event) s_key.consumed = false;
+  if (s_boot.released_event && s_boot.consumed) {
+    s_boot.consumed = false;
+    s_boot.released_event = false;
+  }
+
+  // 对话中任一软件按键都立即取消，不需要等到松手。
+  if (conversation_active() && (s_key.pressed_event || s_boot.pressed_event)) {
+    const char *source = s_key.pressed_event ? "key" : "boot";
+    if (s_key.pressed_event) s_key.consumed = true;
+    if (s_boot.pressed_event) s_boot.consumed = true;
+    if (s_farewell_pending) {
+      Serial.println("[KEY] 再次按键，立即停止告别并待机");
+      end_active_session("farewell_cancel");
+    } else {
+      request_button_farewell(source);
+    }
     return;
   }
 
   if (ota_busy()) {
-    Serial.println("[KEY] OTA 正在进行，按键暂不可用");
-    return;
-  }
-  if (ota_ready_to_install()) {
-    Serial.println("[KEY] 用户确认安装 OTA");
-    ota_request_install();
-    return;
-  }
-  if (g_display.bindingQrActive()) {
-    g_display.hideBindingQr();
-    return;
-  }
-  if (!ota_update_available()) {
-    char binding_url[512] = {};
-    if (secure_telemetry_build_binding_url(binding_url, sizeof(binding_url))) {
-      Serial.println("[PAIR] 用户按键呼出绑定二维码");
-      g_display.showBindingQr(binding_url, secure_telemetry_pairing_code());
-    } else {
-      Serial.println("[PAIR] 未配置 SECRET_BINDING_WEB_URL，无法显示二维码");
-      g_display.setSubtitle("请在 secrets.h 配置绑定网址");
+    if (s_key.pressed_event || s_boot.pressed_event) {
+      Serial.println("[KEY] OTA 正在进行，软件按键已锁定");
+      if (s_key.pressed_event) s_key.consumed = true;
+      if (s_boot.pressed_event) s_boot.consumed = true;
     }
     return;
   }
-  if (s_ota_screen_mode == OtaScreenMode::kDetails) {
-    Serial.println("[KEY] 用户确认下载 OTA");
-    s_ota_screen_mode = OtaScreenMode::kDownloading;
+
+  if (g_display.bindingQrActive()) {
+    if (s_key.pressed_event || s_boot.pressed_event) {
+      if (s_key.pressed_event) s_key.consumed = true;
+      if (s_boot.pressed_event) s_boot.consumed = true;
+      g_display.hideBindingQr();
+    }
+    return;
+  }
+
+  if (s_manual_provisioning) {
+    if (s_boot.pressed_event) {
+      s_boot.consumed = true;
+      s_manual_provisioning = false;
+      prov_end();
+      net_wifi_retry_now();
+      show_idle_dashboard();
+      Serial.println("[KEY] 用户退出手动配网");
+    } else if (s_key.pressed_event) {
+      s_key.consumed = true;
+    }
+    return;
+  }
+
+  if (s_ota_screen_mode == OtaScreenMode::kDetails ||
+      s_ota_screen_mode == OtaScreenMode::kReadyToInstall) {
+    if (s_boot.pressed_event) {
+      s_boot.consumed = true;
+      s_ota_screen_mode = OtaScreenMode::kNone;
+      s_ota_screen_deadline_ms = 0;
+      show_idle_dashboard();
+    } else if (s_key.pressed_event) {
+      s_key.consumed = true;
+      if (s_ota_screen_mode == OtaScreenMode::kDetails) {
+        Serial.println("[KEY] 用户确认下载 OTA");
+        ota_request_download();
+      } else {
+        Serial.println("[KEY] 用户确认安装 OTA");
+        ota_request_install();
+      }
+    }
+    return;
+  }
+
+  if (s_ota_screen_mode == OtaScreenMode::kError &&
+      (s_key.pressed_event || s_boot.pressed_event)) {
+    if (s_key.pressed_event) s_key.consumed = true;
+    if (s_boot.pressed_event) s_boot.consumed = true;
+    s_ota_screen_mode = OtaScreenMode::kNone;
     s_ota_screen_deadline_ms = 0;
-    ota_request_download();
-  } else {
-    Serial.println("[KEY] 显示 OTA 版本详情");
-    show_ota_details();
+    show_idle_dashboard();
+    return;
+  }
+
+  if (s_settings_menu_active) {
+    if (s_key.pressed_event) {
+      s_key.consumed = true;
+      select_settings_item();
+      return;
+    }
+    const uint32_t held = s_boot.stable_pressed
+                              ? millis() - s_boot.pressed_ms
+                              : 0;
+    if (s_boot.stable_pressed && !s_boot.consumed &&
+        held >= kMenuExitHoldMs) {
+      s_boot.consumed = true;
+      close_settings_menu();
+      return;
+    }
+    if (s_boot.released_event && !s_boot.consumed) {
+      s_settings_menu_item = (s_settings_menu_item + 1) % 3;
+      s_settings_menu_deadline_ms = millis() + kMenuTimeoutMs;
+      g_display.showSettingsMenu(s_settings_menu_item, ota_update_available(),
+                                 net_connected());
+    }
+    return;
+  }
+
+  // 待机时 KEY 邀请 Viora 先开口；开场播完后自动进入聆听。
+  if (s_key.pressed_event) {
+    s_key.consumed = true;
+    start_button_topic();
+    return;
+  }
+
+  const uint32_t boot_held = s_boot.stable_pressed
+                                 ? millis() - s_boot.pressed_ms
+                                 : 0;
+  if (s_boot.stable_pressed && !s_boot.consumed &&
+      boot_held >= kBootProvisionHoldMs) {
+    s_boot.consumed = true;
+    start_manual_provisioning();
+  } else if (s_boot.released_event && !s_boot.consumed) {
+    open_settings_menu();
+  }
+}
+
+static void auxiliary_ui_loop() {
+  const uint32_t now = millis();
+  if (s_settings_menu_active &&
+      static_cast<int32_t>(now - s_settings_menu_deadline_ms) >= 0) {
+    close_settings_menu();
+  }
+  if (s_manual_provisioning && !prov_active()) {
+    s_manual_provisioning = false;
+    show_temporary_message("网络已连接");
+  }
+  if (s_transient_screen_deadline_ms != 0 &&
+      static_cast<int32_t>(now - s_transient_screen_deadline_ms) >= 0) {
+    s_transient_screen_deadline_ms = 0;
+    if (s_state == ST_IDLE) show_idle_dashboard();
   }
 }
 
@@ -347,20 +621,17 @@ static void ota_screen_loop() {
   }
   s_ota_screen_mode = OtaScreenMode::kNone;
   s_ota_screen_deadline_ms = 0;
-  if (s_state == ST_IDLE) {
-    const SensorData &data = g_sensor.data();
-    g_display.showIdleDashboard(data.temperature, data.humidity, data.soil,
-                                display_network_state());
-  }
+  s_manual_ota_check = false;
+  if (s_state == ST_IDLE) show_idle_dashboard();
 }
 
 static void set_state(ConvState state) {
   s_state = state;
   s_state_since_ms = millis();
-  if (state == ST_IDLE && s_ota_screen_mode == OtaScreenMode::kNone) {
-    const SensorData &data = g_sensor.data();
-    g_display.showIdleDashboard(data.temperature, data.humidity, data.soil,
-                                display_network_state());
+  if (state == ST_IDLE && s_ota_screen_mode == OtaScreenMode::kNone &&
+      !s_settings_menu_active && !s_manual_provisioning &&
+      s_transient_screen_deadline_ms == 0) {
+    show_idle_dashboard();
   }
 }
 
@@ -401,8 +672,8 @@ static void keep_latest_ring_audio(uint32_t keep_ms) {
 
 // 发 audio_start 并进入下一轮聆听。唤醒和打断会把缓存的前置音频先上传，
 // 从而保住紧跟唤醒词/打断发生前的首字；普通追问不携带扬声器尾音。
-static void enter_listening(ListenOrigin origin, bool force_preroll = false,
-                            bool tx_already_flushed = false) {
+static void enter_listening(ListenOrigin origin, bool force_preroll,
+                            bool tx_already_flushed) {
   if (!net_connected()) {
     set_state(ST_IDLE);
     g_audio.ringClear();
@@ -526,6 +797,7 @@ static void end_active_session(const char *reason) {
   s_ack_playing = false;
   s_ack_voice_captured = false;
   s_proactive_pending = false;
+  s_farewell_pending = false;
   set_state(ST_IDLE);
   s_exit_pending = false;
   s_accept_tts_audio = false;
@@ -640,6 +912,7 @@ static void on_net_disconnected() {
   s_tts_end_received = false;
   s_consec_errors = 0;
   s_proactive_pending = false;
+  s_farewell_pending = false;
   speech_async_reset();
   g_audio.ringClear();
   g_audio.playDiscard();
@@ -652,6 +925,13 @@ static void retry_listening_after_failure() {
   s_accept_tts_audio = false;
   s_tts_end_received = false;
   g_audio.playDiscard();
+  if (s_farewell_pending) {
+    s_farewell_pending = false;
+    s_rearm_pending = false;
+    set_state(ST_IDLE);
+    Serial.println("[KEY] 告别生成失败，直接回到待机");
+    return;
+  }
   if (s_proactive_pending) {
     s_proactive_pending = false;
     s_rearm_pending = false;
@@ -870,7 +1150,7 @@ void setup() {
   const bool audio_ok = g_audio.begin();
   // 4.2 英寸 ST7305 反射屏：蝴蝶兰角色 + 动态中文字幕。
   g_display.begin();
-  user_key_init();
+  buttons_init();
   ota_set_ui_callback(on_ota_ui_event);
   const SensorData &initial_data = g_sensor.data();
   g_display.showIdleDashboard(initial_data.temperature, initial_data.humidity,
@@ -1029,6 +1309,7 @@ static void handle_presence_logic() {
       now - s_proactive_near_since_ms >= PROACTIVE_PRESENCE_DWELL_MS &&
       s_state == ST_IDLE && !s_rearm_pending && !s_exit_pending &&
       !s_proactive_pending && net_connected() && !ota_busy() &&
+      !s_settings_menu_active && !s_manual_provisioning &&
       !proactive_quiet_hours()) {
     char frame[192];
     snprintf(frame, sizeof(frame),
@@ -1053,8 +1334,10 @@ static void handle_presence_logic() {
 void loop() {
   net_loop();
   handle_presence_logic();
-  ota_loop(s_state == ST_IDLE && !s_rearm_pending && !s_exit_pending);
-  handle_user_key();
+  ota_loop(s_state == ST_IDLE && !s_rearm_pending && !s_exit_pending &&
+           !s_settings_menu_active && !s_manual_provisioning);
+  handle_buttons();
+  auxiliary_ui_loop();
   ota_screen_loop();
 
   // 周期读取传感器（SHTC3 / BH1750 / 土壤湿度）并打印 + 上报服务端
@@ -1067,7 +1350,9 @@ void loop() {
     send_sensor_telemetry();
   }
 
-  if (s_state == ST_IDLE && s_ota_screen_mode == OtaScreenMode::kNone) {
+  if (s_state == ST_IDLE && s_ota_screen_mode == OtaScreenMode::kNone &&
+      !s_settings_menu_active && !s_manual_provisioning &&
+      s_transient_screen_deadline_ms == 0) {
     const SensorData &data = g_sensor.data();
     g_display.showIdleDashboard(data.temperature, data.humidity, data.soil,
                                 display_network_state());
@@ -1397,6 +1682,7 @@ void loop() {
     if (s_exit_pending || (s_proactive_pending && !g_presence.present())) {
       s_exit_pending = false;
       s_proactive_pending = false;
+      s_farewell_pending = false;
       set_state(ST_IDLE);
       Serial.println(">>> 对话结束或现场无人，回到待唤醒");
     } else {
@@ -1486,7 +1772,9 @@ void loop() {
     }
   }
 
-  if (woken && s_state == ST_IDLE) {
+  if (woken && s_state == ST_IDLE && !s_settings_menu_active &&
+      !s_manual_provisioning &&
+      s_ota_screen_mode == OtaScreenMode::kNone) {
 #if ENABLE_LOCAL_WAKE_ACK
     start_wake_ack();
 #else

@@ -330,12 +330,13 @@ void net_init(const NetCallbacks &cb) {
 void net_wifi_retry_now() {
   s_wifi_cand = -1;
   s_cand_start_ms = 0;
+  s_wifi_down_since = millis();
   wifi_connect();
 }
 
 void net_loop() {
   if (WiFi.status() == WL_CONNECTED) {
-    if (prov_active()) prov_end();  // 连上即关闭配网热点
+    if (prov_active() && prov_should_close_on_connect()) prov_end();
     s_wifi_was_up = true;
     s_wifi_cand = -1;
     if (!s_wifi_online) {

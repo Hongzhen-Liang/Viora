@@ -26,6 +26,7 @@ static Preferences s_prefs;
 static std::vector<WifiCred> s_saved;      // NVS 里保存的网络（新存的在前）
 static std::vector<WifiCred> s_candidates; // 候选列表 = 已保存 + 编译期默认
 static bool s_active = false;
+static bool s_manual_mode = false;
 static bool s_web_running = false;         // 网页服务是否已在监听（配网与联网共用）
 static char s_waiting_ssid[33];            // 保存后正在后台等待连接的目标 SSID
 
@@ -458,10 +459,15 @@ static void web_restart() {
 // ---------- 对外接口 ----------
 bool prov_active() { return s_active; }
 
-void prov_begin() {
-  if (s_active) return;
-  Serial.printf("[Prov] WiFi 连续 %lu 毫秒未连上，进入配网模式\n",
-                static_cast<unsigned long>(PROV_TIMEOUT_MS));
+void prov_begin(bool manual) {
+  if (s_active) {
+    if (manual) s_manual_mode = true;
+    return;
+  }
+  s_manual_mode = manual;
+  if (manual) Serial.println("[Prov] 用户手动进入配网模式");
+  else Serial.printf("[Prov] WiFi 连续 %lu 毫秒未连上，进入配网模式\n",
+                     static_cast<unsigned long>(PROV_TIMEOUT_MS));
   Serial.printf("[Prov] 热点: %s（密码 %s），请用手机连接后访问 http://192.168.4.1\n",
                 PROV_AP_SSID, PROV_AP_PASS[0] ? PROV_AP_PASS : "无");
   // AP+STA 共存：配网页保持在线，STA 后台继续尝试连接。iPhone 热点场景
@@ -479,12 +485,19 @@ void prov_begin() {
   s_active = true;
 }
 
+bool prov_should_close_on_connect() {
+  if (!s_manual_mode) return true;
+  return s_waiting_ssid[0] != '\0' &&
+         strcmp(WiFi.SSID().c_str(), s_waiting_ssid) == 0;
+}
+
 void prov_end() {
   if (!s_active) return;
   s_dns.stop();
   WiFi.softAPdisconnect(true);
   WiFi.mode(WIFI_STA);  // STA 已连上，切回纯 STA 省电
   s_active = false;
+  s_manual_mode = false;
   s_waiting_ssid[0] = '\0';
   web_restart();  // 模式切换会重建网络接口，重启监听让管理页在局域网继续可用
   Serial.println("[Prov] 已退出配网模式");

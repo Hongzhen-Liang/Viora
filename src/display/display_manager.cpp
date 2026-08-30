@@ -88,7 +88,7 @@ void render_qr_callback(esp_qrcode_handle_t qrcode) {
            s_binding_qr_pairing_code);
   const uint16_t pairing_width = s_lcd.getUTF8Width(pairing_line);
   s_lcd.drawUTF8((kScreenWidth - pairing_width) / 2, 266, pairing_line);
-  const char *hint = "扫描绑定 · 按 KEY 退出";
+  const char *hint = "扫描绑定 · KEY/BOOT 退出";
   const uint16_t hint_width = s_lcd.getUTF8Width(hint);
   s_lcd.drawUTF8((kScreenWidth - hint_width) / 2, 291, hint);
   s_lcd.sendBuffer();
@@ -219,6 +219,39 @@ void DisplayManager::showOtaScreen(const char *line1, const char *line2) {
     text += line2;
   }
   setSubtitle(text.c_str());
+}
+
+void DisplayManager::showSettingsMenu(uint8_t selected, bool update_available,
+                                      bool online) {
+  if (!ready_) return;
+  binding_qr_active_ = false;
+  binding_qr_deadline_ms_ = 0;
+  idle_mode_ = false;
+  timed_mode_ = false;
+  timed_cue_count_ = 0;
+
+  const char *items[] = {"绑定设备", "连接网络", "系统更新"};
+  s_lcd.clearBuffer();
+  s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
+  s_lcd.drawUTF8(28, 34, "设备设置");
+  const char *status = online ? "在线" : "离线";
+  s_lcd.drawUTF8(326, 34, status);
+  s_lcd.drawHLine(24, 49, 352);
+
+  for (uint8_t i = 0; i < 3; ++i) {
+    const int y = 68 + i * 55;
+    if (i == selected) {
+      s_lcd.drawRBox(28, y, 344, 42, 8);
+      s_lcd.setDrawColor(0);
+    }
+    s_lcd.drawUTF8(48, y + 27, items[i]);
+    if (i == 2 && update_available) s_lcd.drawUTF8(275, y + 27, "有新版");
+    if (i == selected) s_lcd.setDrawColor(1);
+  }
+
+  s_lcd.drawHLine(24, 248, 352);
+  s_lcd.drawUTF8(57, 276, "BOOT 切换 · KEY 确认");
+  s_lcd.sendBuffer();
 }
 
 void DisplayManager::wrapSubtitle(const char *text) {
