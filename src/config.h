@@ -13,11 +13,9 @@
 // 唤醒词由 ESP-SR AFE WakeNet 模型 wn9_nihaoxiaoxin_tts 提供。
 // ============================================================
 #define WAKE_WORD "nihaoxiaoxin"
-// 本地唤醒确认音：KWS 命中后先进入决定窗（WAKE_ACK_DECIDE_MS，期间不
-// 开播不上传），窗内检测到连续人声说明用户紧跟指令 → 直接应答；无人声
-// 才判定纯唤醒：本地播放确认音（scripts/gen_wake_ack.py 生成），唤醒轮
-// 零上传、零 ASR，播完直接进入连续聆听。设为 0 回退到旧流程（上传唤醒
-// 轮，服务端 WAKE_ACK_REPLY 下发 TTS ack）。
+// 本地唤醒确认音：唤醒后先在内部做很短的后续人声判别，但用户界面
+// 立即显示 LISTENING。若用户紧接着说指令则直接应答并跳过确认音；只有
+// 单独说唤醒词时才播放默认确认音，然后继续等待指令。
 #define ENABLE_LOCAL_WAKE_ACK 1
 #define WAKE_ACK_DECIDE_MS     350  // 唤醒决定窗时长
 #define WAKE_ACK_VOICE_FRAMES  2    // 约 64ms 连续人声即判定"紧跟指令"

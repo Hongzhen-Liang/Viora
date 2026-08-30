@@ -631,7 +631,9 @@ static void set_state(ConvState state) {
   if (state == ST_IDLE) {
     g_display.setVisualState(DisplayVisualState::kIdle);
   } else if (state == ST_WAKE_ACK) {
-    g_display.setVisualState(DisplayVisualState::kSensing);
+    // WAKE_ACK is an internal acoustic discrimination window. From the
+    // user's perspective the device is already ready to hear the command.
+    g_display.setVisualState(DisplayVisualState::kListening);
   } else if (state == ST_LISTENING) {
     g_display.setVisualState(DisplayVisualState::kListening);
   } else if (state == ST_PROCESSING) {
@@ -1378,7 +1380,8 @@ void loop() {
   if (net_provisioning_active()) led_mode = LED_MODE_PROVISIONING;
   else if (!net_connected()) led_mode = LED_MODE_ERROR;
   else if (s_state == ST_IDLE) led_mode = LED_MODE_IDLE;
-  else if (s_state == ST_LISTENING) led_mode = LED_MODE_LISTENING;
+  else if (s_state == ST_LISTENING || s_state == ST_WAKE_ACK)
+    led_mode = LED_MODE_LISTENING;
   else if (s_state == ST_PROCESSING) led_mode = LED_MODE_PROCESSING;
   else led_mode = LED_MODE_PLAYING;
   led_set_mode(led_mode);
@@ -1523,8 +1526,14 @@ void loop() {
       const uint16_t required_frames =
           local_ack ? WAKE_ACK_BARGE_VOICE_FRAMES : BARGE_IN_VOICE_FRAMES;
       const uint16_t mic_rms = g_audio.captureRms();
+      // The short local acknowledgement is intentionally easy to interrupt;
+      // normal TTS keeps the stricter gate to avoid accidental self-interrupt.
+      const int16_t voice_peak_min =
+          local_ack ? WAKE_ACK_CAPTURE_PEAK_MIN : BARGE_IN_PEAK_MIN;
+      const uint16_t voice_rms_min =
+          local_ack ? WAKE_ACK_CAPTURE_RMS_MIN : BARGE_IN_RMS_MIN;
       const bool raw_voice =
-          vol_l >= BARGE_IN_PEAK_MIN && mic_rms >= BARGE_IN_RMS_MIN;
+          vol_l >= voice_peak_min && mic_rms >= voice_rms_min;
       const bool speaker_quiet =
           s_barge_ref_rms_hold < BARGE_IN_REF_FLOOR_RMS;
       const bool near_end_dominant =
