@@ -641,16 +641,8 @@ void DisplayManager::renderIdleDashboard() {
   s_lcd.drawHLine(20, kSubtitleTop, 360);
 
   char soil_value[12] = "--";
-  const char *soil_state = "传感器未连接";
   if (!std::isnan(idle_soil_)) {
     snprintf(soil_value, sizeof(soil_value), "%.0f%%", idle_soil_);
-    if (idle_soil_ < 30.0f) {
-      soil_state = "偏干";
-    } else if (idle_soil_ <= 75.0f) {
-      soil_state = "适宜";
-    } else {
-      soil_state = "偏湿";
-    }
   }
 
   char temperature[16] = "--";
@@ -674,13 +666,5 @@ void DisplayManager::renderIdleDashboard() {
   s_lcd.drawStr(22, 273, humidity);
   s_lcd.drawStr(154, 273, soil_value);
   s_lcd.drawStr(286, 273, temperature);
-  String status_line = String(soil_state) + "  ·  " +
-                       (idle_presence_ ? "有人在附近" : "安静待机");
-  s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
-  const uint16_t status_width = s_lcd.getUTF8Width(status_line.c_str());
-  s_lcd.drawUTF8(status_width < kScreenWidth
-                     ? (kScreenWidth - status_width) / 2
-                     : 0,
-                 297, status_line.c_str());
   s_lcd.sendBuffer();
 }
