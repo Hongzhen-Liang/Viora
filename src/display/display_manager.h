@@ -44,7 +44,7 @@ class DisplayManager {
   // The server sends subtitle segments up to 38 CJK characters. The taller
   // conversation bubble is intentionally sized to keep one whole segment on
   // screen, so the bubble changes at the same moment as the audio cue.
-  static constexpr uint8_t kLinesPerPage = 6;
+  static constexpr uint8_t kLinesPerPage = 7;
 
   void wrapSubtitle(const char *text);
   void renderPage();

@@ -353,7 +353,7 @@ void DisplayManager::wrapSubtitle(const char *text) {
   line_count_ = 0;
   if (text == nullptr || text[0] == '\0') return;
 
-  s_lcd.setFont(u8g2_font_wqy12_t_gb2312);
+  s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
   String line;
   const uint8_t *cursor = reinterpret_cast<const uint8_t *>(text);
   while (*cursor != 0 && line_count_ < kMaxLines) {
@@ -558,22 +558,23 @@ void DisplayManager::renderPage() {
   } else if (visual_state_ == DisplayVisualState::kSpeaking) {
     state_label = "SPEAKING";
   }
-  s_lcd.drawStr(20, 48, state_label);
-  s_lcd.drawHLine(20, 34, 34);
-  s_lcd.drawHLine(20, 56, 86);
+  const uint16_t state_width = s_lcd.getStrWidth(state_label);
+  const uint16_t state_x = 146 > state_width ? 146 - state_width : 86;
+  s_lcd.drawStr(state_x, 26, state_label);
+  s_lcd.drawHLine(20, 34, 126);
 
   // The speech bubble is the visual hero of the conversation screen. A
   // stepped black shadow gives the monochrome display a small poster-like
   // depth, while the white inner panel keeps Chinese subtitles readable.
   constexpr uint16_t bubble_x = 20;
-  constexpr uint16_t bubble_y = 62;
+  constexpr uint16_t bubble_y = 42;
   constexpr uint16_t bubble_w = 132;
-  constexpr uint16_t bubble_h = 148;
+  constexpr uint16_t bubble_h = 168;
   s_lcd.setDrawColor(1);
-  s_lcd.drawTriangle(128, 188, 151, 188, 158, 218);
+  s_lcd.drawTriangle(126, 104, 151, 104, 158, 68);
   s_lcd.drawRBox(bubble_x + 5, bubble_y + 5, bubble_w, bubble_h, 16);
   s_lcd.setDrawColor(0);
-  s_lcd.drawTriangle(130, 188, 148, 188, 156, 211);
+  s_lcd.drawTriangle(129, 104, 148, 104, 156, 74);
   s_lcd.drawRBox(bubble_x, bubble_y, bubble_w, bubble_h, 16);
   s_lcd.setDrawColor(1);
   s_lcd.drawRFrame(bubble_x, bubble_y, bubble_w, bubble_h, 16);
@@ -587,14 +588,14 @@ void DisplayManager::renderPage() {
   s_lcd.drawDisc(bubble_x + bubble_w - 23, bubble_y + 19, 2);
   s_lcd.drawDisc(bubble_x + bubble_w - 16, bubble_y + 19, 1);
 
-  s_lcd.setFont(u8g2_font_wqy12_t_gb2312);
+  s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
   const uint8_t first = page_ * kLinesPerPage;
   const uint8_t remaining = line_count_ > first ? line_count_ - first : 0;
   const uint8_t visible_lines =
       remaining < kLinesPerPage ? remaining : kLinesPerPage;
-  constexpr uint16_t bubble_text_top = bubble_y + 43;
+  constexpr uint16_t bubble_text_top = bubble_y + 38;
   constexpr uint16_t bubble_text_bottom = bubble_y + bubble_h - 13;
-  constexpr uint16_t bubble_line_height = 18;
+  constexpr uint16_t bubble_line_height = 17;
   const uint16_t text_block_height =
       visible_lines > 0 ? (visible_lines - 1) * bubble_line_height : 0;
   const uint16_t first_baseline =
