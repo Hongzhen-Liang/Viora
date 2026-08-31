@@ -135,7 +135,7 @@ void DisplayManager::setVisualState(DisplayVisualState state) {
 }
 
 void DisplayManager::showIdleDashboard(float temperature, float humidity,
-                                       float soil,
+                                       float light, float soil,
                                        DisplayNetworkState network_state) {
   if (!ready_) return;
   if (binding_qr_active_) return;
@@ -144,10 +144,12 @@ void DisplayManager::showIdleDashboard(float temperature, float humidity,
   const bool availability_changed =
       (std::isnan(idle_temperature_) != std::isnan(temperature)) ||
       (std::isnan(idle_humidity_) != std::isnan(humidity)) ||
+      (std::isnan(idle_light_) != std::isnan(light)) ||
       (std::isnan(idle_soil_) != std::isnan(soil));
   const bool network_state_changed = network_state != idle_network_state_;
   idle_temperature_ = temperature;
   idle_humidity_ = humidity;
+  idle_light_ = light;
   idle_soil_ = soil;
   idle_network_state_ = network_state;
 
@@ -225,8 +227,8 @@ void DisplayManager::hideBindingQr() {
   s_binding_qr_pairing_code[0] = '\0';
   Serial.println("[DISPLAY] 用户退出二维码配对");
   idle_mode_ = false;
-  showIdleDashboard(idle_temperature_, idle_humidity_, idle_soil_,
-                    idle_network_state_);
+  showIdleDashboard(idle_temperature_, idle_humidity_, idle_light_,
+                    idle_soil_, idle_network_state_);
 }
 
 void DisplayManager::showOtaScreen(const char *line1, const char *line2) {
@@ -645,6 +647,11 @@ void DisplayManager::renderIdleDashboard() {
     snprintf(soil_value, sizeof(soil_value), "%.0f%%", idle_soil_);
   }
 
+  char light_value[16] = "--";
+  if (!std::isnan(idle_light_)) {
+    snprintf(light_value, sizeof(light_value), "%.0f lx", idle_light_);
+  }
+
   char temperature[16] = "--";
   char humidity[16] = "--";
   if (!std::isnan(idle_temperature_)) {
@@ -654,17 +661,20 @@ void DisplayManager::renderIdleDashboard() {
     snprintf(humidity, sizeof(humidity), "%.0f%%", idle_humidity_);
   }
 
-  // Three compact metric columns keep the useful plant data visible while
+  // Four compact metric columns keep the useful plant data visible while
   // leaving the artwork and status chrome clean.
-  s_lcd.drawVLine(132, 241, 43);
-  s_lcd.drawVLine(264, 241, 43);
+  s_lcd.drawVLine(110, 241, 43);
+  s_lcd.drawVLine(200, 241, 43);
+  s_lcd.drawVLine(290, 241, 43);
   s_lcd.setFont(u8g2_font_6x10_tf);
   s_lcd.drawStr(22, 251, "AIR HUMIDITY");
-  s_lcd.drawStr(154, 251, "SOIL MOISTURE");
-  s_lcd.drawStr(286, 251, "TEMPERATURE");
+  s_lcd.drawStr(112, 251, "SOIL MOISTURE");
+  s_lcd.drawStr(202, 251, "LIGHT");
+  s_lcd.drawStr(292, 251, "TEMPERATURE");
   s_lcd.setFont(u8g2_font_helvB12_tf);
   s_lcd.drawStr(22, 273, humidity);
-  s_lcd.drawStr(154, 273, soil_value);
-  s_lcd.drawStr(286, 273, temperature);
+  s_lcd.drawStr(112, 273, soil_value);
+  s_lcd.drawStr(202, 273, light_value);
+  s_lcd.drawStr(292, 273, temperature);
   s_lcd.sendBuffer();
 }

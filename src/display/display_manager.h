@@ -23,8 +23,8 @@ class DisplayManager {
  public:
   bool begin();
   void setVisualState(DisplayVisualState state);
-  void showIdleDashboard(float temperature, float humidity, float soil,
-                         DisplayNetworkState network_state);
+  void showIdleDashboard(float temperature, float humidity, float light,
+                         float soil, DisplayNetworkState network_state);
   void setPresence(bool present);
   void setUpdateAvailable(bool available);
   void showBindingQr(const char *url, const char *pairing_code);
@@ -62,6 +62,7 @@ class DisplayManager {
   bool update_available_ = false;
   float idle_temperature_ = NAN;
   float idle_humidity_ = NAN;
+  float idle_light_ = NAN;
   float idle_soil_ = NAN;
   bool idle_presence_ = false;
   bool rendered_presence_ = false;

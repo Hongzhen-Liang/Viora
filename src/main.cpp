@@ -247,8 +247,8 @@ static void enter_listening(ListenOrigin origin, bool force_preroll = false,
 
 static void show_idle_dashboard() {
   const SensorData &data = g_sensor.data();
-  g_display.showIdleDashboard(data.temperature, data.humidity, data.soil,
-                              display_network_state());
+  g_display.showIdleDashboard(data.temperature, data.humidity, data.light,
+                              data.soil, display_network_state());
 }
 
 static void show_temporary_message(const char *message,
@@ -1167,7 +1167,8 @@ void setup() {
   ota_set_ui_callback(on_ota_ui_event);
   const SensorData &initial_data = g_sensor.data();
   g_display.showIdleDashboard(initial_data.temperature, initial_data.humidity,
-                              initial_data.soil, display_network_state());
+                              initial_data.light, initial_data.soil,
+                              display_network_state());
   // 启动横幅
   print_hardware_banner(sensors_ok, audio_ok);
 
@@ -1367,8 +1368,8 @@ void loop() {
       !s_settings_menu_active && !s_manual_provisioning &&
       s_transient_screen_deadline_ms == 0) {
     const SensorData &data = g_sensor.data();
-    g_display.showIdleDashboard(data.temperature, data.humidity, data.soil,
-                                display_network_state());
+    g_display.showIdleDashboard(data.temperature, data.humidity, data.light,
+                                data.soil, display_network_state());
   }
 
   // 默认保持 WiFi 全性能，避免待唤醒阶段的 modem sleep 令 WebSocket
