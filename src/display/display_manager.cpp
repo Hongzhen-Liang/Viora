@@ -33,6 +33,60 @@ constexpr uint16_t kPresenceStatusX = 103;
 constexpr uint16_t kWifiStatusX = 126;
 constexpr uint16_t kStatusIconTop = 10;
 
+// Broad bands make the screen communicate a useful state. The smaller lux
+// value remains available for a precise reading.
+constexpr float kLightDimToSoftLux = 300.0f;
+constexpr float kLightSoftToBrightLux = 3000.0f;
+constexpr float kLightBrightToStrongLux = 10000.0f;
+constexpr float kLightEmaAlpha = 0.12f;
+
+enum LightLevel : uint8_t {
+  kLightDim = 0,
+  kLightSoft = 1,
+  kLightBright = 2,
+  kLightStrong = 3,
+};
+
+uint8_t classifyLight(float lux, uint8_t previous_level,
+                      bool previous_level_ready) {
+  if (!previous_level_ready) {
+    if (lux < kLightDimToSoftLux) return kLightDim;
+    if (lux < kLightSoftToBrightLux) return kLightSoft;
+    if (lux < kLightBrightToStrongLux) return kLightBright;
+    return kLightStrong;
+  }
+
+  // Hysteresis prevents the label from flickering at a boundary.
+  switch (previous_level) {
+    case kLightDim:
+      return lux >= 350.0f ? kLightSoft : kLightDim;
+    case kLightSoft:
+      if (lux < 250.0f) return kLightDim;
+      return lux >= 3500.0f ? kLightBright : kLightSoft;
+    case kLightBright:
+      if (lux < 2500.0f) return kLightSoft;
+      return lux >= 11500.0f ? kLightStrong : kLightBright;
+    case kLightStrong:
+      return lux < 8500.0f ? kLightBright : kLightStrong;
+    default:
+      return kLightDim;
+  }
+}
+
+const char *lightLevelName(uint8_t level) {
+  switch (level) {
+    case kLightSoft:
+      return "SOFT";
+    case kLightBright:
+      return "BRIGHT";
+    case kLightStrong:
+      return "STRONG";
+    case kLightDim:
+    default:
+      return "DIM";
+  }
+}
+
 // 19x14 的紧凑状态栏 Wi-Fi 图标。时间是待机页的主信息，网络图标
 // 只作为辅助状态，因此刻意缩小一级，避免与时间争夺视觉注意力。
 constexpr uint8_t kWifiIconWidth = 19;
@@ -147,11 +201,30 @@ void DisplayManager::showIdleDashboard(float temperature, float humidity,
       (std::isnan(idle_light_) != std::isnan(light)) ||
       (std::isnan(idle_soil_) != std::isnan(soil));
   const bool network_state_changed = network_state != idle_network_state_;
+  const uint8_t previous_light_level = idle_light_level_;
+  const bool previous_light_level_ready = idle_light_level_ready_;
   idle_temperature_ = temperature;
   idle_humidity_ = humidity;
   idle_light_ = light;
   idle_soil_ = soil;
   idle_network_state_ = network_state;
+
+  if (std::isnan(light)) {
+    idle_light_average_ = NAN;
+    idle_light_level_ready_ = false;
+  } else {
+    idle_light_average_ = std::isnan(idle_light_average_)
+                              ? light
+                              : kLightEmaAlpha * light +
+                                    (1.0f - kLightEmaAlpha) * idle_light_average_;
+    idle_light_level_ = classifyLight(idle_light_average_, idle_light_level_,
+                                      idle_light_level_ready_);
+    idle_light_level_ready_ = true;
+  }
+  const bool light_level_changed =
+      previous_light_level_ready != idle_light_level_ready_ ||
+      (idle_light_level_ready_ && previous_light_level_ready &&
+       previous_light_level != idle_light_level_);
 
   const uint32_t now = millis();
   const bool clock_ready = time(nullptr) >= 1577836800;
@@ -168,7 +241,8 @@ void DisplayManager::showIdleDashboard(float temperature, float humidity,
   const uint32_t refresh_ms =
       clock_ready ? kIdleRefreshMs : kUnsyncedClockRefreshMs;
   if (idle_mode_ && !availability_changed && !network_state_changed &&
-      !clock_became_ready && now - last_idle_render_ms_ < refresh_ms) {
+      !clock_became_ready && !light_level_changed &&
+      now - last_idle_render_ms_ < refresh_ms) {
     return;
   }
   idle_mode_ = true;
@@ -648,8 +722,11 @@ void DisplayManager::renderIdleDashboard() {
   }
 
   char light_value[16] = "--";
+  char light_status[12] = "--";
   if (!std::isnan(idle_light_)) {
     snprintf(light_value, sizeof(light_value), "%.0f lx", idle_light_);
+    snprintf(light_status, sizeof(light_status), "%s",
+             lightLevelName(idle_light_level_));
   }
 
   char temperature[16] = "--";
@@ -674,7 +751,10 @@ void DisplayManager::renderIdleDashboard() {
   s_lcd.setFont(u8g2_font_helvB12_tf);
   s_lcd.drawStr(22, 273, humidity);
   s_lcd.drawStr(112, 273, soil_value);
-  s_lcd.drawStr(202, 273, light_value);
+  s_lcd.drawStr(202, 270, light_status);
+  s_lcd.setFont(u8g2_font_6x10_tf);
+  s_lcd.drawStr(202, 282, light_value);
+  s_lcd.setFont(u8g2_font_helvB12_tf);
   s_lcd.drawStr(292, 273, temperature);
   s_lcd.sendBuffer();
 }

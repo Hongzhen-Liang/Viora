@@ -63,6 +63,9 @@ class DisplayManager {
   float idle_temperature_ = NAN;
   float idle_humidity_ = NAN;
   float idle_light_ = NAN;
+  float idle_light_average_ = NAN;
+  uint8_t idle_light_level_ = 0;
+  bool idle_light_level_ready_ = false;
   float idle_soil_ = NAN;
   bool idle_presence_ = false;
   bool rendered_presence_ = false;
