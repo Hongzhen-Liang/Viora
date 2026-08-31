@@ -13,7 +13,7 @@ namespace {
 
 constexpr uint16_t kScreenWidth = 400;
 constexpr uint16_t kScreenHeight = 300;
-constexpr uint16_t kSubtitleWidth = 360;
+constexpr uint16_t kSubtitleWidth = 104;
 constexpr uint16_t kSubtitleTop = 233;
 constexpr uint32_t kSubtitleMsPerCharacter = 260;
 constexpr uint32_t kSubtitlePageMinMs = 4800;
@@ -28,6 +28,7 @@ constexpr uint32_t kSpeakingExpressionFrameMs = 1500;
 constexpr uint32_t kBindingQrDurationMs = 120000;
 constexpr uint8_t kBindingQrScale = 3;
 constexpr uint16_t kExpressionRightMargin = 20;
+constexpr uint16_t kConversationExpressionRightMargin = 10;
 constexpr uint16_t kExpressionTop = 10;
 constexpr uint16_t kPresenceStatusX = 103;
 constexpr uint16_t kWifiStatusX = 126;
@@ -352,7 +353,7 @@ void DisplayManager::wrapSubtitle(const char *text) {
   line_count_ = 0;
   if (text == nullptr || text[0] == '\0') return;
 
-  s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
+  s_lcd.setFont(u8g2_font_wqy12_t_gb2312);
   String line;
   const uint8_t *cursor = reinterpret_cast<const uint8_t *>(text);
   while (*cursor != 0 && line_count_ < kMaxLines) {
@@ -507,7 +508,8 @@ void DisplayManager::loop(bool speaking, uint32_t playback_position_bytes) {
       page_ = 0;
       page_count_ = line_count_ == 0
                         ? 1
-                        : (line_count_ + kLinesPerPage - 1) / kLinesPerPage;
+                        : (line_count_ + kLinesPerPage - 1) /
+                              kLinesPerPage;
       renderPage();
     }
     return;
@@ -532,9 +534,11 @@ void DisplayManager::renderBindingQrExpired() {
 void DisplayManager::renderPage() {
   animated_screen_ = true;
   s_lcd.clearBuffer();
+  s_lcd.setDrawColor(1);
 
   const uint16_t image_x =
-      kScreenWidth - ORCHID_EXPRESSION_WIDTH - kExpressionRightMargin;
+      kScreenWidth - ORCHID_EXPRESSION_WIDTH -
+      kConversationExpressionRightMargin;
   s_lcd.drawXBMP(image_x, kExpressionTop, ORCHID_EXPRESSION_WIDTH,
                  ORCHID_EXPRESSION_HEIGHT, expressionBitmap());
 
@@ -558,28 +562,76 @@ void DisplayManager::renderPage() {
   s_lcd.drawHLine(20, 34, 34);
   s_lcd.drawHLine(20, 56, 86);
 
-  // 一条带中央菱形的细分隔线，比标题、边框和页码更克制，也与
-  // 上方植物线稿的气质一致。
+  // The speech bubble is the visual hero of the conversation screen. A
+  // stepped black shadow gives the monochrome display a small poster-like
+  // depth, while the white inner panel keeps Chinese subtitles readable.
+  constexpr uint16_t bubble_x = 20;
+  constexpr uint16_t bubble_y = 62;
+  constexpr uint16_t bubble_w = 132;
+  constexpr uint16_t bubble_h = 148;
+  s_lcd.setDrawColor(1);
+  s_lcd.drawTriangle(128, 188, 151, 188, 158, 218);
+  s_lcd.drawRBox(bubble_x + 5, bubble_y + 5, bubble_w, bubble_h, 16);
+  s_lcd.setDrawColor(0);
+  s_lcd.drawTriangle(130, 188, 148, 188, 156, 211);
+  s_lcd.drawRBox(bubble_x, bubble_y, bubble_w, bubble_h, 16);
+  s_lcd.setDrawColor(1);
+  s_lcd.drawRFrame(bubble_x, bubble_y, bubble_w, bubble_h, 16);
+
+  // A compact editorial label makes the bubble feel intentional rather than
+  // like a generic debug dialog.
+  s_lcd.setFont(u8g2_font_6x10_tf);
+  s_lcd.drawStr(bubble_x + 18, bubble_y + 23, "VOICE NOTE");
+  s_lcd.drawStr(bubble_x + bubble_w - 37, bubble_y + 23, "01");
+  s_lcd.drawHLine(bubble_x + 18, bubble_y + 31, bubble_w - 36);
+  s_lcd.drawDisc(bubble_x + bubble_w - 23, bubble_y + 19, 2);
+  s_lcd.drawDisc(bubble_x + bubble_w - 16, bubble_y + 19, 1);
+
+  s_lcd.setFont(u8g2_font_wqy12_t_gb2312);
+  const uint8_t first = page_ * kLinesPerPage;
+  const uint8_t remaining = line_count_ > first ? line_count_ - first : 0;
+  const uint8_t visible_lines =
+      remaining < kLinesPerPage ? remaining : kLinesPerPage;
+  constexpr uint16_t bubble_text_top = bubble_y + 43;
+  constexpr uint16_t bubble_text_bottom = bubble_y + bubble_h - 13;
+  constexpr uint16_t bubble_line_height = 18;
+  const uint16_t text_block_height =
+      visible_lines > 0 ? (visible_lines - 1) * bubble_line_height : 0;
+  const uint16_t first_baseline =
+      bubble_text_top +
+      (bubble_text_bottom - bubble_text_top - text_block_height) / 2 + 6;
+  for (uint8_t row = 0; row < visible_lines; ++row) {
+    const uint8_t line = first + row;
+    const uint16_t text_width = s_lcd.getUTF8Width(lines_[line].c_str());
+    const uint16_t x =
+        text_width < bubble_w - 30
+            ? bubble_x + (bubble_w - text_width) / 2
+            : bubble_x + 15;
+    s_lcd.drawUTF8(x, first_baseline + row * bubble_line_height,
+                   lines_[line].c_str());
+  }
+
+  // Page count is deliberately tiny: useful when a long response is being
+  // paged, but quiet enough to keep the bubble as the focal point.
+  s_lcd.setFont(u8g2_font_6x10_tf);
+  char page_label[12] = {};
+  snprintf(page_label, sizeof(page_label), "%02u / %02u", page_ + 1,
+           page_count_);
+  s_lcd.drawStr(28, 222, page_label);
+  s_lcd.drawHLine(84, 219, 58);
+  const char *brand_label = "ORCHID VOICE";
+  const uint16_t brand_width = s_lcd.getStrWidth(brand_label);
+  s_lcd.drawStr(kScreenWidth - brand_width - 22, 222, brand_label);
+
+  // A thin divider separates the conversation composition from the sensor
+  // dashboard below, echoing the editorial line used on the idle screen.
   s_lcd.drawHLine(24, kSubtitleTop, 158);
   s_lcd.drawHLine(218, kSubtitleTop, 158);
   s_lcd.drawLine(194, kSubtitleTop, 200, kSubtitleTop - 4);
   s_lcd.drawLine(200, kSubtitleTop - 4, 206, kSubtitleTop);
   s_lcd.drawLine(206, kSubtitleTop, 200, kSubtitleTop + 4);
   s_lcd.drawLine(200, kSubtitleTop + 4, 194, kSubtitleTop);
-
-  s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
-  const uint8_t first = page_ * kLinesPerPage;
-  const uint8_t remaining = line_count_ > first ? line_count_ - first : 0;
-  const uint8_t visible_lines =
-      remaining < kLinesPerPage ? remaining : kLinesPerPage;
-  const uint16_t first_baseline = visible_lines <= 1 ? 271 : 255;
-  for (uint8_t row = 0; row < visible_lines; ++row) {
-    const uint8_t line = first + row;
-    const uint16_t text_width = s_lcd.getUTF8Width(lines_[line].c_str());
-    const uint16_t x =
-        text_width < kScreenWidth ? (kScreenWidth - text_width) / 2 : 0;
-    s_lcd.drawUTF8(x, first_baseline + row * 29, lines_[line].c_str());
-  }
+  renderSensorStrip();
   s_lcd.sendBuffer();
 }
 
@@ -629,6 +681,52 @@ const uint8_t *DisplayManager::expressionBitmap() const {
       return ORCHID_IDLE_NORMAL;
     }
   }
+}
+
+void DisplayManager::renderSensorStrip() {
+  s_lcd.setDrawColor(1);
+  s_lcd.drawHLine(20, kSubtitleTop, 360);
+
+  char soil_value[12] = "--";
+  if (!std::isnan(idle_soil_)) {
+    snprintf(soil_value, sizeof(soil_value), "%.0f%%", idle_soil_);
+  }
+
+  char light_value[16] = "--";
+  char light_status[12] = "--";
+  if (!std::isnan(idle_light_)) {
+    snprintf(light_value, sizeof(light_value), "%.0f lx", idle_light_);
+    snprintf(light_status, sizeof(light_status), "%s",
+             lightLevelName(idle_light_level_));
+  }
+
+  char temperature[16] = "--";
+  char humidity[16] = "--";
+  if (!std::isnan(idle_temperature_)) {
+    snprintf(temperature, sizeof(temperature), "%.1f°C", idle_temperature_);
+  }
+  if (!std::isnan(idle_humidity_)) {
+    snprintf(humidity, sizeof(humidity), "%.0f%%", idle_humidity_);
+  }
+
+  // Keep the sensor strip identical on the idle and conversation screens.
+  // Subtitle refreshes therefore never leave the useful plant data blank.
+  s_lcd.drawVLine(110, 241, 43);
+  s_lcd.drawVLine(200, 241, 43);
+  s_lcd.drawVLine(290, 241, 43);
+  s_lcd.setFont(u8g2_font_6x10_tf);
+  s_lcd.drawStr(22, 251, "AIR HUMIDITY");
+  s_lcd.drawStr(112, 251, "SOIL MOISTURE");
+  s_lcd.drawStr(202, 251, "LIGHT");
+  s_lcd.drawStr(292, 251, "TEMPERATURE");
+  s_lcd.setFont(u8g2_font_helvB12_tf);
+  s_lcd.drawStr(22, 273, humidity);
+  s_lcd.drawStr(112, 273, soil_value);
+  s_lcd.drawStr(202, 270, light_status);
+  s_lcd.setFont(u8g2_font_6x10_tf);
+  s_lcd.drawStr(202, 282, light_value);
+  s_lcd.setFont(u8g2_font_helvB12_tf);
+  s_lcd.drawStr(292, 273, temperature);
 }
 
 void DisplayManager::renderIdleDashboard() {
@@ -714,47 +812,6 @@ void DisplayManager::renderIdleDashboard() {
 
   rendered_presence_ = idle_presence_;
 
-  s_lcd.drawHLine(20, kSubtitleTop, 360);
-
-  char soil_value[12] = "--";
-  if (!std::isnan(idle_soil_)) {
-    snprintf(soil_value, sizeof(soil_value), "%.0f%%", idle_soil_);
-  }
-
-  char light_value[16] = "--";
-  char light_status[12] = "--";
-  if (!std::isnan(idle_light_)) {
-    snprintf(light_value, sizeof(light_value), "%.0f lx", idle_light_);
-    snprintf(light_status, sizeof(light_status), "%s",
-             lightLevelName(idle_light_level_));
-  }
-
-  char temperature[16] = "--";
-  char humidity[16] = "--";
-  if (!std::isnan(idle_temperature_)) {
-    snprintf(temperature, sizeof(temperature), "%.1f°C", idle_temperature_);
-  }
-  if (!std::isnan(idle_humidity_)) {
-    snprintf(humidity, sizeof(humidity), "%.0f%%", idle_humidity_);
-  }
-
-  // Four compact metric columns keep the useful plant data visible while
-  // leaving the artwork and status chrome clean.
-  s_lcd.drawVLine(110, 241, 43);
-  s_lcd.drawVLine(200, 241, 43);
-  s_lcd.drawVLine(290, 241, 43);
-  s_lcd.setFont(u8g2_font_6x10_tf);
-  s_lcd.drawStr(22, 251, "AIR HUMIDITY");
-  s_lcd.drawStr(112, 251, "SOIL MOISTURE");
-  s_lcd.drawStr(202, 251, "LIGHT");
-  s_lcd.drawStr(292, 251, "TEMPERATURE");
-  s_lcd.setFont(u8g2_font_helvB12_tf);
-  s_lcd.drawStr(22, 273, humidity);
-  s_lcd.drawStr(112, 273, soil_value);
-  s_lcd.drawStr(202, 270, light_status);
-  s_lcd.setFont(u8g2_font_6x10_tf);
-  s_lcd.drawStr(202, 282, light_value);
-  s_lcd.setFont(u8g2_font_helvB12_tf);
-  s_lcd.drawStr(292, 273, temperature);
+  renderSensorStrip();
   s_lcd.sendBuffer();
 }
