@@ -241,7 +241,7 @@
 // ============================================================
 #define PCM_BUFFER_SIZE ((SR_SAMPLE_RATE * AUDIO_PREROLL_MS) / 1000) // 前置音频环形缓存
 #define PLAY_BUFFER_SIZE (1536 * 1024)           // 播放缓冲 1.5MB ≈ 48 秒音频
-#define PLAY_PREBUFFER_MS 384                     // 首播水位；服务端会先快速下发约 0.75s PCM
+#define PLAY_PREBUFFER_MS 256                     // 首播水位；服务端保有领先量，欠载时会自动重缓冲
 #define PLAY_REBUFFER_MS 512                      // 真实欠载后多攒一点再续播，避免反复卡顿
 #define PLAY_UNDERRUN_GRACE_MS 32                 // 容忍一个播放帧的到包边界偏差
 #define PLAY_I2S_LATE_WRITE_MS 48                 // 独立播放任务写入间隔诊断阈值
