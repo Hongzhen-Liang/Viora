@@ -17,7 +17,7 @@
 // 立即显示 LISTENING。若用户紧接着说指令则直接应答并跳过确认音；只有
 // 单独说唤醒词时才播放默认确认音，然后继续等待指令。
 #define ENABLE_LOCAL_WAKE_ACK 1
-#define WAKE_ACK_DECIDE_MS     350  // 唤醒决定窗时长
+#define WAKE_ACK_DECIDE_MS     550  // 给异步神经 VAD 足够时间识别紧跟指令
 #define WAKE_ACK_VOICE_FRAMES  2    // 约 64ms 连续人声即判定"紧跟指令"
 #define WAKE_ACK_TAIL_GUARD_MS  96   // 先越过唤醒词尾音，再判断后续连续语音
 #define WAKE_ACK_CONT_GUARD_MS  224  // 无静音分隔时接近窗尾判定，防 VAD 尾音拖尾
@@ -27,6 +27,8 @@
 #define WAKE_ACK_BARGE_VOICE_FRAMES 2 // AEC 后约 64ms 人声即停止确认音
 #define WAKE_ACK_CAPTURE_PEAK_MIN 600 // 不足以停播时，仍保留 AEC 后的普通音量句首
 #define WAKE_ACK_CAPTURE_RMS_MIN  140
+#define WAKE_ACK_DIRECT_PEAK_MIN  400 // 决策窗允许强原始能量召回滞后的神经 VAD
+#define WAKE_ACK_DIRECT_RMS_MIN   100
 #define WAKE_ACK_BOUNDARY_PREROLL_MS 192 // 保留确认音边界附近首字，不带唤醒词
 #define WAKE_ACK_FOLLOWUP_GUARD_MS 64 // 确认音自然播完后的极短扬声器尾音保护
 // ============================================================
@@ -192,8 +194,12 @@
 #define MAX_REC_MS                15000
 
 // 连续对话与打断参数
-#define CONV_TIMEOUT_MS        15000  // 回复后继续等这一时长，无需重复唤醒
+#define CONV_TIMEOUT_MS        12000  // 普通陈述回复后的默认续聊窗口
+#define CONV_TIMEOUT_MIN_MS     5000  // 服务端动态窗口的端侧安全下限
+#define CONV_TIMEOUT_MAX_MS    30000  // 服务端动态窗口的端侧安全上限
 #define FOLLOWUP_GUARD_MS      180    // 只屏蔽扬声器的最后一点余音
+#define ECHO_TAIL_VOICE_PEAK_MIN 180  // 播放后新一轮必须有当前真实声能才可起句
+#define ECHO_TAIL_VOICE_RMS_MIN   70
 #define VOICE_START_FRAMES     3      // 约 96ms 连续人声才确认开始
 #define MIN_VOICE_FRAMES       5      // 少于约 160ms 视为短促噪声
 #define MAX_CONSEC_ERRORS 2    // 连续多次未识别/服务器错误（如背景音乐被当语音）→ 回待唤醒

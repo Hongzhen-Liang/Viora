@@ -197,7 +197,9 @@ static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
       }
       const char *t = doc["type"] | "";
       if (strcmp(t, "text") == 0) {
-        if (s_cb.on_text) s_cb.on_text("text", doc["user"] | "", doc["reply"] | "", "", doc["op"] | "", 0);
+        if (s_cb.on_text) s_cb.on_text(
+            "text", doc["user"] | "", doc["reply"] | "", "",
+            doc["op"] | "", doc["follow_up_ms"] | 0U);
       } else if (strcmp(t, "tts_start") == 0) {
         Serial.println("[WS] TTS 开始");
         if (s_cb.on_text) s_cb.on_text("tts_start", "", doc["subtitle"] | "", "", "", 0);

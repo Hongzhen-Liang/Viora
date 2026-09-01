@@ -105,6 +105,9 @@ class TurnDetector {
 
   // guard_ms ignores speech decisions for a short speaker-tail settling time.
   void reset(uint32_t now_ms, uint32_t guard_ms = 0);
+  // The server may adapt the open-mic window to the reply: questions deserve
+  // more time, while a completed statement can close sooner.
+  void set_idle_timeout_ms(uint32_t timeout_ms);
   // A caller such as barge-in may already have confirmed several speech frames
   // before switching into the listening state. Preserve that evidence.
   void prime_speech(uint32_t now_ms, uint16_t prior_voice_frames);
@@ -124,6 +127,7 @@ class TurnDetector {
   void reject_short_noise();
 
   TurnDetectorConfig config_;
+  uint32_t idle_timeout_ms_ = 0;
   uint32_t listen_start_ms_ = 0;
   uint32_t guard_until_ms_ = 0;
   uint32_t candidate_start_ms_ = 0;

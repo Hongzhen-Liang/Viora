@@ -46,7 +46,8 @@ int main() {
   }
 
   // 唤醒词短尾音不会被当指令；有静音分隔的命令快速通过，无分隔命令
-  // 则必须一直持续到 352ms，覆盖 KWS/VAD 尾音拖尾的常见长度。
+  // 则必须一直持续到 352ms，覆盖 KWS/VAD 尾音拖尾的常见长度；调用端
+  // 会继续观察到 550ms，给异步 AFE 足够产出时间。
   {
     const WakeAckGateConfig config = {96, 224, 2, 2, 5};
     WakeAckGate gate(config);
@@ -122,6 +123,26 @@ int main() {
     assert(event == TURN_EVENT_IDLE_TIMEOUT);
     assert(now >= kConfig.idle_timeout_ms);
     assert(now < kConfig.idle_timeout_ms + kConfig.frame_ms);
+  }
+
+  // 每轮可动态调整续聊等待：疑问句更耐心，陈述句更快自然收会话。
+  {
+    TurnDetector turn(kConfig);
+    uint32_t now = 0;
+    turn.reset(now);
+    turn.set_idle_timeout_ms(22000);
+    while (now < 21984) {
+      assert(advance(turn, &now, false) == TURN_EVENT_NONE);
+    }
+    assert(advance(turn, &now, false) == TURN_EVENT_IDLE_TIMEOUT);
+
+    turn.reset(0);
+    turn.set_idle_timeout_ms(100);  // clamp 到 5 秒
+    now = 0;
+    while (now < 4992) {
+      assert(advance(turn, &now, false) == TURN_EVENT_NONE);
+    }
+    assert(advance(turn, &now, false) == TURN_EVENT_IDLE_TIMEOUT);
   }
 
   // 唤醒/打断的前置证据会启动一轮，但等待现场首字不污染节奏学习。
