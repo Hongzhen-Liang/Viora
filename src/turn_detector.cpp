@@ -100,7 +100,8 @@ bool WakeAckGate::update(uint32_t now_ms, bool is_speech,
   return required > 0 && voice_frames_ >= required;
 }
 
-TurnDetector::TurnDetector(const TurnDetectorConfig &config) : config_(config) {}
+TurnDetector::TurnDetector(const TurnDetectorConfig &config)
+    : config_(config), idle_timeout_ms_(config.idle_timeout_ms) {}
 
 void TurnDetector::reset(uint32_t now_ms, uint32_t guard_ms) {
   listen_start_ms_ = now_ms;
@@ -113,6 +114,14 @@ void TurnDetector::reset(uint32_t now_ms, uint32_t guard_ms) {
   in_gap_ = false;
   ignore_gap_until_live_speech_ = false;
   reset_candidate();
+}
+
+void TurnDetector::set_idle_timeout_ms(uint32_t timeout_ms) {
+  // Keep corrupted or future protocol values from holding the microphone open
+  // forever or making it close before the user can answer.
+  if (timeout_ms < 5000) timeout_ms = 5000;
+  if (timeout_ms > 30000) timeout_ms = 30000;
+  idle_timeout_ms_ = timeout_ms;
 }
 
 void TurnDetector::prime_speech(uint32_t now_ms,
@@ -198,7 +207,7 @@ TurnEvent TurnDetector::update(uint32_t now_ms, bool is_speech) {
       reset_candidate();
     }
 
-    if (now_ms - listen_start_ms_ >= config_.idle_timeout_ms) {
+    if (now_ms - listen_start_ms_ >= idle_timeout_ms_) {
       return TURN_EVENT_IDLE_TIMEOUT;
     }
     return TURN_EVENT_NONE;
