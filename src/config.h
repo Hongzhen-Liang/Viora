@@ -184,10 +184,10 @@
 // 句中被误判为静音），静音阈值必须留出富余，避免“没听完就断句开播”。
 #define VAD_FRAME_MS              32
 #define ENDPOINT_SHORT_SPEECH_MS  640
-#define ENDPOINT_SHORT_MS         1500
-#define ENDPOINT_NORMAL_MS        850
+#define ENDPOINT_SHORT_MS         1200
+#define ENDPOINT_NORMAL_MS        700
 #define ENDPOINT_LONG_TURN_MS     5000
-#define ENDPOINT_LONG_MS          850
+#define ENDPOINT_LONG_MS          700
 #define ENDPOINT_MAX_MS           2000
 #define ENDPOINT_LEARN_GAP_MS     160
 #define MIN_REC_MS                450
@@ -198,8 +198,9 @@
 #define CONV_TIMEOUT_MIN_MS     5000  // 服务端动态窗口的端侧安全下限
 #define CONV_TIMEOUT_MAX_MS    30000  // 服务端动态窗口的端侧安全上限
 #define FOLLOWUP_GUARD_MS      180    // 只屏蔽扬声器的最后一点余音
-#define ECHO_TAIL_VOICE_PEAK_MIN 180  // 播放后新一轮必须有当前真实声能才可起句
-#define ECHO_TAIL_VOICE_RMS_MIN   70
+#define ECHO_TAIL_VOICE_PEAK_MIN 150  // 播放后新一轮必须有当前真实声能才可起句
+#define ECHO_TAIL_VOICE_RMS_MIN   55  // 低于真人近讲，高于实测回声尾音 98/26
+#define ECHO_LIVE_ENERGY_HOLD_MS 800  // 允许异步 neural VAD 比原始声能晚到
 #define VOICE_START_FRAMES     3      // 约 96ms 连续人声才确认开始
 #define MIN_VOICE_FRAMES       5      // 少于约 160ms 视为短促噪声
 #define MAX_CONSEC_ERRORS 2    // 连续多次未识别/服务器错误（如背景音乐被当语音）→ 回待唤醒

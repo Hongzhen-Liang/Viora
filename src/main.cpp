@@ -62,6 +62,7 @@ static uint32_t s_listen_start_ms = 0;
 static uint32_t s_preroll_ms = 0;
 static int32_t s_rec_max_vol = 0;
 static bool s_live_voice_seen = false;
+static uint32_t s_last_live_energy_ms = 0;
 static uint32_t s_uploaded_bytes = 0;
 static uint32_t s_upload_failed_bytes = 0;
 static bool s_rearm_pending = false;
@@ -733,6 +734,7 @@ static void enter_listening(ListenOrigin origin, bool force_preroll,
   s_uploaded_bytes = 0;
   s_upload_failed_bytes = 0;
   s_listen_start_ms = millis();
+  s_last_live_energy_ms = 0;
   s_live_voice_seen = false;
   uint32_t guard_ms = 0;
   if (origin == LISTEN_FROM_FOLLOWUP) {
@@ -893,9 +895,9 @@ static void commit_turn(uint32_t now_ms) {
            static_cast<unsigned long>(clock_drift_ms));
   net_send_json(end_frame);
   set_state(ST_PROCESSING);
-  // 用户说完到服务端返回回复之间给出明确反馈，避免屏幕仍停留在
-  // “我在听…”而让用户误以为还需要继续说话。
-  g_display.setSubtitle("正在思考…");
+  // 不在“说完→服务端首包”的关键窗口同步刷整屏。
+  // set_state() 已切换 Thinking 视觉状态；整屏刷新会阻塞
+  // WebSocket 收包，实测会把已经生成的回答再推迟约 1–2s。
 
   Serial.printf(
       ">>> 自动断句：录音=%lums 人声帧=%lu 句尾静音=%lums "
@@ -1082,13 +1084,9 @@ static void on_server_text(const char *type, const char *user,
     speech_async_reset();
     g_audio.ringClear();
     g_audio.markTtsStart();
-    if (reply[0] != '\0') {
-      g_display.beginTimedSubtitles(reply);
-      s_subtitle_stream_started = true;
-    } else {
-      // 暂时保留“正在思考…”，等待首个 subtitle_cue。
-      g_display.startSpeaking();
-    }
+    // 不在 tts_start 回调里刷整屏：先让 PCM 立即进入播放
+    // 缓冲。对话期间屏幕保留静态状态，避免影响首音和抢话。
+    s_subtitle_stream_started = reply[0] != '\0';
   } else if (strcmp(type, "subtitle_cue") == 0) {
     if (!accept_server_event(type, s_state == ST_PLAYING)) return;
     // 1.5s 后若已启用完整文本兜底，本轮就固定使用该模式，避免迟到的
@@ -1669,9 +1667,9 @@ void loop() {
   const bool any_vad_available = have_afe || kws_vad_ready;
   const bool neural_speech = (have_afe && is_speech) || kws_vad_speech;
   // AFE fetch 是异步的：播放结束后队列里可能滞留数秒
-  // 的扬声器尾音判定。新一轮在真正起句前不停止录音/上传，
-  // 但 neural speech 必须同时有当前的真实声能：用户立即接话
-  // 仍可穿透，已经播完的确认音/回答则不会自己开新轮。
+  // 的扬声器尾音，真人的 neural 判定也可能比原始声能晚到。
+  // 因此保留一个短期“真实声能凭证”：用户语音可与稍晚的
+  // neural 结果配对，纯回声则没有这份凭证，不能自己开新轮。
   const bool after_speaker_playback =
       s_state == ST_LISTENING &&
       (s_listen_origin == LISTEN_FROM_WAKE_ACK ||
@@ -1679,10 +1677,15 @@ void loop() {
   const bool live_energy_in_echo_tail =
       vol_l >= ECHO_TAIL_VOICE_PEAK_MIN &&
       g_audio.captureRms() >= ECHO_TAIL_VOICE_RMS_MIN;
+  const uint32_t evidence_now = millis();
+  if (after_speaker_playback && live_energy_in_echo_tail) {
+    s_last_live_energy_ms = evidence_now;
+  }
+  const bool recent_live_energy =
+      s_last_live_energy_ms != 0 &&
+      evidence_now - s_last_live_energy_ms <= ECHO_LIVE_ENERGY_HOLD_MS;
   const bool neural_speech_for_turn =
-      neural_speech &&
-      (!after_speaker_playback || s_turn.speech_started() ||
-       live_energy_in_echo_tail);
+      neural_speech && (!after_speaker_playback || recent_live_energy);
 #if ENABLE_VAD_DEBUG
   if (s_state == ST_LISTENING ||
       (s_state == ST_WAKE_ACK && !s_ack_playing)) {
