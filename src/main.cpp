@@ -718,9 +718,8 @@ static void enter_listening(ListenOrigin origin, bool force_preroll,
   // speaker-echo decision leak into the first silent frame after playback.
   wake_word.reset();
   set_state(ST_LISTENING);
-  // 不在进入聆听的声学关键路径刷新整屏：实测会造成
-  // 约 1–2s 采音缺口。set_state() 已立即切换 Listening 表情，
-  // 本地确认音则提供更直接的听觉反馈。
+  // 已在待机页时，set_state() 只建立一次对话气泡；从上一轮对话续听
+  // 则保持局部刷新，避免在首字采集期间重复刷整屏。
   s_pending_reply = "";
   s_listen_origin = origin;
   s_listen_speech.reset();
@@ -1041,7 +1040,7 @@ static void on_server_text(const char *type, const char *user,
       return;
     }
     Serial.printf(">>> 你说: %s\n", user);
-    Serial.printf(">>> Vesper: %s\n", reply);
+    Serial.printf(">>> 小芯: %s\n", reply);
     s_pending_reply = reply;
     s_consec_errors = 0;
     if (pcm_offset != 0) {
@@ -1084,9 +1083,13 @@ static void on_server_text(const char *type, const char *user,
     speech_async_reset();
     g_audio.ringClear();
     g_audio.markTtsStart();
-    // 不在 tts_start 回调里刷整屏：先让 PCM 立即进入播放
-    // 缓冲。对话期间屏幕保留静态状态，避免影响首音和抢话。
+    // 不在 WebSocket 回调里同步刷整屏：首段字幕先进入 offset=0
+    // 的时间轴队列，由主循环在播放态绘制一次气泡。这样网络回调能
+    // 立即返回继续收 PCM，同时不会因为只置标志而把字幕永久吞掉。
     s_subtitle_stream_started = reply[0] != '\0';
+    if (s_subtitle_stream_started) {
+      g_display.queueTimedSubtitle(reply, 0);
+    }
   } else if (strcmp(type, "subtitle_cue") == 0) {
     if (!accept_server_event(type, s_state == ST_PLAYING)) return;
     // 1.5s 后若已启用完整文本兜底，本轮就固定使用该模式，避免迟到的
@@ -1148,7 +1151,7 @@ static void on_net_audio(const uint8_t *data, size_t len) {
 
 // 启动横幅：反映硬件配置与实际初始化结果
 static void print_hardware_banner(bool sensors_ok, bool audio_ok) {
-  Serial.println("========== Vesper Hardware ==========");
+  Serial.println("========== 小芯植物硬件 ==========");
   Serial.println("ESP32-S3 Ready");
   Serial.println("I2C:");
   Serial.printf("SDA GPIO%d\n", I2C_SDA_PIN);
@@ -1421,10 +1424,14 @@ void loop() {
     g_display.setSubtitle(s_pending_reply.c_str());
     g_display.startSpeaking();
   }
-  // ST7305 全帧刷新会占用主循环；在聆听/播放期间跑表情
-  // 动画会直接造成采音时钟缺口、回声积压和抢话盲区。对话期间
-  // 保留状态切换时的静态画面，只在 IDLE 刷动画；语音实时性优先。
+  // 待机可低频更新整屏表情；对话态只推进气泡头部状态或时间轴字幕。
+  // “正在听/思考中”的局部动画不会再制造整屏刷新导致的采音缺口。
   if (s_state == ST_IDLE) {
+    g_display.loop(false, g_audio.playbackPositionBytes());
+  } else if (s_state == ST_PLAYING && s_subtitle_stream_started) {
+    g_display.loop(true, g_audio.playbackPositionBytes());
+  } else if (s_state == ST_WAKE_ACK || s_state == ST_LISTENING ||
+             s_state == ST_PROCESSING) {
     g_display.loop(false, g_audio.playbackPositionBytes());
   }
 
@@ -1711,7 +1718,7 @@ void loop() {
   if (s_state == ST_WAKE_ACK && !s_ack_playing) {
     // 先越过 KWS 命中时残留的唤醒词尾音。若已看到明确静音，后续 2 帧
     // 即视作新开口；若用户一口气说完整句而没有静音，则需更长的持续语音
-    // 才直进聆听，避免仅凭 "Vesper" 尾音误上传一个空唤醒轮。
+    // 才直进聆听，避免仅凭唤醒词尾音误上传一个空唤醒轮。
     const uint32_t ack_now = millis();
     const uint32_t ack_elapsed = ack_now - s_wake_ack_start_ms;
     // 异步 AFE 尚未产出且原始能量仍高时只是“未知”，不能误当成

@@ -9,7 +9,10 @@ void ota_init(bool core_health_ok);
 // 只在对话空闲时传 idle=true；检查、下载和安装均由用户分步确认，
 // 且只会在空闲状态下执行。
 void ota_loop(bool idle);
+// 设置页的显式检查可以短暂释放语音 TLS；后台提示/定时检查绝不能
+// 为了 OTA 主动拆掉在线语音链路。
 void ota_request_check();
+void ota_request_background_check();
 void ota_request_download();
 void ota_request_install();
 

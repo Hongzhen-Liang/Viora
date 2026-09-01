@@ -25,6 +25,9 @@ constexpr uint32_t kSensingExpressionFrameMs = 650;
 constexpr uint32_t kListeningExpressionFrameMs = 1800;
 constexpr uint32_t kThinkingExpressionFrameMs = 900;
 constexpr uint32_t kSpeakingExpressionFrameMs = 1500;
+// 状态文字在气泡头部做轻量刷新。降低刷新频率既保留“活着”的反馈，
+// 也避免软件 SPI 在收音关键路径里占用过多时间。
+constexpr uint32_t kLiveStatusFrameMs = 820;
 constexpr uint32_t kBindingQrDurationMs = 120000;
 constexpr uint8_t kBindingQrScale = 3;
 constexpr uint16_t kExpressionRightMargin = 20;
@@ -167,6 +170,22 @@ size_t utf8CharBytes(uint8_t lead) {
   return 1;
 }
 
+const char *visualStateLabel(DisplayVisualState state) {
+  switch (state) {
+    case DisplayVisualState::kSensing:
+      return "感知中";
+    case DisplayVisualState::kListening:
+      return "正在听";
+    case DisplayVisualState::kThinking:
+      return "思考中";
+    case DisplayVisualState::kSpeaking:
+      return "回答中";
+    case DisplayVisualState::kIdle:
+    default:
+      return "小芯";
+  }
+}
+
 }  // namespace
 
 DisplayManager g_display;
@@ -185,8 +204,28 @@ bool DisplayManager::begin() {
 
 void DisplayManager::setVisualState(DisplayVisualState state) {
   if (visual_state_ == state) return;
+  const bool was_idle_screen = idle_mode_;
   visual_state_ = state;
   last_expression_render_ms_ = millis();
+  // 状态切换只局部更新气泡头部。相比 renderPage()/sendBuffer() 的整屏
+  // 刷新，这个区域约占全屏 2%，可以在唤醒、断句等声学关键路径立即
+  // 给出反馈，而不会阻塞收音和 WebSocket。
+  if (ready_ && state != DisplayVisualState::kIdle &&
+      !binding_qr_active_) {
+    if (was_idle_screen) {
+      // 从待机第一次被唤醒时先建立完整的对话气泡；否则只画气泡头部
+      // 会把状态文字叠到待机仪表盘上。后续状态切换继续走局部刷新。
+      idle_mode_ = false;
+      timed_mode_ = false;
+      timed_cue_count_ = 0;
+      line_count_ = 0;
+      page_ = 0;
+      page_count_ = 1;
+      renderPage();
+    } else {
+      renderLiveStatus();
+    }
+  }
 }
 
 void DisplayManager::showIdleDashboard(float temperature, float humidity,
@@ -480,10 +519,20 @@ void DisplayManager::loop(bool speaking, uint32_t playback_position_bytes) {
     return;
   }
 
-  // The new artwork is a small, low-cost animation system. Re-render only
-  // when the current expression changes so the LCD and the audio loop stay
-  // independent.
-  if (animated_screen_) {
+  // 对话阶段用气泡头部的局部状态提供持续反馈，不刷新整张角色画面。
+  // 唤醒/聆听/思考期间每次只发送很小的 tile 区域，避免为了动画阻塞
+  // 麦克风采样和 WebSocket 收包。
+  if (!speaking && visual_state_ != DisplayVisualState::kIdle &&
+      visual_state_ != DisplayVisualState::kSpeaking) {
+    const uint32_t now = millis();
+    if (now - last_live_status_render_ms_ >= kLiveStatusFrameMs) {
+      renderLiveStatus();
+    }
+    return;
+  }
+
+  // 待机表情可以低频整屏更新；播放期间只允许字幕 cue 驱动刷新。
+  if (animated_screen_ && !speaking) {
     const uint32_t now = millis();
     if (now - last_expression_render_ms_ >= expressionFrameMs()) {
       last_expression_render_ms_ = now;
@@ -525,6 +574,50 @@ void DisplayManager::loop(bool speaking, uint32_t playback_position_bytes) {
   }
 }
 
+void DisplayManager::renderLiveStatus() {
+  if (!ready_ || binding_qr_active_ ||
+      visual_state_ == DisplayVisualState::kIdle) {
+    return;
+  }
+
+  const char *label = visualStateLabel(visual_state_);
+
+  const uint8_t dot_count =
+      static_cast<uint8_t>((millis() / kLiveStatusFrameMs) % 3U) + 1U;
+  // 逻辑坐标区域为气泡头部 x=29..143, y=50..73。在 U8G2_R1 下映射
+  // 到 buffer 的 tile 行 2..18。ST7305 的 U8X8 驱动会固定按整行读取 4 个
+  // 12-bit 显示块，不能使用通用 updateDisplayArea（它会按小 tile
+  // 宽度传入指针，驱动却继续越界读取）。这里逐行提交完整 38-tile
+  // 行，既安全又只传输气泡头部覆盖的 17/50 行。
+  constexpr uint16_t bubble_x = 20;
+  constexpr uint16_t bubble_y = 42;
+  constexpr uint16_t bubble_w = 132;
+  // 只擦气泡内层，保留外框和圆角，避免状态动画让气泡边缘闪烁。
+  s_lcd.setDrawColor(0);
+  s_lcd.drawBox(bubble_x + 9, bubble_y + 8, bubble_w - 18, 24);
+  s_lcd.setDrawColor(1);
+  s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
+  s_lcd.drawUTF8(bubble_x + 18, bubble_y + 23, label);
+  s_lcd.setFont(u8g2_font_6x10_tf);
+  char dots[4] = {};
+  for (uint8_t i = 0; i < dot_count; ++i) dots[i] = '.';
+  s_lcd.drawStr(bubble_x + 18 + s_lcd.getUTF8Width(label) + 2,
+                bubble_y + 23, dots);
+  s_lcd.drawStr(bubble_x + bubble_w - 37, bubble_y + 23, "01");
+  s_lcd.drawHLine(bubble_x + 18, bubble_y + 31, bubble_w - 36);
+  uint8_t *buffer = s_lcd.getBufferPtr();
+  constexpr uint8_t kBufferTileWidth = 38;
+  constexpr uint8_t kBufferTileRowStart = 2;
+  constexpr uint8_t kBufferTileRowCount = 17;
+  constexpr size_t kTileRowBytes = kBufferTileWidth * 8;
+  for (uint8_t row = 0; row < kBufferTileRowCount; ++row) {
+    u8x8_DrawTile(s_lcd.getU8x8(), 0, kBufferTileRowStart + row,
+                  kBufferTileWidth,
+                  buffer + (kBufferTileRowStart + row) * kTileRowBytes);
+  }
+  last_live_status_render_ms_ = millis();
+}
+
 void DisplayManager::renderBindingQrExpired() {
   idle_mode_ = true;
   last_idle_render_ms_ = millis();
@@ -542,25 +635,12 @@ void DisplayManager::renderPage() {
   s_lcd.drawXBMP(image_x, kExpressionTop, ORCHID_EXPRESSION_WIDTH,
                  ORCHID_EXPRESSION_HEIGHT, expressionBitmap());
 
-  // A quiet frame and tiny status label make the illustration feel like a
-  // designed product surface instead of a debug screen.
+  // A quiet frame and tiny brand label make the illustration feel like a
+  // designed product surface instead of a debug screen. The live state lives
+  // in the speech bubble below, next to the text it describes.
   s_lcd.drawRFrame(10, 8, 380, 216, 12);
   s_lcd.setFont(u8g2_font_helvB12_tf);
   s_lcd.drawStr(20, 26, "VIORA");
-  s_lcd.setFont(u8g2_font_6x10_tf);
-  const char *state_label = "READY";
-  if (visual_state_ == DisplayVisualState::kSensing) {
-    state_label = "SENSING";
-  } else if (visual_state_ == DisplayVisualState::kListening) {
-    state_label = "LISTENING";
-  } else if (visual_state_ == DisplayVisualState::kThinking) {
-    state_label = "THINKING";
-  } else if (visual_state_ == DisplayVisualState::kSpeaking) {
-    state_label = "SPEAKING";
-  }
-  const uint16_t state_width = s_lcd.getStrWidth(state_label);
-  const uint16_t state_x = 146 > state_width ? 146 - state_width : 86;
-  s_lcd.drawStr(state_x, 26, state_label);
   s_lcd.drawHLine(20, 34, 126);
 
   // The speech bubble is the visual hero of the conversation screen. A
@@ -579,10 +659,20 @@ void DisplayManager::renderPage() {
   s_lcd.setDrawColor(1);
   s_lcd.drawRFrame(bubble_x, bubble_y, bubble_w, bubble_h, 16);
 
-  // A compact editorial label makes the bubble feel intentional rather than
-  // like a generic debug dialog.
+  // 状态位放在气泡头部：用户看字幕时能同时知道设备正在听、思考还是
+  // 回答，不必再扫视屏幕顶部的独立胶囊。
+  s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
+  const char *label = visualStateLabel(visual_state_);
+  s_lcd.drawUTF8(bubble_x + 18, bubble_y + 23, label);
   s_lcd.setFont(u8g2_font_6x10_tf);
-  s_lcd.drawStr(bubble_x + 18, bubble_y + 23, "VOICE NOTE");
+  if (visual_state_ != DisplayVisualState::kIdle) {
+    const uint8_t dot_count =
+        static_cast<uint8_t>((millis() / kLiveStatusFrameMs) % 3U) + 1U;
+    char dots[4] = {};
+    for (uint8_t i = 0; i < dot_count; ++i) dots[i] = '.';
+    s_lcd.drawStr(bubble_x + 18 + s_lcd.getUTF8Width(label) + 2,
+                  bubble_y + 23, dots);
+  }
   s_lcd.drawStr(bubble_x + bubble_w - 37, bubble_y + 23, "01");
   s_lcd.drawHLine(bubble_x + 18, bubble_y + 31, bubble_w - 36);
   s_lcd.drawDisc(bubble_x + bubble_w - 23, bubble_y + 19, 2);

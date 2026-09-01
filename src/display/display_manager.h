@@ -50,6 +50,7 @@ class DisplayManager {
   void renderPage();
   void renderIdleDashboard();
   void renderSensorStrip();
+  void renderLiveStatus();
   void renderBindingQrExpired();
   uint32_t currentPageDurationMs() const;
   const uint8_t *expressionBitmap() const;
@@ -77,6 +78,7 @@ class DisplayManager {
   DisplayNetworkState idle_network_state_ = DisplayNetworkState::kOffline;
   uint32_t last_idle_render_ms_ = 0;
   uint32_t last_expression_render_ms_ = 0;
+  uint32_t last_live_status_render_ms_ = 0;
   DisplayVisualState visual_state_ = DisplayVisualState::kIdle;
   bool animated_screen_ = false;
   String lines_[kMaxLines];

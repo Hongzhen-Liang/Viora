@@ -215,8 +215,9 @@ static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
         if (s_cb.on_text) s_cb.on_text("no_speech", "", "", "", "", 0);
       } else if (strcmp(t, "ota_available") == 0) {
         // WebSocket 只负责催更；URL、摘要和签名仍只从固定
-        // HTTPS manifest 取得，不信任消息里任意下发的链接。
-        ota_request_check();
+        // HTTPS manifest 取得，不信任消息里任意下发的链接。后台催更只做
+        // 延迟检查，不能为了 OTA 拆掉当前这条语音 WebSocket。
+        ota_request_background_check();
       } else {
         Serial.printf("[WS] 收到: %.*s\n", (int)length, payload);
       }
@@ -263,9 +264,12 @@ static void start_websocket() {
   s_ws.begin(SERVER_HOST, SERVER_PORT, SERVER_PATH);
 #endif
   s_ws.setReconnectInterval(3000);
-  // 心跳放宽：长 TTS 流播放期间偶尔的收包停顿不应直接判死断连。
-  // 15s ping / 10s 超时 / 连续 4 次才断开（约 40s 无 pong）。
-  s_ws.enableHeartbeat(15000, 10000, 4);
+  // 心跳放宽：ESP32 在 TLS 音频收发、ST7305 刷新和 Wi-Fi 调度同时
+  // 发生时，pong 可能排在二进制帧后面。旧的 15s/10s/4 会在约 40s
+  // 无意中自断，表现为服务端正常、设备却回到待唤醒。保留主动 ping，
+  // 但给每次 pong 30s，并允许 8 次连续超时（约 4 分钟）才重连，
+  // 让短暂的显示/网络抖动不打断多轮对话。
+  s_ws.enableHeartbeat(15000, 30000, 8);
   // 设备唯一标识：eFuse 出厂 MAC（每颗芯片唯一，掉电/重刷不丢）。
   // 服务端用它区分每台设备的对话历史（history_store 按 device_id 键存），
   // 多台设备即使共用同一 API Key 也各有一份独立历史。

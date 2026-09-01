@@ -278,8 +278,8 @@ void AudioManager::playDrain() {
   const uint32_t rebuffer_bytes =
       (SR_SAMPLE_RATE * 2U * PLAY_REBUFFER_MS) / 1000U;
 
-  // 应用缓冲短暂触底可能只是 WS 包恰好处在两次 loop 之间。
-  // 连续一个播放帧仍为空才认定真实欠载。
+  // 应用缓冲触底时，I2S DMA 仍可能保留约 192ms 的待播数据；
+  // 再给网络抖动留出余量，否则会把正常的 WS 到包间隙误判为欠载。
   if (started && n == 0 && !end_seen) {
     bool underrun = false;
     uint32_t underrun_count = 0;

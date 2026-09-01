@@ -38,6 +38,7 @@ Preferences s_prefs;
 bool s_initialized = false;
 bool s_busy = false;
 bool s_manual_check = false;
+bool s_background_check = false;
 bool s_download_requested = false;
 bool s_install_requested = false;
 bool s_pending_verify = false;
@@ -528,14 +529,38 @@ void ota_loop(bool idle) {
     return;
   }
   const uint32_t now = millis();
-  if (!s_manual_check && !elapsed(now, s_next_check_ms)) return;
+  const bool automatic_due = elapsed(now, s_next_check_ms);
+  if (!s_manual_check && !s_background_check && !automatic_due) return;
+
+  // manifest HTTPS 与 WSS 会各占一套 mbedTLS 内存。过去后台检查会先主动
+  // disconnect WSS，正好可能与刚命中的唤醒词竞态：下半轮主循环进入聆听，
+  // 下一轮才收到断线事件，整段对话随即被取消。后台维护永远不应打断用户；
+  // 只有设置页里由用户明确发起的检查才允许短暂释放 WSS。
+  // 不能只看 net_connected()：WSS TLS 握手期间该值仍为 false，但 mbedTLS
+  // 已经在占用内存。只要 WiFi 在线，语音客户端就可能正在连接/重连；
+  // 后台 OTA 一律避让。需要检查更新时仍可从设置页显式发起。
+  if (!s_manual_check && net_wifi_connected()) {
+    const bool background_requested = s_background_check;
+    s_background_check = false;
+    s_next_check_ms = now + OTA_CONNECTED_DEFER_MS;
+    if (automatic_due || background_requested) {
+      Serial.println("[OTA] 后台检查已推迟：Wi-Fi 在线，语音服务可能正在连接/重连");
+    }
+    return;
+  }
+
   s_manual_check = false;
+  s_background_check = false;
   net_release_tls_for_ota();
   check_now();
 }
 
 void ota_request_check() {
   if (config_ready()) s_manual_check = true;
+}
+
+void ota_request_background_check() {
+  if (config_ready()) s_background_check = true;
 }
 
 void ota_request_download() {
