@@ -1532,7 +1532,7 @@ void loop() {
   // 播放态提交真实扬声器参考，聆听态提交零参考；两者都由独立 AFE
   // 工作任务处理。主循环只轮询结果，所以 esp-sr fetch 不会阻塞
   // WebSocket/TTS。聆听态先由本地 VAD 判断是否真的开口，确认后才上传
-  // AFE 输出；等待 follow-up 时只保留本地短前置，避免静音持续占满 TLS。
+  // 音频；默认上传原始 MIC1，AFE 输出仅用于本地 VAD/AEC 判定。
   static int16_t afe_out[512];
   bool is_speech = false;
   bool have_afe = false;
@@ -1552,21 +1552,14 @@ void loop() {
       have_afe = true;
       if (afe_woken && s_state == ST_IDLE) woken = true;
       if (s_state == ST_LISTENING) {
+#if ASR_UPLOAD_AFE_OUTPUT
         const int enhanced_samples = speech_fetch_size();
-        if (s_listen_audio_started) {
-          const uint32_t enhanced_bytes =
-              enhanced_samples * sizeof(int16_t);
-          if (net_send_audio(reinterpret_cast<const uint8_t *>(afe_out),
-                             enhanced_bytes)) {
-            s_uploaded_bytes += enhanced_bytes;
-          } else {
-            s_upload_failed_bytes += enhanced_bytes;
-          }
-        } else {
+        if (!s_listen_audio_started) {
           // 只保留最近约 AUDIO_PREROLL_MS 的 AFE 音频。检测到人声后由
           // send_ring_audio() 一次性发出，保证句首不会因门控而丢失。
           g_audio.ringPush(afe_out, enhanced_samples);
         }
+#endif
       }
 #if ENABLE_BARGE_IN
       if (!playback_afe) continue;
@@ -1809,9 +1802,23 @@ void loop() {
       set_state(ST_IDLE);
       Serial.println(">>> 录音中断（服务器断开）");
     } else {
-      // AFE 工作任务在上方以完整输出帧上传经 AEC/NS/AGC 的 PCM；这里
-      // 只保留原始峰值用于诊断。Whisper 不再直接接收噪声较大的裸麦克风，
-      // 唤醒/打断首字仍由 audio_start 后的原始前置环负责兜底。
+#if !ASR_UPLOAD_AFE_OUTPUT
+      // AFE 只作本地 VAD/AEC 判定；服务端 ASR 使用原始 MIC1。未确认
+      // 开口前先放入短环形缓存，确认后一次性发送，避免静音灌入网络，
+      // 同时保留句首。确认后每个 I2S 采音帧只发送一次，避免 AFE 异步
+      // fetch 队列积压导致同一块原始 PCM 被重复上传。
+      if (s_listen_audio_started) {
+        const uint32_t raw_bytes = frames * sizeof(int16_t);
+        if (net_send_audio(reinterpret_cast<const uint8_t *>(pcm), raw_bytes)) {
+          s_uploaded_bytes += raw_bytes;
+        } else {
+          s_upload_failed_bytes += raw_bytes;
+        }
+      } else {
+        g_audio.ringPush(pcm, frames);
+      }
+#endif
+      // 无论上传哪一路，原始峰值都保留用于诊断和本地端点。
       if (vol_l > s_rec_max_vol) s_rec_max_vol = vol_l;
 
 #if ENABLE_VAD_DEBUG

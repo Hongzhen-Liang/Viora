@@ -231,6 +231,11 @@
 // 去掉真静音，带宽代价每次约 13KB。
 #define ASR_SUFFIX_PADDING_MS  1000
 
+// ASR 上传源：ESP-SR 仍持续负责唤醒、VAD、AEC 打断；服务端 ASR 默认接收
+// 原始 MIC1 PCM，避免 AFE 的单麦 AEC/降噪在近讲或低音量时把字音压没。
+// 设为 1 可恢复上传 AFE 增强输出，便于现场 A/B 对比。
+#define ASR_UPLOAD_AFE_OUTPUT  0
+
 // 播放音量（LLM operation: volume_up / volume_down 分发到这里）
 #define VOLUME_DEFAULT 1.0f // 默认满音量；保持 PCM 满幅但不额外数字放大
 #define VOLUME_STEP 0.2f   // 每档音量步进
