@@ -264,12 +264,11 @@ static void start_websocket() {
   s_ws.begin(SERVER_HOST, SERVER_PORT, SERVER_PATH);
 #endif
   s_ws.setReconnectInterval(3000);
-  // 心跳放宽：ESP32 在 TLS 音频收发、ST7305 刷新和 Wi-Fi 调度同时
-  // 发生时，pong 可能排在二进制帧后面。旧的 15s/10s/4 会在约 40s
-  // 无意中自断，表现为服务端正常、设备却回到待唤醒。保留主动 ping，
-  // 但给每次 pong 30s，并允许 8 次连续超时（约 4 分钟）才重连，
-  // 让短暂的显示/网络抖动不打断多轮对话。
-  s_ws.enableHeartbeat(15000, 30000, 8);
+  // 设备经由群晖/NAS 反向代理连接 Mac；代理可能在 5~10s 没有
+  // 应用数据时清理 WebSocket。聆听阶段若没有人说话，PCM 发送也可能
+  // 暂停，所以心跳必须短于代理的空闲窗口。pong 超时仍留出余量，
+  // 连续 3 次失败才重连，避免一次 Wi-Fi 抖动打断多轮对话。
+  s_ws.enableHeartbeat(3000, 10000, 3);
   // 设备唯一标识：eFuse 出厂 MAC（每颗芯片唯一，掉电/重刷不丢）。
   // 服务端用它区分每台设备的对话历史（history_store 按 device_id 键存），
   // 多台设备即使共用同一 API Key 也各有一份独立历史。
@@ -297,10 +296,10 @@ static void start_websocket() {
   }
   s_target_ready = true;
 #if SERVER_TLS_ENABLED
-  Serial.printf("[WS] 目标服务器: wss://%s:%d%s（心跳 15s，TLS 已验证）\n",
+  Serial.printf("[WS] 目标服务器: wss://%s:%d%s（心跳 3s，TLS 已验证）\n",
                 SERVER_HOST, SERVER_PORT, SERVER_PATH);
 #else
-  Serial.printf("[WS] 目标服务器: ws://%s:%d%s（心跳 15s，明文模式）\n",
+  Serial.printf("[WS] 目标服务器: ws://%s:%d%s（心跳 3s，明文模式）\n",
                 SERVER_HOST, SERVER_PORT, SERVER_PATH);
 #endif
 }

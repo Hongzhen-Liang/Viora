@@ -60,6 +60,9 @@ static WakeAckGate s_wake_ack_gate(kWakeAckGateConfig);
 static uint32_t s_state_since_ms = 0;
 static uint32_t s_listen_start_ms = 0;
 static uint32_t s_preroll_ms = 0;
+// 聆听态先在本地保留短前置，只有确认真实人声后才开始上传。这样 follow-up
+// 等待用户开口时不会持续向 NAS/TLS 连接灌入静音 PCM。
+static bool s_listen_audio_started = false;
 static int32_t s_rec_max_vol = 0;
 static bool s_live_voice_seen = false;
 static uint32_t s_last_live_energy_ms = 0;
@@ -730,6 +733,7 @@ static void enter_listening(ListenOrigin origin, bool force_preroll,
   reset_barge_evidence();
   s_rec_max_vol = 0;
   s_preroll_ms = 0;
+  s_listen_audio_started = false;
   s_uploaded_bytes = 0;
   s_upload_failed_bytes = 0;
   s_listen_start_ms = millis();
@@ -1527,8 +1531,8 @@ void loop() {
 
   // 播放态提交真实扬声器参考，聆听态提交零参考；两者都由独立 AFE
   // 工作任务处理。主循环只轮询结果，所以 esp-sr fetch 不会阻塞
-  // WebSocket/TTS。聆听仍上传原始 PCM，保持样本时钟完整；AFE 输出
-  // 负责 WakeNet 与神经 VAD；后续可在带时间戳/尾帧 flush 后再切增强 PCM 上传。
+  // WebSocket/TTS。聆听态先由本地 VAD 判断是否真的开口，确认后才上传
+  // AFE 输出；等待 follow-up 时只保留本地短前置，避免静音持续占满 TLS。
   static int16_t afe_out[512];
   bool is_speech = false;
   bool have_afe = false;
@@ -1548,13 +1552,20 @@ void loop() {
       have_afe = true;
       if (afe_woken && s_state == ST_IDLE) woken = true;
       if (s_state == ST_LISTENING) {
-        const uint32_t enhanced_bytes =
-            speech_fetch_size() * sizeof(int16_t);
-        if (net_send_audio(reinterpret_cast<const uint8_t *>(afe_out),
-                           enhanced_bytes)) {
-          s_uploaded_bytes += enhanced_bytes;
+        const int enhanced_samples = speech_fetch_size();
+        if (s_listen_audio_started) {
+          const uint32_t enhanced_bytes =
+              enhanced_samples * sizeof(int16_t);
+          if (net_send_audio(reinterpret_cast<const uint8_t *>(afe_out),
+                             enhanced_bytes)) {
+            s_uploaded_bytes += enhanced_bytes;
+          } else {
+            s_upload_failed_bytes += enhanced_bytes;
+          }
         } else {
-          s_upload_failed_bytes += enhanced_bytes;
+          // 只保留最近约 AUDIO_PREROLL_MS 的 AFE 音频。检测到人声后由
+          // send_ring_audio() 一次性发出，保证句首不会因门控而丢失。
+          g_audio.ringPush(afe_out, enhanced_samples);
         }
       }
 #if ENABLE_BARGE_IN
@@ -1851,6 +1862,13 @@ void loop() {
       const bool turn_speech_smoothed =
           vad_smooth_update(turn_speech, strong_neural_start);
       const TurnEvent event = s_turn.update(now, turn_speech_smoothed);
+      if (!s_listen_audio_started && s_turn.speech_started()) {
+        s_listen_audio_started = true;
+        send_ring_audio();
+        Serial.printf(
+            ">>> 已确认人声，开始上传（前置音频=%lums）...\n",
+            static_cast<unsigned long>(s_preroll_ms));
+      }
       if (event == TURN_EVENT_SPEECH_STARTED) {
         Serial.printf(
             ">>> 检测到人声（neural=%d fallback_energy=%d），等待自然句尾...\n",
