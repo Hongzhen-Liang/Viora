@@ -85,7 +85,7 @@
 // 和服务器根 CA 后才会启用。固件还会校验 RSA-3072 签名。
 // ============================================================
 #define FIRMWARE_VERSION       "1.0.19"
-#define FIRMWARE_BUILD         20
+#define FIRMWARE_BUILD         21
 #define FIRMWARE_HARDWARE      "waveshare-rlcd-42-v1"
 #define FIRMWARE_MODEL_VERSION 1
 #if __has_include("ota_secrets.h") || __has_include("secrets.h")
@@ -235,6 +235,11 @@
 // 原始 MIC1 PCM，避免 AFE 的单麦 AEC/降噪在近讲或低音量时把字音压没。
 // 设为 1 可恢复上传 AFE 增强输出，便于现场 A/B 对比。
 #define ASR_UPLOAD_AFE_OUTPUT  0
+
+// 音频上传策略：默认先在 PSRAM 中完整收音，检测到句尾后再批量上传。
+// 这样 TLS 发送不会在用户说话期间阻塞 WebSocket 心跳；设为 1 可恢复
+// 实时上传（仅用于现场对比，不建议作为长期配置）。
+#define ASR_STREAM_AUDIO       0
 
 // 播放音量（LLM operation: volume_up / volume_down 分发到这里）
 #define VOLUME_DEFAULT 1.0f // 默认满音量；保持 PCM 满幅但不额外数字放大

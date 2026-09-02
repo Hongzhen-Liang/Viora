@@ -27,6 +27,14 @@ class AudioManager {
   int  ringSize();
   void ringClear();
 
+  // ---- 本地整句录音缓存（PSRAM）----
+  // 聆听期间先缓存原始 MIC1，端点确定后再交给网络层批量上传，
+  // 避免实时 TLS 发送阻塞 WebSocket 心跳。
+  void recordClear();
+  bool recordAppend(const int16_t *src, int n);
+  const int16_t *recordData() const;
+  size_t recordSamples() const;
+
   // ---- TTS 播放（ES8311）----
   void playPush(const uint8_t *src, uint32_t n);  // 线程安全（WS 回调线程调用）
   void playDrain();        // 播放任务的一次喂数；任务创建失败时由主循环兜底

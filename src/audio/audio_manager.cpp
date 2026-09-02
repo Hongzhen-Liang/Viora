@@ -17,6 +17,13 @@ static int16_t s_pcm[PCM_BUFFER_SIZE];
 static int     s_pcm_head = 0;
 static int     s_pcm_len  = 0;
 
+// 最长录音 15s + 900ms 前置音频，约 510KB，放入 PSRAM。
+static constexpr size_t kRecordCapacitySamples =
+    (static_cast<size_t>(SR_SAMPLE_RATE) *
+     static_cast<size_t>(MAX_REC_MS + AUDIO_PREROLL_MS)) / 1000U;
+static int16_t *s_record_buf = nullptr;
+static size_t s_record_len = 0;
+
 // ---- 播放环形缓冲（WebSocket 回调线程写入，主循环读出） ----
 static uint8_t *s_play_buf  = nullptr;
 static uint32_t s_play_head = 0;
@@ -119,6 +126,15 @@ bool AudioManager::begin() {
   }
 
   s_play_write_mutex = xSemaphoreCreateMutex();
+  s_record_buf = static_cast<int16_t *>(
+      ps_malloc(kRecordCapacitySamples * sizeof(int16_t)));
+  if (s_record_buf) {
+    Serial.printf("[AUDIO] 整句录音缓存 %u KB 已分配(PSRAM)\n",
+                  static_cast<unsigned>(kRecordCapacitySamples *
+                                        sizeof(int16_t) / 1024U));
+  } else {
+    Serial.println("[AUDIO] 警告：整句录音缓存分配失败");
+  }
   if (s_play_buf && s_play_write_mutex) {
     const BaseType_t created = xTaskCreatePinnedToCore(
         [](void *) {
@@ -203,6 +219,35 @@ int AudioManager::ringSize() { return s_pcm_len; }
 void AudioManager::ringClear() {
   s_pcm_head = 0;
   s_pcm_len = 0;
+}
+
+// ============================================================
+// 本地整句录音缓存（PSRAM）
+// ============================================================
+void AudioManager::recordClear() {
+  s_record_len = 0;
+}
+
+bool AudioManager::recordAppend(const int16_t *src, int n) {
+  if (s_record_buf == nullptr || src == nullptr || n <= 0) return false;
+  if (s_record_len >= kRecordCapacitySamples) return false;
+  const size_t available = kRecordCapacitySamples - s_record_len;
+  const size_t count = static_cast<size_t>(n) < available
+                           ? static_cast<size_t>(n)
+                           : available;
+  if (count > 0) {
+    memcpy(s_record_buf + s_record_len, src, count * sizeof(int16_t));
+    s_record_len += count;
+  }
+  return count == static_cast<size_t>(n);
+}
+
+const int16_t *AudioManager::recordData() const {
+  return s_record_buf;
+}
+
+size_t AudioManager::recordSamples() const {
+  return s_record_len;
 }
 
 // ============================================================

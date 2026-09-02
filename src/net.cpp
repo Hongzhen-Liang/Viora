@@ -51,9 +51,9 @@ static uint32_t s_wifi_down_since = 0;
 struct TxFrame {
   uint8_t kind;     // 0=音频 1=JSON
   uint16_t len;
-  uint8_t data[1024];
+  uint8_t data[4096];
 };
-static constexpr int kTxQueueFrames = 40;   // ≈41KB PSRAM，约 1.28s 音频
+static constexpr int kTxQueueFrames = 160;  // ≈640KB PSRAM，覆盖最长整句录音
 static TxFrame *s_tx_queue = nullptr;
 static portMUX_TYPE s_tx_mux = portMUX_INITIALIZER_UNLOCKED;
 static int s_tx_head = 0;
@@ -126,6 +126,13 @@ static void ws_tx_worker(void *) {
       vTaskDelay(pdMS_TO_TICKS(2));
       continue;
     }
+    // audio_end/cancel 可能在该帧出队后清空队列；不要把旧轮次的音频
+    // 插到新轮次的 audio_start 前面。
+    portENTER_CRITICAL(&s_tx_mux);
+    const bool stale = generation != s_tx_generation;
+    if (stale) s_tx_dropped_bytes += frame.len;
+    portEXIT_CRITICAL(&s_tx_mux);
+    if (stale) continue;
     if (s_ws_mutex) xSemaphoreTakeRecursive(s_ws_mutex, portMAX_DELAY);
     const bool ok = frame.kind == 0
                         ? s_ws.sendBIN(frame.data, frame.len)
@@ -315,20 +322,26 @@ void net_init(const NetCallbacks &cb) {
   wifi_connect();
   s_ws.onEvent(on_ws_event);
 
+#if ASR_STREAM_AUDIO
   if (s_tx_queue == nullptr) {
     s_tx_queue = static_cast<TxFrame *>(
         ps_malloc(kTxQueueFrames * sizeof(TxFrame)));
   }
   if (s_tx_queue != nullptr && s_tx_task == nullptr) {
     const BaseType_t created = xTaskCreatePinnedToCore(
-        ws_tx_worker, "ws_tx", 4096, nullptr, 2, &s_tx_task, 0);
+        ws_tx_worker, "ws_tx", 8192, nullptr, 2, &s_tx_task, 0);
     if (created == pdPASS) {
-      Serial.println("[WS] 上行发送任务已启动（队列 40 帧）");
+      Serial.println("[WS] 上行发送任务已启动（队列 160 帧）");
     } else {
       s_tx_task = nullptr;
       Serial.println("[WS] 警告：上行发送任务创建失败，回退主循环直发");
     }
   }
+#else
+  // 默认整句上传不需要后台任务：整句收完后由主循环顺序发送，避免
+  // 发送任务在用户聆听期间持有同一把 WebSocket/TLS 锁。
+  Serial.println("[WS] 整句上传模式：由主循环顺序发送 PCM");
+#endif
 }
 
 // 配网页保存新 WiFi 后调用：游标归零（新网络在候选首位）并立即开始尝试。
@@ -402,9 +415,15 @@ void net_loop() {
   // 该库一次 loop() 只消费一帧，不能只按主采音循环（约 32ms）调用一次。
   // 多次空轮询成本很低；有积压时则可一次清掉服务端的 TTS 预缓冲批次，
   // 也避免 Pong 长时间排在 PCM 后面被客户端自己的心跳误判超时。
-  if (s_ws_mutex) xSemaphoreTakeRecursive(s_ws_mutex, portMAX_DELAY);
-  for (uint8_t i = 0; i < WS_LOOP_PUMP_PASSES; ++i) s_ws.loop();
-  if (s_ws_mutex) xSemaphoreGiveRecursive(s_ws_mutex);
+  // 发送任务里的 TLS write 可能短暂占用 socket 锁。主循环不能无限等锁，
+  // 否则就无法继续处理 Pong，最终把一个可恢复的网络回压变成断线。
+  const bool have_ws_lock =
+      !s_ws_mutex ||
+      xSemaphoreTakeRecursive(s_ws_mutex, pdMS_TO_TICKS(20)) == pdTRUE;
+  if (have_ws_lock) {
+    for (uint8_t i = 0; i < WS_LOOP_PUMP_PASSES; ++i) s_ws.loop();
+    if (s_ws_mutex) xSemaphoreGiveRecursive(s_ws_mutex);
+  }
 }
 
 bool net_connected() {

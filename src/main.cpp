@@ -667,12 +667,17 @@ static void send_ring_audio() {
       if (magnitude > s_rec_max_vol) s_rec_max_vol = magnitude;
     }
     const uint32_t bytes = n * sizeof(int16_t);
+#if ASR_STREAM_AUDIO
     if (net_send_audio(reinterpret_cast<const uint8_t *>(s_ring_scratch),
                        bytes)) {
       s_uploaded_bytes += bytes;
     } else {
       s_upload_failed_bytes += bytes;
     }
+#else
+    // 默认先在 PSRAM 中组成完整录音，避免在用户讲话期间占用 TLS 写锁。
+    g_audio.recordAppend(s_ring_scratch, n);
+#endif
     samples_sent += n;
   }
   s_preroll_ms = static_cast<uint32_t>(samples_sent * 1000ULL / SR_SAMPLE_RATE);
@@ -731,6 +736,7 @@ static void enter_listening(ListenOrigin origin, bool force_preroll,
   s_accept_tts_audio = false;
   s_tts_end_received = false;
   reset_barge_evidence();
+  g_audio.recordClear();
   s_rec_max_vol = 0;
   s_preroll_ms = 0;
   s_listen_audio_started = false;
@@ -837,6 +843,7 @@ static void end_active_session(const char *reason) {
   s_pending_reply = "";
   s_consec_errors = 0;
   reset_barge_evidence();
+  g_audio.recordClear();
 }
 
 static void commit_turn(uint32_t now_ms) {
@@ -871,10 +878,32 @@ static void commit_turn(uint32_t now_ms) {
 
   // 裁剪使用墙钟毫秒，而服务端拿到的是 PCM 样本。两条时间轴
   // 必须先相互印证：如果处理/网络阻塞造成采样丢帧，宁可不裁剪，
-  // 也不能用较长的墙钟静音去裁较短的 PCM。发送已移入独立任务，
-  // 这里按“实际已发出的字节”核算 PCM 时钟。
+  // 也不能用较长的墙钟静音去裁较短的 PCM。
+#if ASR_STREAM_AUDIO
   const uint32_t pcm_ms = static_cast<uint32_t>(
       net_audio_sent_bytes() * 1000ULL / (SR_SAMPLE_RATE * sizeof(int16_t)));
+#else
+  // 默认模式下 PCM 已经完整保存在本地；audio_end 入队前再批量复制到
+  // 网络队列，所以不能用“已经发出”的字节数作为本轮录音长度。
+  const size_t record_samples = g_audio.recordSamples();
+  const uint8_t *record_bytes = reinterpret_cast<const uint8_t *>(
+      g_audio.recordData());
+  const size_t record_len = record_samples * sizeof(int16_t);
+  size_t record_offset = 0;
+  while (record_offset < record_len) {
+    const size_t chunk = (record_len - record_offset) < 4096
+                             ? (record_len - record_offset)
+                             : 4096;
+    if (net_send_audio(record_bytes + record_offset, chunk)) {
+      s_uploaded_bytes += static_cast<uint32_t>(chunk);
+    } else {
+      s_upload_failed_bytes += static_cast<uint32_t>(chunk);
+    }
+    record_offset += chunk;
+  }
+  const uint32_t pcm_ms = static_cast<uint32_t>(
+      record_samples * 1000ULL / SR_SAMPLE_RATE);
+#endif
   const uint32_t wall_audio_ms =
       s_preroll_ms + (now_ms - s_listen_start_ms);
   const uint32_t clock_drift_ms =
@@ -946,6 +975,7 @@ static void on_net_disconnected() {
   s_farewell_pending = false;
   speech_async_reset();
   g_audio.ringClear();
+  g_audio.recordClear();
   g_audio.playDiscard();
 }
 
@@ -1802,11 +1832,10 @@ void loop() {
       set_state(ST_IDLE);
       Serial.println(">>> 录音中断（服务器断开）");
     } else {
+#if ASR_STREAM_AUDIO
+      // AFE 只作本地 VAD/AEC 判定；服务端 ASR 使用原始 MIC1。
 #if !ASR_UPLOAD_AFE_OUTPUT
-      // AFE 只作本地 VAD/AEC 判定；服务端 ASR 使用原始 MIC1。未确认
-      // 开口前先放入短环形缓存，确认后一次性发送，避免静音灌入网络，
-      // 同时保留句首。确认后每个 I2S 采音帧只发送一次，避免 AFE 异步
-      // fetch 队列积压导致同一块原始 PCM 被重复上传。
+      // 实时对比模式：未确认开口前先放入短环形缓存，确认后发送。
       if (s_listen_audio_started) {
         const uint32_t raw_bytes = frames * sizeof(int16_t);
         if (net_send_audio(reinterpret_cast<const uint8_t *>(pcm), raw_bytes)) {
@@ -1817,6 +1846,11 @@ void loop() {
       } else {
         g_audio.ringPush(pcm, frames);
       }
+#endif
+#else
+      // 长期模式：整句先落到 PSRAM，句尾之后才进入 TLS 发送队列。
+      // 这样讲话期间主循环可以持续处理 WebSocket 心跳和服务端下行。
+      g_audio.recordAppend(pcm, frames);
 #endif
       // 无论上传哪一路，原始峰值都保留用于诊断和本地端点。
       if (vol_l > s_rec_max_vol) s_rec_max_vol = vol_l;
@@ -1871,10 +1905,16 @@ void loop() {
       const TurnEvent event = s_turn.update(now, turn_speech_smoothed);
       if (!s_listen_audio_started && s_turn.speech_started()) {
         s_listen_audio_started = true;
+#if ASR_STREAM_AUDIO
         send_ring_audio();
         Serial.printf(
             ">>> 已确认人声，开始上传（前置音频=%lums）...\n",
             static_cast<unsigned long>(s_preroll_ms));
+#else
+        Serial.printf(
+            ">>> 已确认人声，开始本地收集，句尾后上传（前置音频=%lums）...\n",
+            static_cast<unsigned long>(s_preroll_ms));
+#endif
       }
       if (event == TURN_EVENT_SPEECH_STARTED) {
         Serial.printf(
