@@ -559,7 +559,10 @@ void DisplayManager::loop(bool speaking, uint32_t playback_position_bytes) {
                         ? 1
                         : (line_count_ + kLinesPerPage - 1) /
                               kLinesPerPage;
-      renderPage();
+      // The conversation frame was already rendered when entering the
+      // speaking state. Updating it with a full software-SPI frame here can
+      // block WebSocket reception long enough to starve the audio buffer.
+      renderTimedSubtitlePage();
     }
     return;
   }
@@ -616,6 +619,67 @@ void DisplayManager::renderLiveStatus() {
                   buffer + (kBufferTileRowStart + row) * kTileRowBytes);
   }
   last_live_status_render_ms_ = millis();
+}
+
+void DisplayManager::renderTimedSubtitlePage() {
+  if (!ready_ || binding_qr_active_) return;
+
+  // Keep the existing conversation artwork in the full buffer and only
+  // redraw the bubble text plus page marker. With U8G2_R1 the ST7305 driver
+  // expects complete tile rows, so the smallest safe transfer is the strip
+  // covering the bubble's logical x range (the same safe path as
+  // renderLiveStatus()).
+  constexpr uint16_t bubble_x = 20;
+  constexpr uint16_t bubble_y = 42;
+  constexpr uint16_t bubble_w = 132;
+  constexpr uint16_t bubble_h = 168;
+  constexpr uint16_t bubble_text_top = bubble_y + 38;
+  constexpr uint16_t bubble_text_bottom = bubble_y + bubble_h - 13;
+  constexpr uint16_t bubble_line_height = 17;
+
+  s_lcd.setDrawColor(0);
+  s_lcd.drawBox(bubble_x + 9, bubble_text_top, bubble_w - 18,
+                bubble_text_bottom - bubble_text_top + 4);
+  s_lcd.setDrawColor(1);
+  s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
+  const uint8_t first = page_ * kLinesPerPage;
+  const uint8_t remaining = line_count_ > first ? line_count_ - first : 0;
+  const uint8_t visible_lines =
+      remaining < kLinesPerPage ? remaining : kLinesPerPage;
+  const uint16_t text_block_height =
+      visible_lines > 0 ? (visible_lines - 1) * bubble_line_height : 0;
+  const uint16_t first_baseline =
+      bubble_text_top +
+      (bubble_text_bottom - bubble_text_top - text_block_height) / 2 + 6;
+  for (uint8_t row = 0; row < visible_lines; ++row) {
+    const uint8_t line = first + row;
+    const uint16_t text_width = s_lcd.getUTF8Width(lines_[line].c_str());
+    const uint16_t x = text_width < bubble_w - 30
+                           ? bubble_x + (bubble_w - text_width) / 2
+                           : bubble_x + 15;
+    s_lcd.drawUTF8(x, first_baseline + row * bubble_line_height,
+                   lines_[line].c_str());
+  }
+
+  s_lcd.setDrawColor(0);
+  s_lcd.drawBox(24, 211, 136, 14);
+  s_lcd.setDrawColor(1);
+  s_lcd.setFont(u8g2_font_6x10_tf);
+  char page_label[12] = {};
+  snprintf(page_label, sizeof(page_label), "%02u / %02u", page_ + 1,
+           page_count_);
+  s_lcd.drawStr(28, 222, page_label);
+
+  uint8_t *buffer = s_lcd.getBufferPtr();
+  constexpr uint8_t kBufferTileWidth = 38;
+  constexpr uint8_t kBufferTileRowStart = 2;
+  constexpr uint8_t kBufferTileRowCount = 17;
+  constexpr size_t kTileRowBytes = kBufferTileWidth * 8;
+  for (uint8_t row = 0; row < kBufferTileRowCount; ++row) {
+    u8x8_DrawTile(s_lcd.getU8x8(), 0, kBufferTileRowStart + row,
+                  kBufferTileWidth,
+                  buffer + (kBufferTileRowStart + row) * kTileRowBytes);
+  }
 }
 
 void DisplayManager::renderBindingQrExpired() {
