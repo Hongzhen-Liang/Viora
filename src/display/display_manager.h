@@ -51,6 +51,7 @@ class DisplayManager {
   void renderIdleDashboard();
   void renderSensorStrip();
   void renderLiveStatus();
+  void drawConversationStatusHero();
   void renderTimedSubtitlePage();
   void renderBindingQrExpired();
   uint32_t currentPageDurationMs() const;

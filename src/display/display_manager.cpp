@@ -186,6 +186,22 @@ const char *visualStateLabel(DisplayVisualState state) {
   }
 }
 
+const char *visualStateModeLabel(DisplayVisualState state) {
+  switch (state) {
+    case DisplayVisualState::kSensing:
+      return "SENSING MODE";
+    case DisplayVisualState::kListening:
+      return "LISTENING MODE";
+    case DisplayVisualState::kThinking:
+      return "THINKING MODE";
+    case DisplayVisualState::kSpeaking:
+      return "VOICE MODE";
+    case DisplayVisualState::kIdle:
+    default:
+      return "VIORA MODE";
+  }
+}
+
 }  // namespace
 
 DisplayManager g_display;
@@ -207,9 +223,20 @@ void DisplayManager::setVisualState(DisplayVisualState state) {
   const bool was_idle_screen = idle_mode_;
   visual_state_ = state;
   last_expression_render_ms_ = millis();
-  // 状态切换只局部更新气泡头部。相比 renderPage()/sendBuffer() 的整屏
-  // 刷新，这个区域约占全屏 2%，可以在唤醒、断句等声学关键路径立即
-  // 给出反馈，而不会阻塞收音和 WebSocket。
+  last_live_status_render_ms_ = 0;
+  // 聆听与思考是新的交互阶段，不应继续展示上一轮字幕。清掉文本模型后，
+  // 局部状态刷新会用整个气泡呈现明确的大状态；开始回答时再由字幕 cue
+  // 写入新内容。
+  if (state == DisplayVisualState::kListening ||
+      state == DisplayVisualState::kThinking ||
+      state == DisplayVisualState::kSensing) {
+    line_count_ = 0;
+    page_ = 0;
+    page_count_ = 1;
+  }
+  // 状态切换只更新气泡所在的窄条带。相比 renderPage()/sendBuffer() 的
+  // 整屏刷新，可以在唤醒、断句等声学关键路径立即给出反馈，而不会长时
+  // 阻塞收音和 WebSocket。
   if (ready_ && state != DisplayVisualState::kIdle &&
       !binding_qr_active_) {
     if (was_idle_screen) {
@@ -583,31 +610,12 @@ void DisplayManager::renderLiveStatus() {
     return;
   }
 
-  const char *label = visualStateLabel(visual_state_);
-
-  const uint8_t dot_count =
-      static_cast<uint8_t>((millis() / kLiveStatusFrameMs) % 3U) + 1U;
-  // 逻辑坐标区域为气泡头部 x=29..143, y=50..73。在 U8G2_R1 下映射
-  // 到 buffer 的 tile 行 2..18。ST7305 的 U8X8 驱动会固定按整行读取 4 个
+  // 逻辑坐标区域为气泡窄条带 x=20..151。在 U8G2_R1 下映射到 buffer
+  // 的 tile 行 2..18。ST7305 的 U8X8 驱动会固定按整行读取 4 个
   // 12-bit 显示块，不能使用通用 updateDisplayArea（它会按小 tile
   // 宽度传入指针，驱动却继续越界读取）。这里逐行提交完整 38-tile
   // 行，既安全又只传输气泡头部覆盖的 17/50 行。
-  constexpr uint16_t bubble_x = 20;
-  constexpr uint16_t bubble_y = 42;
-  constexpr uint16_t bubble_w = 132;
-  // 只擦气泡内层，保留外框和圆角，避免状态动画让气泡边缘闪烁。
-  s_lcd.setDrawColor(0);
-  s_lcd.drawBox(bubble_x + 9, bubble_y + 8, bubble_w - 18, 24);
-  s_lcd.setDrawColor(1);
-  s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
-  s_lcd.drawUTF8(bubble_x + 18, bubble_y + 23, label);
-  s_lcd.setFont(u8g2_font_6x10_tf);
-  char dots[4] = {};
-  for (uint8_t i = 0; i < dot_count; ++i) dots[i] = '.';
-  s_lcd.drawStr(bubble_x + 18 + s_lcd.getUTF8Width(label) + 2,
-                bubble_y + 23, dots);
-  s_lcd.drawStr(bubble_x + bubble_w - 37, bubble_y + 23, "01");
-  s_lcd.drawHLine(bubble_x + 18, bubble_y + 31, bubble_w - 36);
+  drawConversationStatusHero();
   uint8_t *buffer = s_lcd.getBufferPtr();
   constexpr uint8_t kBufferTileWidth = 38;
   constexpr uint8_t kBufferTileRowStart = 2;
@@ -619,6 +627,90 @@ void DisplayManager::renderLiveStatus() {
                   buffer + (kBufferTileRowStart + row) * kTileRowBytes);
   }
   last_live_status_render_ms_ = millis();
+}
+
+void DisplayManager::drawConversationStatusHero() {
+  constexpr uint16_t bubble_x = 20;
+  constexpr uint16_t bubble_y = 42;
+  constexpr uint16_t bubble_w = 132;
+  constexpr uint16_t bubble_h = 168;
+  const uint8_t frame =
+      static_cast<uint8_t>((millis() / kLiveStatusFrameMs) % 4U);
+
+  // 状态接管整个字幕区域，让阶段切换成为对话页的视觉主角。内边距避开
+  // 圆角和描边；外部页码也同步换成 LIVE，杜绝旧字幕残留。
+  s_lcd.setDrawColor(0);
+  s_lcd.drawBox(bubble_x + 9, bubble_y + 8, bubble_w - 18,
+                bubble_h - 17);
+  s_lcd.drawBox(24, 211, 136, 14);
+  s_lcd.setDrawColor(1);
+
+  s_lcd.setFont(u8g2_font_5x8_tf);
+  const char *mode = visualStateModeLabel(visual_state_);
+  const uint16_t mode_w = s_lcd.getStrWidth(mode);
+  s_lcd.drawStr(bubble_x + (bubble_w - mode_w) / 2, bubble_y + 18, mode);
+  s_lcd.drawHLine(bubble_x + 18, bubble_y + 27, bubble_w - 36);
+
+  const int16_t icon_cx = bubble_x + bubble_w / 2;
+  const int16_t icon_cy = bubble_y + 56;
+  if (visual_state_ == DisplayVisualState::kListening ||
+      visual_state_ == DisplayVisualState::kSensing) {
+    // 会呼吸的五段声波：比通用 loading spinner 更直接地表达“麦克风开着”。
+    static constexpr uint8_t kWaveHeights[4][5] = {
+        {5, 11, 18, 11, 5}, {9, 18, 10, 18, 9},
+        {14, 8, 18, 8, 14}, {9, 18, 10, 18, 9}};
+    for (uint8_t i = 0; i < 5; ++i) {
+      const uint8_t h = kWaveHeights[frame][i];
+      s_lcd.drawRBox(icon_cx - 24 + i * 11, icon_cy - h / 2, 5, h, 2);
+    }
+  } else if (visual_state_ == DisplayVisualState::kThinking) {
+    // 环绕移动的高光点像潮玩角色头顶的小念头，和聆听声波形成清晰区分。
+    static constexpr int8_t kOrbitX[4] = {0, 18, 0, -18};
+    static constexpr int8_t kOrbitY[4] = {-12, 0, 12, 0};
+    s_lcd.drawCircle(icon_cx, icon_cy, 19);
+    s_lcd.drawDisc(icon_cx + kOrbitX[frame], icon_cy + kOrbitY[frame], 4);
+    s_lcd.drawDisc(icon_cx - 5, icon_cy - 2, 2);
+    s_lcd.drawDisc(icon_cx + 6, icon_cy + 4, 3);
+  } else {
+    // 回答音频到达前的短暂过渡，使用放射符号衔接后续字幕。
+    s_lcd.drawDisc(icon_cx, icon_cy, 7);
+    s_lcd.drawLine(icon_cx, icon_cy - 18, icon_cx, icon_cy - 12);
+    s_lcd.drawLine(icon_cx, icon_cy + 12, icon_cx, icon_cy + 18);
+    s_lcd.drawLine(icon_cx - 18, icon_cy, icon_cx - 12, icon_cy);
+    s_lcd.drawLine(icon_cx + 12, icon_cy, icon_cx + 18, icon_cy);
+  }
+
+  const char *label = visualStateLabel(visual_state_);
+  s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
+  const uint16_t label_w = s_lcd.getUTF8Width(label);
+  const uint16_t pill_w = label_w + 28;
+  const uint16_t pill_x = bubble_x + (bubble_w - pill_w) / 2;
+  constexpr uint16_t pill_y = bubble_y + 84;
+  s_lcd.drawRBox(pill_x, pill_y, pill_w, 29, 10);
+  s_lcd.setDrawColor(0);
+  s_lcd.drawUTF8(pill_x + 14, pill_y + 21, label);
+  s_lcd.setDrawColor(1);
+
+  // 三颗点按帧依次“点亮”。保留用户熟悉的省略号语义，但做成玩具面板
+  // 上的实体指示灯，比普通文本 ... 更醒目。
+  constexpr uint16_t dots_y = bubble_y + 132;
+  for (uint8_t i = 0; i < 3; ++i) {
+    const int16_t x = icon_cx - 16 + i * 16;
+    if (i == frame % 3U) {
+      s_lcd.drawDisc(x, dots_y, 4);
+    } else {
+      s_lcd.drawCircle(x, dots_y, 3);
+    }
+  }
+
+  s_lcd.setFont(u8g2_font_5x8_tf);
+  const char *footer = visual_state_ == DisplayVisualState::kThinking
+                           ? "ONE MOMENT"
+                           : "I'M WITH YOU";
+  const uint16_t footer_w = s_lcd.getStrWidth(footer);
+  s_lcd.drawStr(bubble_x + (bubble_w - footer_w) / 2, bubble_y + 153,
+                footer);
+  s_lcd.drawStr(28, 222, "LIVE STATUS");
 }
 
 void DisplayManager::renderTimedSubtitlePage() {
@@ -723,24 +815,22 @@ void DisplayManager::renderPage() {
   s_lcd.setDrawColor(1);
   s_lcd.drawRFrame(bubble_x, bubble_y, bubble_w, bubble_h, 16);
 
-  // 状态位放在气泡头部：用户看字幕时能同时知道设备正在听、思考还是
-  // 回答，不必再扫视屏幕顶部的独立胶囊。
-  s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
-  const char *label = visualStateLabel(visual_state_);
-  s_lcd.drawUTF8(bubble_x + 18, bubble_y + 23, label);
-  s_lcd.setFont(u8g2_font_6x10_tf);
-  if (visual_state_ != DisplayVisualState::kIdle) {
-    const uint8_t dot_count =
-        static_cast<uint8_t>((millis() / kLiveStatusFrameMs) % 3U) + 1U;
-    char dots[4] = {};
-    for (uint8_t i = 0; i < dot_count; ++i) dots[i] = '.';
-    s_lcd.drawStr(bubble_x + 18 + s_lcd.getUTF8Width(label) + 2,
-                  bubble_y + 23, dots);
+  const bool status_hero =
+      visual_state_ != DisplayVisualState::kIdle &&
+      visual_state_ != DisplayVisualState::kSpeaking && line_count_ == 0;
+  if (status_hero) {
+    drawConversationStatusHero();
+  } else {
+    // 回答时状态缩回气泡头部，把主舞台重新交给同步字幕。
+    s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
+    const char *label = visualStateLabel(visual_state_);
+    s_lcd.drawUTF8(bubble_x + 18, bubble_y + 23, label);
+    s_lcd.setFont(u8g2_font_6x10_tf);
+    s_lcd.drawStr(bubble_x + bubble_w - 37, bubble_y + 23, "01");
+    s_lcd.drawHLine(bubble_x + 18, bubble_y + 31, bubble_w - 36);
+    s_lcd.drawDisc(bubble_x + bubble_w - 23, bubble_y + 19, 2);
+    s_lcd.drawDisc(bubble_x + bubble_w - 16, bubble_y + 19, 1);
   }
-  s_lcd.drawStr(bubble_x + bubble_w - 37, bubble_y + 23, "01");
-  s_lcd.drawHLine(bubble_x + 18, bubble_y + 31, bubble_w - 36);
-  s_lcd.drawDisc(bubble_x + bubble_w - 23, bubble_y + 19, 2);
-  s_lcd.drawDisc(bubble_x + bubble_w - 16, bubble_y + 19, 1);
 
   s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
   const uint8_t first = page_ * kLinesPerPage;
@@ -755,7 +845,7 @@ void DisplayManager::renderPage() {
   const uint16_t first_baseline =
       bubble_text_top +
       (bubble_text_bottom - bubble_text_top - text_block_height) / 2 + 6;
-  for (uint8_t row = 0; row < visible_lines; ++row) {
+  for (uint8_t row = 0; row < visible_lines && !status_hero; ++row) {
     const uint8_t line = first + row;
     const uint16_t text_width = s_lcd.getUTF8Width(lines_[line].c_str());
     const uint16_t x =
@@ -768,12 +858,14 @@ void DisplayManager::renderPage() {
 
   // Page count is deliberately tiny: useful when a long response is being
   // paged, but quiet enough to keep the bubble as the focal point.
-  s_lcd.setFont(u8g2_font_6x10_tf);
-  char page_label[12] = {};
-  snprintf(page_label, sizeof(page_label), "%02u / %02u", page_ + 1,
-           page_count_);
-  s_lcd.drawStr(28, 222, page_label);
-  s_lcd.drawHLine(84, 219, 58);
+  if (!status_hero) {
+    s_lcd.setFont(u8g2_font_6x10_tf);
+    char page_label[12] = {};
+    snprintf(page_label, sizeof(page_label), "%02u / %02u", page_ + 1,
+             page_count_);
+    s_lcd.drawStr(28, 222, page_label);
+    s_lcd.drawHLine(84, 219, 58);
+  }
   const char *brand_label = "ORCHID VOICE";
   const uint16_t brand_width = s_lcd.getStrWidth(brand_label);
   s_lcd.drawStr(kScreenWidth - brand_width - 22, 222, brand_label);
