@@ -31,8 +31,9 @@ void net_set_idle_power_save(bool enabled);
 // 主循环不会被 TCP 回压阻塞（链路抖时采集/状态机照常跑），且 audio_end
 // 一定排在它之前入队的音频之后到达服务器。
 bool net_send_audio(const uint8_t *data, size_t len);
-void net_send_json(const char *json);
-// 本轮聆听的发送统计（新一轮开始时归零，供 audio_end 的 PCM 时钟核算）
+// 返回该控制帧是否被当前 WebSocket 接受/排入发送队列。
+bool net_send_json(const char *json);
+// 本轮聆听的实际发送统计（新一轮开始时归零，供诊断使用）
 uint32_t net_audio_sent_bytes();
 uint32_t net_audio_dropped_bytes();
 void net_audio_flush();

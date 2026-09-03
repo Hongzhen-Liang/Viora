@@ -179,16 +179,16 @@
 // 有明显的原始能量，允许它直接锁定起声；低于此门限仍需要多次 VAD 命中。
 #define STRONG_NEURAL_START_PEAK_MIN 650
 #define STRONG_NEURAL_START_RMS_MIN  150
-// 自然断句参数：短回答多等一会儿；正常句约 0.85 秒静音即回复；
+// 自然断句参数：短回答多等一会儿；正常句约 0.4 秒静音即回复；
 // 用户曾在句内停顿后继续说时，会自动学习其节奏并放宽，最多 2.0 秒。
 // 2026-08-20：设备端神经 VAD 对正常音量近讲命中偏稀疏（常只命中句首、
 // 句中被误判为静音），静音阈值必须留出富余，避免“没听完就断句开播”。
 #define VAD_FRAME_MS              32
 #define ENDPOINT_SHORT_SPEECH_MS  640
-#define ENDPOINT_SHORT_MS         1200
-#define ENDPOINT_NORMAL_MS        700
+#define ENDPOINT_SHORT_MS          750
+#define ENDPOINT_NORMAL_MS         400
 #define ENDPOINT_LONG_TURN_MS     5000
-#define ENDPOINT_LONG_MS          700
+#define ENDPOINT_LONG_MS          400
 #define ENDPOINT_MAX_MS           2000
 #define ENDPOINT_LEARN_GAP_MS     160
 #define MIN_REC_MS                450
@@ -199,8 +199,8 @@
 #define CONV_TIMEOUT_MIN_MS     5000  // 服务端动态窗口的端侧安全下限
 #define CONV_TIMEOUT_MAX_MS    30000  // 服务端动态窗口的端侧安全上限
 #define FOLLOWUP_GUARD_MS      180    // 只屏蔽扬声器的最后一点余音
-#define ECHO_TAIL_VOICE_PEAK_MIN 150  // 播放后新一轮必须有当前真实声能才可起句
-#define ECHO_TAIL_VOICE_RMS_MIN   55  // 低于真人近讲，高于实测回声尾音 98/26
+#define ECHO_TAIL_VOICE_PEAK_MIN 240  // 播放后新一轮必须有当前真实声能才可起句
+#define ECHO_TAIL_VOICE_RMS_MIN  100  // 挡住实测回声尾音 170/77，保留真人/扬声器指令
 #define ECHO_LIVE_ENERGY_HOLD_MS 800  // 允许异步 neural VAD 比原始声能晚到
 #define VOICE_START_FRAMES     3      // 约 96ms 连续人声才确认开始
 #define MIN_VOICE_FRAMES       5      // 少于约 160ms 视为短促噪声
@@ -236,10 +236,14 @@
 // 设为 1 可恢复上传 AFE 增强输出，便于现场 A/B 对比。
 #define ASR_UPLOAD_AFE_OUTPUT  0
 
-// 音频上传策略：默认先在 PSRAM 中完整收音，检测到句尾后再批量上传。
-// 这样 TLS 发送不会在用户说话期间阻塞 WebSocket 心跳；设为 1 可恢复
-// 实时上传（仅用于现场对比，不建议作为长期配置）。
+// 音频上传策略：默认整句收完后由 Arduino 主循环按序发送 PCM。
+// WebSocketsClient 是同步客户端；让同一个任务独占收发和心跳，保证
+// audio_start → PCM → audio_end 的顺序，避免后台 TLS 写任务饿死心跳。
+// 设为 1 仅用于实验性的实时上传，不作为稳定运行模式。
 #define ASR_STREAM_AUDIO       0
+// 批量上传时减少 WebSocket/TLS 帧数；sendBIN 直接引用 PSRAM 录音缓存，
+// 不会额外复制整句。服务端按帧累积 PCM，16KB 仍远低于单帧上限。
+#define ASR_UPLOAD_CHUNK_BYTES 16384
 
 // 播放音量（LLM operation: volume_up / volume_down 分发到这里）
 #define VOLUME_DEFAULT 1.0f // 默认满音量；保持 PCM 满幅但不额外数字放大

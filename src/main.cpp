@@ -880,8 +880,11 @@ static void commit_turn(uint32_t now_ms) {
   // 必须先相互印证：如果处理/网络阻塞造成采样丢帧，宁可不裁剪，
   // 也不能用较长的墙钟静音去裁较短的 PCM。
 #if ASR_STREAM_AUDIO
+  // audio_end 排在发送队列中所有已接受的 PCM 后面；这里使用已入队总量，
+  // 而不是 worker 此刻已经发出的字节数，避免网络稍有回压就产生假性的
+  // pcm/wall 时钟差，导致服务端放弃本来可用的裁剪提示。
   const uint32_t pcm_ms = static_cast<uint32_t>(
-      net_audio_sent_bytes() * 1000ULL / (SR_SAMPLE_RATE * sizeof(int16_t)));
+      s_uploaded_bytes * 1000ULL / (SR_SAMPLE_RATE * sizeof(int16_t)));
 #else
   // 默认模式下 PCM 已经完整保存在本地；audio_end 入队前再批量复制到
   // 网络队列，所以不能用“已经发出”的字节数作为本轮录音长度。
@@ -891,13 +894,23 @@ static void commit_turn(uint32_t now_ms) {
   const size_t record_len = record_samples * sizeof(int16_t);
   size_t record_offset = 0;
   while (record_offset < record_len) {
-    const size_t chunk = (record_len - record_offset) < 4096
+    const size_t chunk = (record_len - record_offset) < ASR_UPLOAD_CHUNK_BYTES
                              ? (record_len - record_offset)
-                             : 4096;
+                             : ASR_UPLOAD_CHUNK_BYTES;
     if (net_send_audio(record_bytes + record_offset, chunk)) {
       s_uploaded_bytes += static_cast<uint32_t>(chunk);
     } else {
       s_upload_failed_bytes += static_cast<uint32_t>(chunk);
+      // 整句上传走同步 TLS sendBIN。sendBIN 失败时，WebSocketsClient
+      // 可能会在返回前触发断线回调；该回调会清空录音并把状态改回 IDLE。
+      // 不能继续发送 audio_end，更不能在下面把状态重新改成 PROCESSING，
+      // 否则设备会在服务器已断开的情况下永久显示“思考中”。
+      if (!net_connected() || s_state != ST_LISTENING) {
+        Serial.println(">>> 本轮上传中断：服务器已断开，取消本轮处理");
+      } else {
+        Serial.println(">>> 本轮上传失败：取消本轮处理");
+      }
+      return;
     }
     record_offset += chunk;
   }
@@ -925,7 +938,14 @@ static void commit_turn(uint32_t now_ms) {
            static_cast<unsigned long>(pcm_ms),
            static_cast<unsigned long>(wall_audio_ms),
            static_cast<unsigned long>(clock_drift_ms));
-  net_send_json(end_frame);
+  // 发送过程中可能刚好断线；在切换到 PROCESSING 前再次确认，避免
+  // 断线回调与当前采音循环交错时把 IDLE 覆盖回 PROCESSING。
+  if (!net_connected() || s_state != ST_LISTENING ||
+      !net_send_json(end_frame) || !net_connected() ||
+      s_state != ST_LISTENING) {
+    Serial.println(">>> 本轮提交取消：服务器连接已失效");
+    return;
+  }
   set_state(ST_PROCESSING);
   // 不在“说完→服务端首包”的关键窗口同步刷整屏。
   // set_state() 已切换 Thinking 视觉状态；整屏刷新会阻塞
@@ -973,6 +993,11 @@ static void on_net_disconnected() {
   s_consec_errors = 0;
   s_proactive_pending = false;
   s_farewell_pending = false;
+  s_listen_audio_started = false;
+  s_preroll_ms = 0;
+  s_uploaded_bytes = 0;
+  s_upload_failed_bytes = 0;
+  s_pending_reply = "";
   speech_async_reset();
   g_audio.ringClear();
   g_audio.recordClear();
@@ -1848,9 +1873,14 @@ void loop() {
       }
 #endif
 #else
-      // 长期模式：整句先落到 PSRAM，句尾之后才进入 TLS 发送队列。
-      // 这样讲话期间主循环可以持续处理 WebSocket 心跳和服务端下行。
-      g_audio.recordAppend(pcm, frames);
+      // 长期模式：开口前只保留短前置，确认人声后才开始整句缓存。
+      // 这样不会把用户等待设备/思考的静音上传给 ASR，同时保留句首。
+      // 句尾之后才进入 TLS 发送队列，讲话期间主循环不被网络写阻塞。
+      if (s_listen_audio_started) {
+        g_audio.recordAppend(pcm, frames);
+      } else {
+        g_audio.ringPush(pcm, frames);
+      }
 #endif
       // 无论上传哪一路，原始峰值都保留用于诊断和本地端点。
       if (vol_l > s_rec_max_vol) s_rec_max_vol = vol_l;

@@ -19,7 +19,13 @@ static WebSocketsClient s_ws;
 // loop() while ws_tx_worker sends from another core; serialize both directions
 // or a barge-in's cancel/audio_start burst can corrupt lwIP pbuf references.
 static SemaphoreHandle_t s_ws_mutex = nullptr;
-static bool s_ws_connected = false;
+static volatile bool s_ws_connected = false;
+// WebSocketsClient::sendBIN() can discover a dead socket on the TX task and
+// invoke the DISCONNECTED callback from that task. The application callback
+// touches audio and the software-SPI display, so marshal it back to loop().
+static volatile bool s_disconnect_pending = false;
+static char s_disconnect_reason[64] = {};
+static portMUX_TYPE s_event_mux = portMUX_INITIALIZER_UNLOCKED;
 static NetCallbacks s_cb = {};
 
 // links2004/WebSockets 的同步客户端每次 loop() 最多只解析一个完整 WS 帧。
@@ -144,6 +150,9 @@ static void ws_tx_worker(void *) {
       else s_tx_dropped_bytes += frame.len;
     }
     portEXIT_CRITICAL(&s_tx_mux);
+    // Give the Arduino loop a chance to service incoming frames and heartbeat
+    // between queued audio writes when the experimental stream mode is used.
+    vTaskDelay(pdMS_TO_TICKS(1));
   }
 }
 
@@ -182,13 +191,24 @@ static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
       if (s_cb.on_connected) s_cb.on_connected();
       break;
 
-    case WStype_DISCONNECTED:
+    case WStype_DISCONNECTED: {
       s_ws_connected = false;
-      Serial.printf("[WS] 与 Mac 服务器断开（%.*s），回到待唤醒\n", (int)length,
-                    payload ? reinterpret_cast<const char *>(payload) : "");
+      portENTER_CRITICAL(&s_event_mux);
+      const size_t reason_len =
+          length < sizeof(s_disconnect_reason) - 1
+              ? length
+              : sizeof(s_disconnect_reason) - 1;
+      if (payload != nullptr && reason_len > 0) {
+        memcpy(s_disconnect_reason, payload, reason_len);
+      }
+      s_disconnect_reason[reason_len] = '\0';
+      s_disconnect_pending = true;
+      portEXIT_CRITICAL(&s_event_mux);
+      // Drop queued PCM immediately, but defer the application callback. The
+      // callback resets I2S/display state and is not safe on the TX task.
       net_audio_flush();
-      if (s_cb.on_disconnected) s_cb.on_disconnected();
       break;
+    }
 
     case WStype_ERROR:
       Serial.printf("[WS] 连接错误: %.*s\n", (int)length,
@@ -352,6 +372,22 @@ void net_wifi_retry_now() {
   wifi_connect();
 }
 
+static void dispatch_pending_disconnect() {
+  char reason[sizeof(s_disconnect_reason)] = {};
+  bool pending = false;
+  portENTER_CRITICAL(&s_event_mux);
+  if (s_disconnect_pending) {
+    memcpy(reason, s_disconnect_reason, sizeof(reason));
+    s_disconnect_pending = false;
+    pending = true;
+  }
+  portEXIT_CRITICAL(&s_event_mux);
+  if (!pending) return;
+
+  Serial.printf("[WS] 与 Mac 服务器断开（%s），回到待唤醒\n", reason);
+  if (s_cb.on_disconnected) s_cb.on_disconnected();
+}
+
 void net_loop() {
   if (WiFi.status() == WL_CONNECTED) {
     if (prov_active() && prov_should_close_on_connect()) prov_end();
@@ -424,6 +460,10 @@ void net_loop() {
     for (uint8_t i = 0; i < WS_LOOP_PUMP_PASSES; ++i) s_ws.loop();
     if (s_ws_mutex) xSemaphoreGiveRecursive(s_ws_mutex);
   }
+  // A send task can report a dead TLS socket while the main loop is busy
+  // pumping frames. Apply the state/audio/display reset only here, on the
+  // Arduino loop task, after the WebSocket mutex has been released.
+  dispatch_pending_disconnect();
 }
 
 bool net_connected() {
@@ -474,16 +514,17 @@ bool net_send_audio(const uint8_t *data, size_t len) {
   return tx_push(0, data, len);
 }
 
-void net_send_json(const char *json) {
-  if (json == nullptr) return;
+bool net_send_json(const char *json) {
+  if (json == nullptr) return false;
+  if (!s_ws_connected) return false;
   const size_t len = strlen(json);
   if (s_tx_task == nullptr) {
     if (s_ws_mutex) xSemaphoreTakeRecursive(s_ws_mutex, portMAX_DELAY);
-    s_ws.sendTXT(json);
+    const bool ok = s_ws.sendTXT(json);
     if (s_ws_mutex) xSemaphoreGiveRecursive(s_ws_mutex);
-    return;
+    return ok;
   }
-  tx_push(1, reinterpret_cast<const uint8_t *>(json), len);
+  return tx_push(1, reinterpret_cast<const uint8_t *>(json), len);
 }
 
 uint32_t net_audio_sent_bytes() {
