@@ -85,7 +85,7 @@
 // 和服务器根 CA 后才会启用。固件还会校验 RSA-3072 签名。
 // ============================================================
 #define FIRMWARE_VERSION       "1.0.19"
-#define FIRMWARE_BUILD         25
+#define FIRMWARE_BUILD         27
 #define FIRMWARE_HARDWARE      "waveshare-rlcd-42-v1"
 #define FIRMWARE_MODEL_VERSION 1
 #if __has_include("ota_secrets.h") || __has_include("secrets.h")
@@ -236,11 +236,10 @@
 // 设为 1 可恢复上传 AFE 增强输出，便于现场 A/B 对比。
 #define ASR_UPLOAD_AFE_OUTPUT  0
 
-// 音频上传策略：默认整句收完后由 Arduino 主循环按序发送 PCM。
-// WebSocketsClient 是同步客户端；让同一个任务独占收发和心跳，保证
-// audio_start → PCM → audio_end 的顺序，避免后台 TLS 写任务饿死心跳。
-// 设为 1 仅用于实验性的实时上传，不作为稳定运行模式。
-#define ASR_STREAM_AUDIO       0
+// 音频上传策略：确认人声后通过有序发送队列边录边传。实时速率只有
+// 32KB/s，可避免句尾把 100KB 左右整句瞬时灌进 TLS、在约 32KB socket
+// 缓冲处失败；audio_end 与 PCM 共用同一队列，线序仍严格有序。
+#define ASR_STREAM_AUDIO       1
 // 群晖反向代理链路对较大的连续 TLS 写较敏感。4KB 与服务端音频帧粒度
 // 对齐，并让每块之间都有机会处理 Pong，避免整句末尾上传到一半断线。
 #define ASR_UPLOAD_CHUNK_BYTES 4096
@@ -260,7 +259,7 @@
 // ============================================================
 #define PCM_BUFFER_SIZE ((SR_SAMPLE_RATE * AUDIO_PREROLL_MS) / 1000) // 前置音频环形缓存
 #define PLAY_BUFFER_SIZE (1536 * 1024)           // 播放缓冲 1.5MB ≈ 48 秒音频
-#define PLAY_PREBUFFER_MS 320                     // 服务端已预缓冲约 350ms；端侧再留 320ms 抗网络抖动即可
+#define PLAY_PREBUFFER_MS 256                     // 服务端已预缓冲约 256ms；首批 8KB 到齐即可低延迟开播
 #define PLAY_REBUFFER_MS 512                      // 真实欠载后多攒一点再续播，避免反复卡顿
 #define PLAY_UNDERRUN_GRACE_MS 400                // 覆盖约192ms DMA余量与网络抖动，避免误进入重缓冲
 #define PLAY_I2S_LATE_WRITE_MS 48                 // 独立播放任务写入间隔诊断阈值
