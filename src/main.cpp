@@ -655,6 +655,28 @@ static void set_state(ConvState state) {
 
 static int16_t s_ring_scratch[512];
 
+static uint32_t s_last_listen_keepalive_ms = 0;
+
+// WebSocket 的 ping/pong 属于传输层控制帧，部分反向代理只按应用数据
+// 刷新空闲计时。默认整句上传模式在用户讲话期间没有 PCM 上行，因此补一
+// 个服务端明确忽略的轻量 JSON，避免“聆听十几秒后句尾才上传”时连接已
+// 被代理提前回收。
+static void service_listen_keepalive() {
+  const uint32_t now = millis();
+  if (s_state != ST_LISTENING || !net_connected()) {
+    s_last_listen_keepalive_ms = now;
+    return;
+  }
+  if (s_last_listen_keepalive_ms != 0 &&
+      now - s_last_listen_keepalive_ms < WS_LISTEN_KEEPALIVE_MS) {
+    return;
+  }
+  s_last_listen_keepalive_ms = now;
+  if (!net_send_json("{\"type\":\"audio_keepalive\"}")) {
+    Serial.println("[WS] 聆听保活发送失败");
+  }
+}
+
 static void send_ring_audio() {
   int samples_sent = 0;
   while (g_audio.ringSize() > 0) {
@@ -894,6 +916,18 @@ static void commit_turn(uint32_t now_ms) {
   const size_t record_len = record_samples * sizeof(int16_t);
   size_t record_offset = 0;
   while (record_offset < record_len) {
+    // sendBIN 是同步 TLS 写。每个块之间主动处理一次收包/心跳，避免
+    // 批量上传期间把 WebSocket 的控制帧饿死；若此处发现断线，立即放弃
+    // 本轮，不能继续发送残缺 PCM。
+    if (record_offset > 0) {
+      net_loop();
+      if (!net_connected() || s_state != ST_LISTENING) {
+        Serial.printf(">>> 本轮上传中断：服务器已断开（offset=%u/%u），取消本轮处理\n",
+                      static_cast<unsigned>(record_offset),
+                      static_cast<unsigned>(record_len));
+        return;
+      }
+    }
     const size_t chunk = (record_len - record_offset) < ASR_UPLOAD_CHUNK_BYTES
                              ? (record_len - record_offset)
                              : ASR_UPLOAD_CHUNK_BYTES;
@@ -906,13 +940,19 @@ static void commit_turn(uint32_t now_ms) {
       // 不能继续发送 audio_end，更不能在下面把状态重新改成 PROCESSING，
       // 否则设备会在服务器已断开的情况下永久显示“思考中”。
       if (!net_connected() || s_state != ST_LISTENING) {
-        Serial.println(">>> 本轮上传中断：服务器已断开，取消本轮处理");
+        Serial.printf(">>> 本轮上传中断：服务器已断开（offset=%u/%u），取消本轮处理\n",
+                      static_cast<unsigned>(record_offset),
+                      static_cast<unsigned>(record_len));
       } else {
-        Serial.println(">>> 本轮上传失败：取消本轮处理");
+        Serial.printf(">>> 本轮上传失败：sendBIN offset=%u/%u，取消本轮处理\n",
+                      static_cast<unsigned>(record_offset),
+                      static_cast<unsigned>(record_len));
       }
       return;
     }
     record_offset += chunk;
+    // 让 WiFi/TLS 任务和看门狗在长句上传中获得调度机会。
+    delay(1);
   }
   const uint32_t pcm_ms = static_cast<uint32_t>(
       record_samples * 1000ULL / SR_SAMPLE_RATE);
@@ -1432,6 +1472,7 @@ static void handle_presence_logic() {
 
 void loop() {
   net_loop();
+  service_listen_keepalive();
   handle_presence_logic();
   ota_loop(s_state == ST_IDLE && !s_rearm_pending && !s_exit_pending &&
            !s_settings_menu_active && !s_manual_provisioning);
