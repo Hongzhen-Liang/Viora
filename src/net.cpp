@@ -147,12 +147,15 @@ static void ws_tx_worker(void *) {
     if (s_ws_mutex) xSemaphoreGiveRecursive(s_ws_mutex);
     portENTER_CRITICAL(&s_tx_mux);
     if (generation == s_tx_generation) {
-      if (ok) s_tx_sent_bytes += frame.len;
-      else s_tx_dropped_bytes += frame.len;
+      if (ok) {
+        if (frame.kind == 0) s_tx_sent_bytes += frame.len;
+      } else {
+        s_tx_dropped_bytes += frame.len;
+      }
     }
     portEXIT_CRITICAL(&s_tx_mux);
-    // Give the Arduino loop a chance to service incoming frames and heartbeat
-    // between queued audio writes when the experimental stream mode is used.
+    // 每帧间让出调度窗口；协议层 Ping 已在两端关闭，不会再与音频写
+    // 争抢同一个 TLS socket。
     vTaskDelay(pdMS_TO_TICKS(1));
   }
 }
@@ -292,11 +295,10 @@ static void start_websocket() {
   s_ws.begin(SERVER_HOST, SERVER_PORT, SERVER_PATH);
 #endif
   s_ws.setReconnectInterval(3000);
-  // 设备经由群晖/NAS 反向代理连接 Mac；代理可能在 5~10s 没有
-  // 应用数据时清理 WebSocket。聆听阶段若没有人说话，PCM 发送也可能
-  // 暂停，所以心跳必须短于代理的空闲窗口。pong 超时仍留出余量，
-  // 连续 3 次失败才重连，避免一次 Wi-Fi 抖动打断多轮对话。
-  s_ws.enableHeartbeat(3000, 10000, 3);
+  // 代理空闲由 2s audio_keepalive、TTS PCM 和待机 telemetry 覆盖。
+  // 两端都不使用协议层 Ping/Pong：ESP32 的同步 WiFiClientSecure 偶发会
+  // 在自动 Pong 写入中阻塞，继而挡住同一连接上的音频与 audio_end。
+  s_ws.disableHeartbeat();
   // 设备唯一标识：eFuse 出厂 MAC（每颗芯片唯一，掉电/重刷不丢）。
   // 服务端用它区分每台设备的对话历史（history_store 按 device_id 键存），
   // 多台设备即使共用同一 API Key 也各有一份独立历史。
@@ -324,7 +326,7 @@ static void start_websocket() {
   }
   s_target_ready = true;
 #if SERVER_TLS_ENABLED
-  Serial.printf("[WS] 目标服务器: wss://%s:%d%s（心跳 3s，TLS 已验证）\n",
+  Serial.printf("[WS] 目标服务器: wss://%s:%d%s（应用保活，TLS 已验证）\n",
                 SERVER_HOST, SERVER_PORT, SERVER_PATH);
 #else
   Serial.printf("[WS] 目标服务器: ws://%s:%d%s（心跳 3s，明文模式）\n",
@@ -352,7 +354,7 @@ void net_init(const NetCallbacks &cb) {
     const BaseType_t created = xTaskCreatePinnedToCore(
         ws_tx_worker, "ws_tx", 8192, nullptr, 2, &s_tx_task, 0);
     if (created == pdPASS) {
-      Serial.println("[WS] 上行发送任务已启动（队列 160 帧）");
+      Serial.println("[WS] 实时上行任务已启动（应用保活，无协议 Ping）");
     } else {
       s_tx_task = nullptr;
       Serial.println("[WS] 警告：上行发送任务创建失败，回退主循环直发");

@@ -60,6 +60,7 @@ static WakeAckGate s_wake_ack_gate(kWakeAckGateConfig);
 static uint32_t s_state_since_ms = 0;
 static uint32_t s_listen_start_ms = 0;
 static uint32_t s_preroll_ms = 0;
+static uint32_t s_audio_timeline_start_ms = 0;
 // 聆听态先在本地保留短前置，只有确认真实人声后才开始上传。这样 follow-up
 // 等待用户开口时不会持续向 NAS/TLS 连接灌入静音 PCM。
 static bool s_listen_audio_started = false;
@@ -658,12 +659,14 @@ static int16_t s_ring_scratch[512];
 static uint32_t s_last_listen_keepalive_ms = 0;
 
 // WebSocket 的 ping/pong 属于传输层控制帧，部分反向代理只按应用数据
-// 刷新空闲计时。默认整句上传模式在用户讲话期间没有 PCM 上行，因此补一
-// 个服务端明确忽略的轻量 JSON，避免“聆听十几秒后句尾才上传”时连接已
-// 被代理提前回收。
+// 刷新空闲计时。默认整句上传模式在用户讲话期间没有 PCM 上行，且
+// audio_end 后服务端可能在 ASR/LLM/TTS 中暂时没有下行数据，因此在聆听
+// 和处理中都发送服务端明确忽略的轻量 JSON，避免连接在关键窗口被回收。
 static void service_listen_keepalive() {
   const uint32_t now = millis();
-  if (s_state != ST_LISTENING || !net_connected()) {
+  const bool keepalive_state =
+      s_state == ST_LISTENING || s_state == ST_PROCESSING;
+  if (!keepalive_state || !net_connected()) {
     s_last_listen_keepalive_ms = now;
     return;
   }
@@ -702,7 +705,14 @@ static void send_ring_audio() {
 #endif
     samples_sent += n;
   }
-  s_preroll_ms = static_cast<uint32_t>(samples_sent * 1000ULL / SR_SAMPLE_RATE);
+  const uint32_t sent_ms = static_cast<uint32_t>(
+      samples_sent * 1000ULL / SR_SAMPLE_RATE);
+  if (sent_ms > 0 && s_audio_timeline_start_ms == 0) {
+    s_audio_timeline_start_ms = millis() - sent_ms;
+  }
+  // 直接唤醒路径可能先发送决定窗前置，确认人声时再发送新增环形帧；
+  // 两段都属于实际 PCM 前置，不能用第二段覆盖第一段。
+  s_preroll_ms += sent_ms;
 }
 
 static void keep_latest_ring_audio(uint32_t keep_ms) {
@@ -761,6 +771,7 @@ static void enter_listening(ListenOrigin origin, bool force_preroll,
   g_audio.recordClear();
   s_rec_max_vol = 0;
   s_preroll_ms = 0;
+  s_audio_timeline_start_ms = 0;
   s_listen_audio_started = false;
   s_uploaded_bytes = 0;
   s_upload_failed_bytes = 0;
@@ -960,8 +971,16 @@ static void commit_turn(uint32_t now_ms) {
 #endif
   // 录音只包含前置环和确认起声后的部分，不包含用户开口前在续聊窗口
   // 中等待的几秒；用 speech_start 对齐才能正确评估 PCM 时钟。
+#if ASR_STREAM_AUDIO
+  // 实时模式的 PCM 从首次前置帧开始连续入队；speech_start 已位于这段
+  // 前置音频内部，再加一次 preroll 会固定多算约 900ms。
+  const uint32_t wall_audio_ms = s_audio_timeline_start_ms != 0
+      ? now_ms - s_audio_timeline_start_ms
+      : pcm_ms;
+#else
   const uint32_t wall_audio_ms =
       s_preroll_ms + (now_ms - s_turn.speech_start_ms());
+#endif
   const uint32_t clock_drift_ms =
       pcm_ms > wall_audio_ms ? pcm_ms - wall_audio_ms
                              : wall_audio_ms - pcm_ms;
@@ -1038,6 +1057,7 @@ static void on_net_disconnected() {
   s_farewell_pending = false;
   s_listen_audio_started = false;
   s_preroll_ms = 0;
+  s_audio_timeline_start_ms = 0;
   s_uploaded_bytes = 0;
   s_upload_failed_bytes = 0;
   s_pending_reply = "";

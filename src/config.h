@@ -85,7 +85,7 @@
 // 和服务器根 CA 后才会启用。固件还会校验 RSA-3072 签名。
 // ============================================================
 #define FIRMWARE_VERSION       "1.0.19"
-#define FIRMWARE_BUILD         27
+#define FIRMWARE_BUILD         31
 #define FIRMWARE_HARDWARE      "waveshare-rlcd-42-v1"
 #define FIRMWARE_MODEL_VERSION 1
 #if __has_include("ota_secrets.h") || __has_include("secrets.h")
@@ -245,8 +245,9 @@
 #define ASR_UPLOAD_CHUNK_BYTES 4096
 
 // 群晖反向代理可能把“只有控制帧、没有应用数据”的 WebSocket 提前回收。
-// 聆听期间 PCM 默认先缓存在本地，因此用轻量应用层帧维持这条连接。
-#define WS_LISTEN_KEEPALIVE_MS 2000
+// 聆听期间 PCM 可能暂存在本地；audio_end 之后 ASR/LLM/TTS 也可能数秒
+// 没有下行数据，因此聆听和处理中都用轻量应用层帧维持这条连接。
+#define WS_LISTEN_KEEPALIVE_MS 1000
 
 // 播放音量（LLM operation: volume_up / volume_down 分发到这里）
 #define VOLUME_DEFAULT 1.0f // 默认满音量；保持 PCM 满幅但不额外数字放大

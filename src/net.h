@@ -27,9 +27,9 @@ void net_release_tls_for_ota();
 // 待唤醒时允许 WiFi modem sleep；录音/处理/播放时恢复全性能。
 void net_set_idle_power_save(bool enabled);
 // 返回 WebSocket 是否实际接受该二进制帧，便于端侧发现上行丢帧。
-// 音频与 JSON 控制帧都进入同一个发送队列，由独立发送任务按序发出：
-// 主循环不会被 TCP 回压阻塞（链路抖时采集/状态机照常跑），且 audio_end
-// 一定排在它之前入队的音频之后到达服务器。
+// 音频与 JSON 控制帧进入同一个发送队列，由专用任务按序发出；两端禁用
+// 协议 Ping/Pong，以免控制帧与同步 TLS 写争用。audio_end 一定排在它
+// 之前入队的音频之后到达服务器。
 bool net_send_audio(const uint8_t *data, size_t len);
 // 返回该控制帧是否被当前 WebSocket 接受/排入发送队列。
 bool net_send_json(const char *json);
