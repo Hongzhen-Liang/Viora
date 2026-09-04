@@ -85,7 +85,7 @@
 // 和服务器根 CA 后才会启用。固件还会校验 RSA-3072 签名。
 // ============================================================
 #define FIRMWARE_VERSION       "1.0.19"
-#define FIRMWARE_BUILD         22
+#define FIRMWARE_BUILD         23
 #define FIRMWARE_HARDWARE      "waveshare-rlcd-42-v1"
 #define FIRMWARE_MODEL_VERSION 1
 #if __has_include("ota_secrets.h") || __has_include("secrets.h")
@@ -179,16 +179,16 @@
 // 有明显的原始能量，允许它直接锁定起声；低于此门限仍需要多次 VAD 命中。
 #define STRONG_NEURAL_START_PEAK_MIN 650
 #define STRONG_NEURAL_START_RMS_MIN  150
-// 自然断句参数：短回答多等一会儿；正常句约 0.4 秒静音即回复；
+// 自然断句参数：短回答多等一会儿；正常句约 0.7 秒静音即回复；
 // 用户曾在句内停顿后继续说时，会自动学习其节奏并放宽，最多 2.0 秒。
 // 2026-08-20：设备端神经 VAD 对正常音量近讲命中偏稀疏（常只命中句首、
 // 句中被误判为静音），静音阈值必须留出富余，避免“没听完就断句开播”。
 #define VAD_FRAME_MS              32
 #define ENDPOINT_SHORT_SPEECH_MS  640
 #define ENDPOINT_SHORT_MS          750
-#define ENDPOINT_NORMAL_MS         400
+#define ENDPOINT_NORMAL_MS         700
 #define ENDPOINT_LONG_TURN_MS     5000
-#define ENDPOINT_LONG_MS          400
+#define ENDPOINT_LONG_MS          700
 #define ENDPOINT_MAX_MS           2000
 #define ENDPOINT_LEARN_GAP_MS     160
 #define MIN_REC_MS                450
