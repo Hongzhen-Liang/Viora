@@ -415,7 +415,9 @@ void AudioManager::playDrain() {
       }
     }
     const int64_t write_started_us = esp_timer_get_time();
-    if (s_play_last_write_us > 0) {
+    // 首块写入后，下一块通常正好跨过 PLAY_PREBUFFER_MS；这段等待是
+    // 预缓冲行为，不应被统计成播放任务迟写。
+    if (started && s_play_last_write_us > 0) {
       const uint32_t gap_us = static_cast<uint32_t>(
           write_started_us - s_play_last_write_us);
       portENTER_CRITICAL(&s_play_mux);

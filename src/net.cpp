@@ -70,6 +70,32 @@ static TaskHandle_t s_tx_task = nullptr;
 static uint32_t s_tx_sent_bytes = 0;
 static uint32_t s_tx_dropped_bytes = 0;
 static uint32_t s_tx_generation = 1;
+static bool s_tx_in_flight = false;
+static bool s_tx_failure_pending = false;
+static char s_tx_failure_reason[64] = {};
+
+// 发送任务不能让一个卡住的 TLS 写把 audio_end 永久挡在队列后面。
+static void tx_mark_failure(const char *reason) {
+  portENTER_CRITICAL(&s_tx_mux);
+  if (!s_tx_failure_pending) {
+    s_tx_failure_pending = true;
+    snprintf(s_tx_failure_reason, sizeof(s_tx_failure_reason), "%s",
+             reason != nullptr ? reason : "TX failure");
+  }
+  portEXIT_CRITICAL(&s_tx_mux);
+}
+
+static bool tx_failure_reason(char *out, size_t out_size) {
+  if (out == nullptr || out_size == 0) return false;
+  bool pending = false;
+  portENTER_CRITICAL(&s_tx_mux);
+  pending = s_tx_failure_pending;
+  if (pending) {
+    snprintf(out, out_size, "%s", s_tx_failure_reason);
+  }
+  portEXIT_CRITICAL(&s_tx_mux);
+  return pending;
+}
 
 static bool tx_push(uint8_t kind, const uint8_t *data, size_t len) {
   if (s_tx_queue == nullptr || data == nullptr ||
@@ -77,6 +103,10 @@ static bool tx_push(uint8_t kind, const uint8_t *data, size_t len) {
     return false;
   }
   portENTER_CRITICAL(&s_tx_mux);
+  if (s_tx_failure_pending) {
+    portEXIT_CRITICAL(&s_tx_mux);
+    return false;
+  }
   while (s_tx_count >= kTxQueueFrames) {
     if (kind == 0) {
       // 音频帧队列满：丢最旧（最旧帧离当前话语最远，损失最小）
@@ -121,11 +151,12 @@ static void ws_tx_worker(void *) {
     TxFrame frame;
     uint32_t generation = 0;
     portENTER_CRITICAL(&s_tx_mux);
-    if (s_tx_count > 0) {
+    if (!s_tx_failure_pending && s_tx_count > 0) {
       frame = s_tx_queue[s_tx_tail];
       s_tx_tail = (s_tx_tail + 1) % kTxQueueFrames;
       --s_tx_count;
       generation = s_tx_generation;
+      s_tx_in_flight = true;
       got = true;
     }
     portEXIT_CRITICAL(&s_tx_mux);
@@ -137,15 +168,32 @@ static void ws_tx_worker(void *) {
     // 插到新轮次的 audio_start 前面。
     portENTER_CRITICAL(&s_tx_mux);
     const bool stale = generation != s_tx_generation;
-    if (stale) s_tx_dropped_bytes += frame.len;
+    if (stale) {
+      s_tx_dropped_bytes += frame.len;
+      s_tx_in_flight = false;
+    }
     portEXIT_CRITICAL(&s_tx_mux);
     if (stale) continue;
-    if (s_ws_mutex) xSemaphoreTakeRecursive(s_ws_mutex, portMAX_DELAY);
+
+    if (s_ws_mutex &&
+        xSemaphoreTakeRecursive(s_ws_mutex,
+                                pdMS_TO_TICKS(WS_TX_LOCK_TIMEOUT_MS)) !=
+            pdTRUE) {
+      portENTER_CRITICAL(&s_tx_mux);
+      s_tx_in_flight = false;
+      s_tx_dropped_bytes += frame.len;
+      portEXIT_CRITICAL(&s_tx_mux);
+      tx_mark_failure("WebSocket mutex timeout");
+      continue;
+    }
+    const uint32_t send_started_ms = millis();
     const bool ok = frame.kind == 0
                         ? s_ws.sendBIN(frame.data, frame.len)
                         : s_ws.sendTXT(frame.data, frame.len);
+    const uint32_t send_elapsed_ms = millis() - send_started_ms;
     if (s_ws_mutex) xSemaphoreGiveRecursive(s_ws_mutex);
     portENTER_CRITICAL(&s_tx_mux);
+    s_tx_in_flight = false;
     if (generation == s_tx_generation) {
       if (ok) {
         if (frame.kind == 0) s_tx_sent_bytes += frame.len;
@@ -154,6 +202,15 @@ static void ws_tx_worker(void *) {
       }
     }
     portEXIT_CRITICAL(&s_tx_mux);
+    if (!ok) {
+      tx_mark_failure("WebSocket frame send failed");
+    } else if (send_elapsed_ms >= WS_TX_SLOW_SEND_MS) {
+      Serial.printf("[WS] 上行帧发送过慢：%lums kind=%u len=%u\n",
+                    static_cast<unsigned long>(send_elapsed_ms),
+                    static_cast<unsigned>(frame.kind),
+                    static_cast<unsigned>(frame.len));
+      tx_mark_failure("WebSocket frame send timeout");
+    }
     // 每帧间让出调度窗口；协议层 Ping 已在两端关闭，不会再与音频写
     // 争抢同一个 TLS socket。
     vTaskDelay(pdMS_TO_TICKS(1));
@@ -391,6 +448,45 @@ static void dispatch_pending_disconnect() {
   if (s_cb.on_disconnected) s_cb.on_disconnected();
 }
 
+static bool s_transport_abort_pending = false;
+static char s_transport_abort_reason[64] = {};
+
+void net_abort_connection(const char *reason) {
+  portENTER_CRITICAL(&s_event_mux);
+  if (!s_transport_abort_pending) {
+    s_transport_abort_pending = true;
+    snprintf(s_transport_abort_reason, sizeof(s_transport_abort_reason), "%s",
+             reason != nullptr ? reason : "transport failure");
+  }
+  portEXIT_CRITICAL(&s_event_mux);
+}
+
+static void dispatch_pending_abort() {
+  char reason[sizeof(s_transport_abort_reason)] = {};
+  bool pending = false;
+  portENTER_CRITICAL(&s_event_mux);
+  if (s_transport_abort_pending) {
+    snprintf(reason, sizeof(reason), "%s", s_transport_abort_reason);
+    s_transport_abort_pending = false;
+    pending = true;
+  }
+  portEXIT_CRITICAL(&s_event_mux);
+  if (!pending) return;
+
+  // 只有 Arduino 主循环销毁 WebSocketsClient；发送任务若正在写 TLS，
+  // 先让它返回，避免并发释放 mbedTLS 对象。
+  if (s_ws_mutex &&
+      xSemaphoreTakeRecursive(s_ws_mutex,
+                              pdMS_TO_TICKS(WS_TX_LOCK_TIMEOUT_MS)) !=
+          pdTRUE) {
+    net_abort_connection(reason);
+    return;
+  }
+  Serial.printf("[WS] 主动重置连接（%s）\n", reason);
+  s_ws.disconnect();
+  if (s_ws_mutex) xSemaphoreGiveRecursive(s_ws_mutex);
+}
+
 void net_loop() {
   if (WiFi.status() == WL_CONNECTED) {
     if (prov_active() && prov_should_close_on_connect()) prov_end();
@@ -451,6 +547,12 @@ void net_loop() {
     }
   }
 
+  char tx_reason[64] = {};
+  if (tx_failure_reason(tx_reason, sizeof(tx_reason))) {
+    net_abort_connection(tx_reason);
+  }
+  dispatch_pending_abort();
+
   // 该库一次 loop() 只消费一帧，不能只按主采音循环（约 32ms）调用一次。
   // 多次空轮询成本很低；有积压时则可一次清掉服务端的 TTS 预缓冲批次，
   // 也避免 Pong 长时间排在 PCM 后面被客户端自己的心跳误判超时。
@@ -463,6 +565,11 @@ void net_loop() {
     for (uint8_t i = 0; i < WS_LOOP_PUMP_PASSES; ++i) s_ws.loop();
     if (s_ws_mutex) xSemaphoreGiveRecursive(s_ws_mutex);
   }
+  char late_tx_reason[64] = {};
+  if (tx_failure_reason(late_tx_reason, sizeof(late_tx_reason))) {
+    net_abort_connection(late_tx_reason);
+  }
+  dispatch_pending_abort();
   // A send task can report a dead TLS socket while the main loop is busy
   // pumping frames. Apply the state/audio/display reset only here, on the
   // Arduino loop task, after the WebSocket mutex has been released.
@@ -546,6 +653,26 @@ uint32_t net_audio_dropped_bytes() {
   return v;
 }
 
+bool net_audio_wait_idle(uint32_t timeout_ms) {
+  if (s_tx_task == nullptr) return net_connected();
+  const uint32_t started_ms = millis();
+  for (;;) {
+    bool idle = false;
+    bool failed = false;
+    portENTER_CRITICAL(&s_tx_mux);
+    idle = s_tx_count == 0 && !s_tx_in_flight;
+    failed = s_tx_failure_pending;
+    portEXIT_CRITICAL(&s_tx_mux);
+    if (failed || !net_connected()) return false;
+    if (idle) return true;
+    if (millis() - started_ms >= timeout_ms) {
+      tx_mark_failure("TX queue drain timeout");
+      return false;
+    }
+    delay(1);
+  }
+}
+
 void net_audio_flush() {
   portENTER_CRITICAL(&s_tx_mux);
   s_tx_head = 0;
@@ -553,6 +680,8 @@ void net_audio_flush() {
   s_tx_count = 0;
   s_tx_sent_bytes = 0;
   s_tx_dropped_bytes = 0;
+  s_tx_failure_pending = false;
+  s_tx_failure_reason[0] = '\0';
   if (++s_tx_generation == 0) ++s_tx_generation;
   portEXIT_CRITICAL(&s_tx_mux);
 }

@@ -85,7 +85,7 @@
 // 和服务器根 CA 后才会启用。固件还会校验 RSA-3072 签名。
 // ============================================================
 #define FIRMWARE_VERSION       "1.0.19"
-#define FIRMWARE_BUILD         31
+#define FIRMWARE_BUILD         32
 #define FIRMWARE_HARDWARE      "waveshare-rlcd-42-v1"
 #define FIRMWARE_MODEL_VERSION 1
 #if __has_include("ota_secrets.h") || __has_include("secrets.h")
@@ -248,6 +248,11 @@
 // 聆听期间 PCM 可能暂存在本地；audio_end 之后 ASR/LLM/TTS 也可能数秒
 // 没有下行数据，因此聆听和处理中都用轻量应用层帧维持这条连接。
 #define WS_LISTEN_KEEPALIVE_MS 1000
+// 实时上行队列必须在 audio_end 之前真正排空；否则 audio_end 可能只入队，
+// 随后被卡住的 TLS 音频写挡住，反向代理等几十秒后才回收连接。
+#define WS_TX_DRAIN_TIMEOUT_MS 5000UL
+#define WS_TX_LOCK_TIMEOUT_MS  250UL
+#define WS_TX_SLOW_SEND_MS     3500UL
 
 // 播放音量（LLM operation: volume_up / volume_down 分发到这里）
 #define VOLUME_DEFAULT 1.0f // 默认满音量；保持 PCM 满幅但不额外数字放大

@@ -36,4 +36,8 @@ bool net_send_json(const char *json);
 // 本轮聆听的实际发送统计（新一轮开始时归零，供诊断使用）
 uint32_t net_audio_sent_bytes();
 uint32_t net_audio_dropped_bytes();
+// 等待队列和当前正在发送的帧都完成；超时表示 TLS/代理回压已卡住上行。
+bool net_audio_wait_idle(uint32_t timeout_ms);
+// 请求在主循环中安全地销毁当前 WSS/TLS 对象，下一轮自动重连。
+void net_abort_connection(const char *reason);
 void net_audio_flush();

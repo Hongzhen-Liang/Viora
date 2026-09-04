@@ -1003,9 +1003,18 @@ static void commit_turn(uint32_t now_ms) {
   // 发送过程中可能刚好断线；在切换到 PROCESSING 前再次确认，避免
   // 断线回调与当前采音循环交错时把 IDLE 覆盖回 PROCESSING。
   if (!net_connected() || s_state != ST_LISTENING ||
-      !net_send_json(end_frame) || !net_connected() ||
-      s_state != ST_LISTENING) {
+      !net_send_json(end_frame)) {
     Serial.println(">>> 本轮提交取消：服务器连接已失效");
+    return;
+  }
+  // net_send_json() 在实时模式下只是入队。必须确认 PCM 和 audio_end
+  // 都已由 TLS 实际写出，否则服务端会一直等待 audio_end，最终被代理
+  // 挂起几十秒后回收，设备看起来就像“永久断线”。
+  if (!net_audio_wait_idle(WS_TX_DRAIN_TIMEOUT_MS) || !net_connected()) {
+    Serial.printf(">>> 本轮提交取消：上行队列未排空（入队=%luB 实发=%luB），重置连接\n",
+                  static_cast<unsigned long>(s_uploaded_bytes),
+                  static_cast<unsigned long>(net_audio_sent_bytes()));
+    net_abort_connection("audio_end 上行超时");
     return;
   }
   set_state(ST_PROCESSING);
