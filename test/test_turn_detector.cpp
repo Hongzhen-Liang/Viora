@@ -6,7 +6,7 @@
 
 static const TurnDetectorConfig kConfig = {
     32, 3, 5, 450, 15000, 15000, 640,
-    1200, 650, 5000, 750, 1800, 160,
+    700, 420, 5000, 420, 2000, 160,
 };
 
 static TurnEvent advance(TurnDetector &turn, uint32_t *now, bool speech) {
@@ -82,17 +82,17 @@ int main() {
     assert(!gate.tail_released());
   }
 
-  // 普通完整句在约 650ms 静音后快速提交。
+  // 普通完整句在约 420ms 静音后快速提交。
   {
     TurnDetector turn(kConfig);
     uint32_t now = 0;
     turn.reset(now);
     establish_normal_turn(turn, &now);
-    assert(turn.endpoint_silence_ms() == 650);
+    assert(turn.endpoint_silence_ms() == 420);
     const TurnEvent event = advance_until_event(turn, &now, false);
     assert(event == TURN_EVENT_ENDPOINT);
-    assert(turn.current_silence_ms(now) >= 650);
-    assert(turn.current_silence_ms(now) < 650 + kConfig.frame_ms);
+    assert(turn.current_silence_ms(now) >= 420);
+    assert(turn.current_silence_ms(now) < 420 + kConfig.frame_ms);
   }
 
   // 用户曾在句中停顿后继续说，后续端点会自适应放宽。
@@ -101,13 +101,13 @@ int main() {
     uint32_t now = 0;
     turn.reset(now);
     establish_normal_turn(turn, &now);
-    // 480ms 小于当前端点，恢复说话后应被学习，而不是提前断句。
-    for (int i = 0; i < 15; ++i) {
+    // 320ms 小于当前端点，恢复说话后应被学习，而不是提前断句。
+    for (int i = 0; i < 10; ++i) {
       assert(advance(turn, &now, false) == TURN_EVENT_NONE);
     }
     assert(advance(turn, &now, true) == TURN_EVENT_NONE);
-    assert(turn.max_completed_gap_ms() >= 480);
-    assert(turn.endpoint_silence_ms() > 650);
+    assert(turn.max_completed_gap_ms() >= 320);
+    assert(turn.endpoint_silence_ms() > 420);
   }
 
   // 扬声器尾音 guard 内的能量不启动录音，无人说话最终 idle timeout。
@@ -153,12 +153,12 @@ int main() {
     assert(turn.speech_started());
     assert(turn.voice_frames() == 5);
     assert(turn.speech_start_ms() == 840);
-    assert(turn.update(2000, false) == TURN_EVENT_NONE);
-    assert(turn.update(2100, true) == TURN_EVENT_NONE);
+    assert(turn.update(1500, false) == TURN_EVENT_NONE);
+    assert(turn.update(1600, true) == TURN_EVENT_NONE);
     assert(turn.max_completed_gap_ms() == 0);
   }
 
-  // 五帧短句（例如“等等”）不是噪声，并在较耐心的 1.2s 端点提交。
+  // 五帧短句（例如“等等”）不是噪声，并在较耐心的 700ms 端点提交。
   {
     TurnDetector turn(kConfig);
     uint32_t now = 0;
@@ -168,7 +168,7 @@ int main() {
       if (i == 2) assert(event == TURN_EVENT_SPEECH_STARTED);
       else assert(event == TURN_EVENT_NONE);
     }
-    assert(turn.endpoint_silence_ms() == 1200);
+    assert(turn.endpoint_silence_ms() == 700);
     assert(advance_until_event(turn, &now, false) == TURN_EVENT_ENDPOINT);
   }
 

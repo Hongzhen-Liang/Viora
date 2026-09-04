@@ -879,17 +879,11 @@ static void commit_turn(uint32_t now_ms) {
       trim_start_ms = s_preroll_ms - ASR_PREFIX_PADDING_MS;
     }
   } else {
-    // 服务端无需识别等待用户开口之前的静音/扬声器尾音；保留 600ms
-    // padding 足以覆盖 VAD 的 1–3 帧固有延迟和爆破音起始。
-    uint32_t live_speech_offset_ms = 0;
-    if (static_cast<int32_t>(s_turn.speech_start_ms() -
-                             s_listen_start_ms) > 0) {
-      live_speech_offset_ms = s_turn.speech_start_ms() - s_listen_start_ms;
-    }
-    const uint32_t speech_offset_ms =
-        s_preroll_ms + live_speech_offset_ms;
-    if (speech_offset_ms > ASR_PREFIX_PADDING_MS) {
-      trim_start_ms = speech_offset_ms - ASR_PREFIX_PADDING_MS;
+    // 环形缓存只保存确认开口前最近 AUDIO_PREROLL_MS，而不是从进入
+    // 聆听开始的全部等待时间。裁剪只能依据实际写入的前置 PCM；把等待
+    // 时长再加进来会误裁句首，尤其是用户在续聊窗口后半段才开口时。
+    if (s_preroll_ms > ASR_PREFIX_PADDING_MS) {
+      trim_start_ms = s_preroll_ms - ASR_PREFIX_PADDING_MS;
     }
   }
   const uint32_t trailing_ms = s_turn.current_silence_ms(now_ms);
@@ -915,6 +909,13 @@ static void commit_turn(uint32_t now_ms) {
       g_audio.recordData());
   const size_t record_len = record_samples * sizeof(int16_t);
   size_t record_offset = 0;
+  // 开始批量上传前先消费一次积压的 Pong/控制帧，避免第一块写入时才
+  // 发现连接已被代理回收。
+  net_loop();
+  if (!net_connected() || s_state != ST_LISTENING) {
+    Serial.println(">>> 本轮上传取消：发送前连接已失效");
+    return;
+  }
   while (record_offset < record_len) {
     // sendBIN 是同步 TLS 写。每个块之间主动处理一次收包/心跳，避免
     // 批量上传期间把 WebSocket 的控制帧饿死；若此处发现断线，立即放弃
@@ -957,8 +958,10 @@ static void commit_turn(uint32_t now_ms) {
   const uint32_t pcm_ms = static_cast<uint32_t>(
       record_samples * 1000ULL / SR_SAMPLE_RATE);
 #endif
+  // 录音只包含前置环和确认起声后的部分，不包含用户开口前在续聊窗口
+  // 中等待的几秒；用 speech_start 对齐才能正确评估 PCM 时钟。
   const uint32_t wall_audio_ms =
-      s_preroll_ms + (now_ms - s_listen_start_ms);
+      s_preroll_ms + (now_ms - s_turn.speech_start_ms());
   const uint32_t clock_drift_ms =
       pcm_ms > wall_audio_ms ? pcm_ms - wall_audio_ms
                              : wall_audio_ms - pcm_ms;
@@ -1781,7 +1784,16 @@ void loop() {
       s_state == ST_LISTENING &&
       (s_listen_origin == LISTEN_FROM_WAKE_ACK ||
        s_listen_origin == LISTEN_FROM_FOLLOWUP);
+  uint32_t speaker_tail_guard_ms = 0;
+  if (s_listen_origin == LISTEN_FROM_FOLLOWUP) {
+    speaker_tail_guard_ms = FOLLOWUP_GUARD_MS;
+  } else if (s_listen_origin == LISTEN_FROM_WAKE_ACK) {
+    speaker_tail_guard_ms = WAKE_ACK_FOLLOWUP_GUARD_MS;
+  }
+  const bool speaker_tail_guard_done =
+      elapsed_at_least(millis(), s_listen_start_ms, speaker_tail_guard_ms);
   const bool live_energy_in_echo_tail =
+      speaker_tail_guard_done &&
       vol_l >= ECHO_TAIL_VOICE_PEAK_MIN &&
       g_audio.captureRms() >= ECHO_TAIL_VOICE_RMS_MIN;
   const uint32_t evidence_now = millis();
@@ -1976,8 +1988,11 @@ void loop() {
       const TurnEvent event = s_turn.update(now, turn_speech_smoothed);
       if (!s_listen_audio_started && s_turn.speech_started()) {
         s_listen_audio_started = true;
-#if ASR_STREAM_AUDIO
+        // 两种上传模式都必须先消费开口前的环形缓存。整句模式下
+        // send_ring_audio() 会写入 PSRAM 录音缓存；此前漏掉了这一步，
+        // 导致每轮最前面的约 100–900ms 被丢弃、ASR 经常要求重说。
         send_ring_audio();
+#if ASR_STREAM_AUDIO
         Serial.printf(
             ">>> 已确认人声，开始上传（前置音频=%lums）...\n",
             static_cast<unsigned long>(s_preroll_ms));

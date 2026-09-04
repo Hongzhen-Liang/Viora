@@ -85,7 +85,7 @@
 // 和服务器根 CA 后才会启用。固件还会校验 RSA-3072 签名。
 // ============================================================
 #define FIRMWARE_VERSION       "1.0.19"
-#define FIRMWARE_BUILD         23
+#define FIRMWARE_BUILD         25
 #define FIRMWARE_HARDWARE      "waveshare-rlcd-42-v1"
 #define FIRMWARE_MODEL_VERSION 1
 #if __has_include("ota_secrets.h") || __has_include("secrets.h")
@@ -179,16 +179,16 @@
 // 有明显的原始能量，允许它直接锁定起声；低于此门限仍需要多次 VAD 命中。
 #define STRONG_NEURAL_START_PEAK_MIN 650
 #define STRONG_NEURAL_START_RMS_MIN  150
-// 自然断句参数：短回答多等一会儿；正常句约 0.7 秒静音即回复；
+// 自然断句参数：短回答稍多等一会儿；正常句约 0.42 秒静音即回复；
 // 用户曾在句内停顿后继续说时，会自动学习其节奏并放宽，最多 2.0 秒。
 // 2026-08-20：设备端神经 VAD 对正常音量近讲命中偏稀疏（常只命中句首、
 // 句中被误判为静音），静音阈值必须留出富余，避免“没听完就断句开播”。
 #define VAD_FRAME_MS              32
 #define ENDPOINT_SHORT_SPEECH_MS  640
-#define ENDPOINT_SHORT_MS          750
-#define ENDPOINT_NORMAL_MS         700
+#define ENDPOINT_SHORT_MS          700
+#define ENDPOINT_NORMAL_MS         420
 #define ENDPOINT_LONG_TURN_MS     5000
-#define ENDPOINT_LONG_MS          700
+#define ENDPOINT_LONG_MS          420
 #define ENDPOINT_MAX_MS           2000
 #define ENDPOINT_LEARN_GAP_MS     160
 #define MIN_REC_MS                450
@@ -198,7 +198,7 @@
 #define CONV_TIMEOUT_MS        12000  // 普通陈述回复后的默认续聊窗口
 #define CONV_TIMEOUT_MIN_MS     5000  // 服务端动态窗口的端侧安全下限
 #define CONV_TIMEOUT_MAX_MS    30000  // 服务端动态窗口的端侧安全上限
-#define FOLLOWUP_GUARD_MS      180    // 只屏蔽扬声器的最后一点余音
+#define FOLLOWUP_GUARD_MS      320    // 屏蔽播放结束后的 DMA/房间余音，不污染下一轮
 #define ECHO_TAIL_VOICE_PEAK_MIN 240  // 播放后新一轮必须有当前真实声能才可起句
 #define ECHO_TAIL_VOICE_RMS_MIN  100  // 挡住实测回声尾音 170/77，保留真人/扬声器指令
 #define ECHO_LIVE_ENERGY_HOLD_MS 800  // 允许异步 neural VAD 比原始声能晚到
@@ -241,9 +241,9 @@
 // audio_start → PCM → audio_end 的顺序，避免后台 TLS 写任务饿死心跳。
 // 设为 1 仅用于实验性的实时上传，不作为稳定运行模式。
 #define ASR_STREAM_AUDIO       0
-// 批量上传时减少 WebSocket/TLS 帧数；sendBIN 直接引用 PSRAM 录音缓存，
-// 不会额外复制整句。服务端按帧累积 PCM，16KB 仍远低于单帧上限。
-#define ASR_UPLOAD_CHUNK_BYTES 16384
+// 群晖反向代理链路对较大的连续 TLS 写较敏感。4KB 与服务端音频帧粒度
+// 对齐，并让每块之间都有机会处理 Pong，避免整句末尾上传到一半断线。
+#define ASR_UPLOAD_CHUNK_BYTES 4096
 
 // 群晖反向代理可能把“只有控制帧、没有应用数据”的 WebSocket 提前回收。
 // 聆听期间 PCM 默认先缓存在本地，因此用轻量应用层帧维持这条连接。
@@ -260,7 +260,7 @@
 // ============================================================
 #define PCM_BUFFER_SIZE ((SR_SAMPLE_RATE * AUDIO_PREROLL_MS) / 1000) // 前置音频环形缓存
 #define PLAY_BUFFER_SIZE (1536 * 1024)           // 播放缓冲 1.5MB ≈ 48 秒音频
-#define PLAY_PREBUFFER_MS 512                     // 首播至少留出半秒网络抖动余量，避免刚到 8KB 就开播抽干
+#define PLAY_PREBUFFER_MS 320                     // 服务端已预缓冲约 350ms；端侧再留 320ms 抗网络抖动即可
 #define PLAY_REBUFFER_MS 512                      // 真实欠载后多攒一点再续播，避免反复卡顿
 #define PLAY_UNDERRUN_GRACE_MS 400                // 覆盖约192ms DMA余量与网络抖动，避免误进入重缓冲
 #define PLAY_I2S_LATE_WRITE_MS 48                 // 独立播放任务写入间隔诊断阈值
