@@ -251,8 +251,9 @@
 // 实时上行队列必须在 audio_end 之前真正排空；否则 audio_end 可能只入队，
 // 随后被卡住的 TLS 音频写挡住，反向代理等几十秒后才回收连接。
 #define WS_TX_DRAIN_TIMEOUT_MS 5000UL
-#define WS_TX_LOCK_TIMEOUT_MS  250UL
 #define WS_TX_SLOW_SEND_MS     3500UL
+#define WS_PROBE_INTERVAL_MS   10000UL
+#define WS_RX_STALE_MS         45000UL
 
 // 播放音量（LLM operation: volume_up / volume_down 分发到这里）
 #define VOLUME_DEFAULT 1.0f // 默认满音量；保持 PCM 满幅但不额外数字放大

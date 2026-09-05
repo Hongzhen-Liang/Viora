@@ -5,16 +5,40 @@
 #include <WiFi.h>
 #include <esp_wifi.h>
 #include <esp_mac.h>
+#include <esp_heap_caps.h>
 #include <ESPmDNS.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
 
 #include "config.h"
 #include "net.h"
+#include "net_tx_queue.h"
 #include "provisioning.h"
 #include "ota_manager.h"
 
-static WebSocketsClient s_ws;
+class RecoverableWebSocket : public WebSocketsClient {
+ public:
+  // Called only with the transport mutex held. A failed transport must not
+  // attempt another blocking Close-frame write before releasing TLS memory.
+  void abortTransport(const char *reason) { clientDisconnect(&_client, reason); }
+  void loop() {
+    const bool retry = _port != 0 && !clientIsConnected(&_client) &&
+                      millis() - _lastConnectionFail >= _reconnectInterval;
+    if (retry) {
+      Serial.printf("[WS] 尝试连接 heap=%u largest_internal=%u\n",
+                    ESP.getFreeHeap(),
+                    heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
+    const uint32_t started = millis();
+    WebSocketsClient::loop();
+    if (retry || millis() - started >= 1000) {
+      Serial.printf("[WS] 网络处理耗时=%lums transport_state=%d\n",
+                    static_cast<unsigned long>(millis() - started),
+                    static_cast<int>(_client.status));
+    }
+  }
+};
+static RecoverableWebSocket s_ws;
 // links2004/WebSocketsClient is not thread-safe. The main loop receives via
 // loop() while ws_tx_worker sends from another core; serialize both directions
 // or a barge-in's cancel/audio_start burst can corrupt lwIP pbuf references.
@@ -27,12 +51,16 @@ static volatile bool s_disconnect_pending = false;
 static char s_disconnect_reason[64] = {};
 static portMUX_TYPE s_event_mux = portMUX_INITIALIZER_UNLOCKED;
 static NetCallbacks s_cb = {};
+static uint32_t s_connection_generation = 0;  // guarded by s_event_mux
+static uint32_t s_last_rx_ms = 0;
+static uint32_t s_last_probe_ms = 0;
+static bool s_keepalive_ack_supported = false;
+static uint32_t s_connection_count = 0;
 
 // links2004/WebSockets 的同步客户端每次 loop() 最多只解析一个完整 WS 帧。
 // 服务端在 tts_start 后会快速下发约 1.2s 预缓冲（当前为 10 个 4096B
-// 二进制帧）；若每个 32ms 采音周期只调用一次 loop()，音频帧会挡住后面的
-// Pong/tts_end，最终同时造成播放欠载和心跳误断。一次泵完控制帧 + 整批
-// 预缓冲，后续流也能及时进入 1.5MB 的端侧播放环形缓冲。
+// 二进制帧）；每个采音周期需要处理多帧，及时收到 tts_end/保活回应。
+// 每帧之间释放传输锁，让上行和下行都能继续推进。
 static constexpr uint8_t WS_LOOP_PUMP_PASSES = 12;
 
 // WiFi 重连
@@ -53,7 +81,7 @@ static uint32_t s_wifi_down_since = 0;
 // 主循环（聆听态循环只有 32-44% 负荷，时钟差 2-3s，指令整段丢），
 // 还会在句尾批量上传时填满约 32KB socket 缓冲。发送移入独立任务后，
 // 主循环只做非阻塞入队；
-// 队列满时丢弃最旧音频帧给 JSON 控制帧让路（JSON 永不丢）。
+// 为控制帧预留空间；满时拒绝新音频，不破坏已接受帧的顺序。
 // ------------------------------------------------------------
 struct TxFrame {
   uint8_t kind;     // 0=音频 1=JSON
@@ -63,25 +91,17 @@ struct TxFrame {
 static constexpr int kTxQueueFrames = 160;  // ≈640KB PSRAM，覆盖最长整句录音
 static TxFrame *s_tx_queue = nullptr;
 static portMUX_TYPE s_tx_mux = portMUX_INITIALIZER_UNLOCKED;
-static int s_tx_head = 0;
-static int s_tx_tail = 0;
-static int s_tx_count = 0;
+static NetTxQueue<TxFrame, kTxQueueFrames, 8> s_tx_frames;
 static TaskHandle_t s_tx_task = nullptr;
 static uint32_t s_tx_sent_bytes = 0;
 static uint32_t s_tx_dropped_bytes = 0;
-static uint32_t s_tx_generation = 1;
+static NetTxEpoch s_tx_epoch;
 static bool s_tx_in_flight = false;
-static bool s_tx_failure_pending = false;
-static char s_tx_failure_reason[64] = {};
 
 // 发送任务不能让一个卡住的 TLS 写把 audio_end 永久挡在队列后面。
-static void tx_mark_failure(const char *reason) {
+static void tx_mark_failure(const char *reason, uint32_t generation) {
   portENTER_CRITICAL(&s_tx_mux);
-  if (!s_tx_failure_pending) {
-    s_tx_failure_pending = true;
-    snprintf(s_tx_failure_reason, sizeof(s_tx_failure_reason), "%s",
-             reason != nullptr ? reason : "TX failure");
-  }
+  s_tx_epoch.fail(generation, reason);
   portEXIT_CRITICAL(&s_tx_mux);
 }
 
@@ -89,9 +109,9 @@ static bool tx_failure_reason(char *out, size_t out_size) {
   if (out == nullptr || out_size == 0) return false;
   bool pending = false;
   portENTER_CRITICAL(&s_tx_mux);
-  pending = s_tx_failure_pending;
+  pending = s_tx_epoch.failed();
   if (pending) {
-    snprintf(out, out_size, "%s", s_tx_failure_reason);
+    snprintf(out, out_size, "%s", s_tx_epoch.reason());
   }
   portEXIT_CRITICAL(&s_tx_mux);
   return pending;
@@ -103,44 +123,26 @@ static bool tx_push(uint8_t kind, const uint8_t *data, size_t len) {
     return false;
   }
   portENTER_CRITICAL(&s_tx_mux);
-  if (s_tx_failure_pending) {
+  if (s_tx_epoch.failed()) {
     portEXIT_CRITICAL(&s_tx_mux);
     return false;
   }
-  while (s_tx_count >= kTxQueueFrames) {
+  TxFrame *f = s_tx_frames.reserve(kind != 0);
+  if (!f) {
     if (kind == 0) {
-      // 音频帧队列满：丢最旧（最旧帧离当前话语最远，损失最小）
-      s_tx_dropped_bytes += s_tx_queue[s_tx_tail].len;
-      s_tx_tail = (s_tx_tail + 1) % kTxQueueFrames;
-      --s_tx_count;
+      s_tx_dropped_bytes += len;
     } else {
-      // JSON 控制帧不能丢：挤出最旧音频帧
-      int slot = s_tx_tail;
-      for (int i = 0; i < s_tx_count; ++i) {
-        int idx = (s_tx_tail + i) % kTxQueueFrames;
-        if (s_tx_queue[idx].kind == 0) { slot = idx; break; }
-      }
-      const int slot_idx = (slot + 0) % kTxQueueFrames;
-      if (s_tx_queue[slot_idx].kind == 0) {
-        s_tx_dropped_bytes += s_tx_queue[slot_idx].len;
-        for (int i = slot; i != s_tx_head;
-             i = (i + 1) % kTxQueueFrames) {
-          const int next = (i + 1) % kTxQueueFrames;
-          s_tx_queue[i] = s_tx_queue[next];
-        }
-        s_tx_head = (s_tx_head - 1 + kTxQueueFrames) % kTxQueueFrames;
-        --s_tx_count;
-      } else {
-        break;  // 全是 JSON（异常），直接退出避免死循环
-      }
+      // Losing audio_start/audio_end/cancel silently desynchronizes the
+      // session. Recover the connection if even the control reserve is full.
+      s_tx_epoch.fail(s_tx_epoch.generation(), "TX control queue full");
     }
+    portEXIT_CRITICAL(&s_tx_mux);
+    return false;
   }
-  TxFrame &f = s_tx_queue[s_tx_head];
-  f.kind = kind;
-  f.len = static_cast<uint16_t>(len);
-  memcpy(f.data, data, len);
-  s_tx_head = (s_tx_head + 1) % kTxQueueFrames;
-  ++s_tx_count;
+  f->kind = kind;
+  f->len = static_cast<uint16_t>(len);
+  memcpy(f->data, data, len);
+  s_tx_frames.commit();
   portEXIT_CRITICAL(&s_tx_mux);
   return true;
 }
@@ -151,11 +153,8 @@ static void ws_tx_worker(void *) {
     TxFrame frame;
     uint32_t generation = 0;
     portENTER_CRITICAL(&s_tx_mux);
-    if (!s_tx_failure_pending && s_tx_count > 0) {
-      frame = s_tx_queue[s_tx_tail];
-      s_tx_tail = (s_tx_tail + 1) % kTxQueueFrames;
-      --s_tx_count;
-      generation = s_tx_generation;
+    if (!s_tx_epoch.failed() && s_tx_frames.pop(frame)) {
+      generation = s_tx_epoch.generation();
       s_tx_in_flight = true;
       got = true;
     }
@@ -164,26 +163,30 @@ static void ws_tx_worker(void *) {
       vTaskDelay(pdMS_TO_TICKS(2));
       continue;
     }
-    // audio_end/cancel 可能在该帧出队后清空队列；不要把旧轮次的音频
-    // 插到新轮次的 audio_start 前面。
-    portENTER_CRITICAL(&s_tx_mux);
-    const bool stale = generation != s_tx_generation;
-    if (stale) {
-      s_tx_dropped_bytes += frame.len;
-      s_tx_in_flight = false;
-    }
-    portEXIT_CRITICAL(&s_tx_mux);
-    if (stale) continue;
-
-    if (s_ws_mutex &&
-        xSemaphoreTakeRecursive(s_ws_mutex,
-                                pdMS_TO_TICKS(WS_TX_LOCK_TIMEOUT_MS)) !=
-            pdTRUE) {
+    // Keep the dequeued frame while waiting: contention is not a broken
+    // connection. Recheck generation AFTER acquiring the transport lock.
+    const uint32_t wait_started_ms = millis();
+    bool have_lock = false;
+    for (;;) {
       portENTER_CRITICAL(&s_tx_mux);
-      s_tx_in_flight = false;
-      s_tx_dropped_bytes += frame.len;
+      const bool stale = generation != s_tx_epoch.generation() || s_tx_epoch.failed();
       portEXIT_CRITICAL(&s_tx_mux);
-      tx_mark_failure("WebSocket mutex timeout");
+      if (stale) break;
+      if (xSemaphoreTakeRecursive(s_ws_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+        have_lock = true;
+        break;
+      }
+      if (millis() - wait_started_ms >= WS_TX_DRAIN_TIMEOUT_MS) {
+        tx_mark_failure("TX lock stalled", generation);
+        break;
+      }
+    }
+    portENTER_CRITICAL(&s_tx_mux);
+    const bool stale = generation != s_tx_epoch.generation() || s_tx_epoch.failed();
+    if (!have_lock || stale) s_tx_in_flight = false;
+    portEXIT_CRITICAL(&s_tx_mux);
+    if (!have_lock || stale) {
+      if (have_lock) xSemaphoreGiveRecursive(s_ws_mutex);
       continue;
     }
     const uint32_t send_started_ms = millis();
@@ -191,26 +194,25 @@ static void ws_tx_worker(void *) {
                         ? s_ws.sendBIN(frame.data, frame.len)
                         : s_ws.sendTXT(frame.data, frame.len);
     const uint32_t send_elapsed_ms = millis() - send_started_ms;
-    if (s_ws_mutex) xSemaphoreGiveRecursive(s_ws_mutex);
     portENTER_CRITICAL(&s_tx_mux);
     s_tx_in_flight = false;
-    if (generation == s_tx_generation) {
+    if (generation == s_tx_epoch.generation()) {
       if (ok) {
         if (frame.kind == 0) s_tx_sent_bytes += frame.len;
       } else {
         s_tx_dropped_bytes += frame.len;
+        s_tx_epoch.fail(generation, "WebSocket frame send failed");
       }
     }
     portEXIT_CRITICAL(&s_tx_mux);
-    if (!ok) {
-      tx_mark_failure("WebSocket frame send failed");
-    } else if (send_elapsed_ms >= WS_TX_SLOW_SEND_MS) {
+    if (ok && send_elapsed_ms >= WS_TX_SLOW_SEND_MS) {
       Serial.printf("[WS] 上行帧发送过慢：%lums kind=%u len=%u\n",
                     static_cast<unsigned long>(send_elapsed_ms),
                     static_cast<unsigned>(frame.kind),
                     static_cast<unsigned>(frame.len));
-      tx_mark_failure("WebSocket frame send timeout");
+      // A slow but successful write is not a reason to destroy the session.
     }
+    xSemaphoreGiveRecursive(s_ws_mutex);
     // 每帧间让出调度窗口；协议层 Ping 已在两端关闭，不会再与音频写
     // 争抢同一个 TLS socket。
     vTaskDelay(pdMS_TO_TICKS(1));
@@ -247,7 +249,18 @@ static void wifi_connect() {
 static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
   switch (type) {
     case WStype_CONNECTED:
+      net_audio_flush();
+      portENTER_CRITICAL(&s_event_mux);
+      ++s_connection_generation;
+      portEXIT_CRITICAL(&s_event_mux);
+      s_last_rx_ms = s_last_probe_ms = millis();
+      s_keepalive_ack_supported = false;
+      ++s_connection_count;
       s_ws_connected = true;
+      Serial.printf("[WS] session=%lu heap=%u largest_internal=%u min_heap=%u\n",
+                    static_cast<unsigned long>(s_connection_count), ESP.getFreeHeap(),
+                    heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                    ESP.getMinFreeHeap());
       Serial.println("[WS] 已连接 Mac 服务器");
       if (s_cb.on_connected) s_cb.on_connected();
       break;
@@ -255,6 +268,7 @@ static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
     case WStype_DISCONNECTED: {
       s_ws_connected = false;
       portENTER_CRITICAL(&s_event_mux);
+      ++s_connection_generation;
       const size_t reason_len =
           length < sizeof(s_disconnect_reason) - 1
               ? length
@@ -277,6 +291,7 @@ static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
       break;
 
     case WStype_TEXT: {
+      s_last_rx_ms = millis();
       JsonDocument doc;
       DeserializationError err = deserializeJson(doc, (const char *)payload, length);
       if (err) {
@@ -284,7 +299,9 @@ static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
         break;
       }
       const char *t = doc["type"] | "";
-      if (strcmp(t, "text") == 0) {
+      if (strcmp(t, "keepalive_ack") == 0) {
+        s_keepalive_ack_supported = true;
+      } else if (strcmp(t, "text") == 0) {
         if (s_cb.on_text) s_cb.on_text(
             "text", doc["user"] | "", doc["reply"] | "", "",
             doc["op"] | "", doc["follow_up_ms"] | 0U);
@@ -313,6 +330,7 @@ static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
     }
 
     case WStype_BIN:
+      s_last_rx_ms = millis();
       if (s_cb.on_audio) s_cb.on_audio(payload, length);
       break;
 
@@ -397,6 +415,10 @@ static void start_websocket() {
 void net_init(const NetCallbacks &cb) {
   s_cb = cb;
   if (s_ws_mutex == nullptr) s_ws_mutex = xSemaphoreCreateRecursiveMutex();
+  if (!s_ws_mutex) {
+    Serial.println("[WS] 无法分配网络互斥锁，停止网络初始化");
+    return;
+  }
   prov_setup();  // 加载 NVS 里保存过的 WiFi（出门配网用）
   s_wifi_down_since = millis();  // 配网超时从开机算起，而不是从首次断网算起
   wifi_connect();
@@ -408,6 +430,7 @@ void net_init(const NetCallbacks &cb) {
         ps_malloc(kTxQueueFrames * sizeof(TxFrame)));
   }
   if (s_tx_queue != nullptr && s_tx_task == nullptr) {
+    s_tx_frames.attach(s_tx_queue);
     const BaseType_t created = xTaskCreatePinnedToCore(
         ws_tx_worker, "ws_tx", 8192, nullptr, 2, &s_tx_task, 0);
     if (created == pdPASS) {
@@ -450,11 +473,13 @@ static void dispatch_pending_disconnect() {
 
 static bool s_transport_abort_pending = false;
 static char s_transport_abort_reason[64] = {};
+static uint32_t s_transport_abort_generation = 0;
 
 void net_abort_connection(const char *reason) {
   portENTER_CRITICAL(&s_event_mux);
   if (!s_transport_abort_pending) {
     s_transport_abort_pending = true;
+    s_transport_abort_generation = s_connection_generation;
     snprintf(s_transport_abort_reason, sizeof(s_transport_abort_reason), "%s",
              reason != nullptr ? reason : "transport failure");
   }
@@ -462,32 +487,30 @@ void net_abort_connection(const char *reason) {
 }
 
 static void dispatch_pending_abort() {
-  char reason[sizeof(s_transport_abort_reason)] = {};
+  // Take the transport lock before consuming failure state. A disconnect
+  // callback can invalidate old errors while the TX task owns this lock.
+  if (xSemaphoreTakeRecursive(s_ws_mutex, 0) != pdTRUE) return;
+  char reason[64] = {};
   bool pending = false;
   portENTER_CRITICAL(&s_event_mux);
   if (s_transport_abort_pending) {
-    snprintf(reason, sizeof(reason), "%s", s_transport_abort_reason);
+    pending = s_transport_abort_generation == s_connection_generation;
+    if (pending) snprintf(reason, sizeof(reason), "%s", s_transport_abort_reason);
     s_transport_abort_pending = false;
-    pending = true;
   }
   portEXIT_CRITICAL(&s_event_mux);
-  if (!pending) return;
-
-  // 只有 Arduino 主循环销毁 WebSocketsClient；发送任务若正在写 TLS，
-  // 先让它返回，避免并发释放 mbedTLS 对象。
-  if (s_ws_mutex &&
-      xSemaphoreTakeRecursive(s_ws_mutex,
-                              pdMS_TO_TICKS(WS_TX_LOCK_TIMEOUT_MS)) !=
-          pdTRUE) {
-    net_abort_connection(reason);
-    return;
+  if (!pending) pending = tx_failure_reason(reason, sizeof(reason));
+  if (pending) {
+    Serial.printf("[WS] 主动重置连接（%s）\n", reason);
+    s_ws.abortTransport(reason);
+    // Also clear errors when no TCP object existed (no library callback).
+    net_audio_flush();
   }
-  Serial.printf("[WS] 主动重置连接（%s）\n", reason);
-  s_ws.disconnect();
-  if (s_ws_mutex) xSemaphoreGiveRecursive(s_ws_mutex);
+  xSemaphoreGiveRecursive(s_ws_mutex);
 }
 
 void net_loop() {
+  if (!s_ws_mutex) return;
   if (WiFi.status() == WL_CONNECTED) {
     if (prov_active() && prov_should_close_on_connect()) prov_end();
     s_wifi_was_up = true;
@@ -511,6 +534,7 @@ void net_loop() {
     if (!s_target_ready) start_websocket();
     prov_loop();  // 联网时网页服务常驻（http://设备IP/ 增删已保存 WiFi）
   } else {
+    if (s_wifi_online) net_abort_connection("WiFi disconnected");
     s_wifi_online = false;
     s_idle_power_save = false;
     if (s_wifi_was_up) {
@@ -547,33 +571,49 @@ void net_loop() {
     }
   }
 
-  char tx_reason[64] = {};
-  if (tx_failure_reason(tx_reason, sizeof(tx_reason))) {
-    net_abort_connection(tx_reason);
+  dispatch_pending_abort();
+  dispatch_pending_disconnect();
+
+  if (s_wifi_online && s_target_ready) {
+    // Release between frames so TX gets a chance during a TTS burst. One
+    // partial frame may still take the library's bounded TCP read timeout.
+    for (uint8_t i = 0; i < WS_LOOP_PUMP_PASSES; ++i) {
+      if (xSemaphoreTakeRecursive(s_ws_mutex, pdMS_TO_TICKS(2)) != pdTRUE) break;
+      dispatch_pending_abort();
+      s_ws.loop();
+      xSemaphoreGiveRecursive(s_ws_mutex);
+      dispatch_pending_disconnect();
+      taskYIELD();
+    }
   }
   dispatch_pending_abort();
 
-  // 该库一次 loop() 只消费一帧，不能只按主采音循环（约 32ms）调用一次。
-  // 多次空轮询成本很低；有积压时则可一次清掉服务端的 TTS 预缓冲批次，
-  // 也避免 Pong 长时间排在 PCM 后面被客户端自己的心跳误判超时。
-  // 发送任务里的 TLS write 可能短暂占用 socket 锁。主循环不能无限等锁，
-  // 否则就无法继续处理 Pong，最终把一个可恢复的网络回压变成断线。
-  const bool have_ws_lock =
-      !s_ws_mutex ||
-      xSemaphoreTakeRecursive(s_ws_mutex, pdMS_TO_TICKS(20)) == pdTRUE;
-  if (have_ws_lock) {
-    for (uint8_t i = 0; i < WS_LOOP_PUMP_PASSES; ++i) s_ws.loop();
-    if (s_ws_mutex) xSemaphoreGiveRecursive(s_ws_mutex);
-  }
-  char late_tx_reason[64] = {};
-  if (tx_failure_reason(late_tx_reason, sizeof(late_tx_reason))) {
-    net_abort_connection(late_tx_reason);
-  }
-  dispatch_pending_abort();
   // A send task can report a dead TLS socket while the main loop is busy
   // pumping frames. Apply the state/audio/display reset only here, on the
   // Arduino loop task, after the WebSocket mutex has been released.
   dispatch_pending_disconnect();
+  const uint32_t now = millis();
+  if (s_ws_connected) {
+    if (s_keepalive_ack_supported && now - s_last_rx_ms >= WS_RX_STALE_MS) {
+      net_abort_connection("server receive timeout");
+    } else if (now - s_last_probe_ms >= WS_PROBE_INTERVAL_MS) {
+      if (net_send_json("{\"type\":\"audio_keepalive\"}")) s_last_probe_ms = now;
+    }
+  }
+  static uint32_t last_diagnostic_ms = 0;
+  if (now - last_diagnostic_ms >= 30000) {
+    last_diagnostic_ms = now;
+    portENTER_CRITICAL(&s_tx_mux);
+    const unsigned queued = s_tx_frames.size();
+    const bool in_flight = s_tx_in_flight;
+    portEXIT_CRITICAL(&s_tx_mux);
+    Serial.printf("[NET] wifi=%d ws=%d queue=%u sending=%d rx_age=%lums ack=%d heap=%u largest_internal=%u min_heap=%u\n",
+                  net_wifi_connected(), net_connected(), queued, in_flight,
+                  static_cast<unsigned long>(now - s_last_rx_ms), s_keepalive_ack_supported,
+                  ESP.getFreeHeap(),
+                  heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                  ESP.getMinFreeHeap());
+  }
 }
 
 bool net_connected() {
@@ -592,7 +632,7 @@ void net_release_tls_for_ota() {
   if (!s_ws_connected) return;
   net_audio_flush();
   if (s_ws_mutex) xSemaphoreTakeRecursive(s_ws_mutex, portMAX_DELAY);
-  s_ws.disconnect();
+  s_ws.abortTransport("OTA TLS release");
   if (s_ws_mutex) xSemaphoreGiveRecursive(s_ws_mutex);
   // WiFiClientSecure 在 disconnect 后释放 mbedTLS 缓冲；给清理回调一个调度窗口，
   // 避免 OTA HTTPS 紧接着分配第二套 TLS 状态而耗尽内部 RAM。
@@ -618,6 +658,7 @@ bool net_send_audio(const uint8_t *data, size_t len) {
     if (!s_ws_connected || data == nullptr || len == 0) return false;
     if (s_ws_mutex) xSemaphoreTakeRecursive(s_ws_mutex, portMAX_DELAY);
     const bool ok = s_ws.sendBIN((uint8_t *)data, len);
+    if (!ok) net_abort_connection("direct audio send failed");
     if (s_ws_mutex) xSemaphoreGiveRecursive(s_ws_mutex);
     return ok;
   }
@@ -631,6 +672,7 @@ bool net_send_json(const char *json) {
   if (s_tx_task == nullptr) {
     if (s_ws_mutex) xSemaphoreTakeRecursive(s_ws_mutex, portMAX_DELAY);
     const bool ok = s_ws.sendTXT(json);
+    if (!ok) net_abort_connection("direct control send failed");
     if (s_ws_mutex) xSemaphoreGiveRecursive(s_ws_mutex);
     return ok;
   }
@@ -659,14 +701,16 @@ bool net_audio_wait_idle(uint32_t timeout_ms) {
   for (;;) {
     bool idle = false;
     bool failed = false;
+    uint32_t generation = 0;
     portENTER_CRITICAL(&s_tx_mux);
-    idle = s_tx_count == 0 && !s_tx_in_flight;
-    failed = s_tx_failure_pending;
+    generation = s_tx_epoch.generation();
+    idle = s_tx_frames.size() == 0 && !s_tx_in_flight;
+    failed = s_tx_epoch.failed();
     portEXIT_CRITICAL(&s_tx_mux);
     if (failed || !net_connected()) return false;
     if (idle) return true;
     if (millis() - started_ms >= timeout_ms) {
-      tx_mark_failure("TX queue drain timeout");
+      tx_mark_failure("TX queue drain timeout", generation);
       return false;
     }
     delay(1);
@@ -675,13 +719,9 @@ bool net_audio_wait_idle(uint32_t timeout_ms) {
 
 void net_audio_flush() {
   portENTER_CRITICAL(&s_tx_mux);
-  s_tx_head = 0;
-  s_tx_tail = 0;
-  s_tx_count = 0;
+  s_tx_frames.clear();
   s_tx_sent_bytes = 0;
   s_tx_dropped_bytes = 0;
-  s_tx_failure_pending = false;
-  s_tx_failure_reason[0] = '\0';
-  if (++s_tx_generation == 0) ++s_tx_generation;
+  s_tx_epoch.reset();
   portEXIT_CRITICAL(&s_tx_mux);
 }
