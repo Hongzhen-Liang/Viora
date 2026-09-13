@@ -207,6 +207,9 @@ static void ws_tx_worker(void *) {
       continue;
     }
     const uint32_t send_started_ms = millis();
+    const uint32_t heap_before = ESP.getFreeHeap();
+    const uint32_t largest_before = heap_caps_get_largest_free_block(
+        MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
     const bool ok = s_ws.sendQueued(frame.data, frame.len, frame.kind == 0);
     const uint32_t send_elapsed_ms = millis() - send_started_ms;
     portENTER_CRITICAL(&s_tx_mux);
@@ -222,10 +225,11 @@ static void ws_tx_worker(void *) {
     }
     portEXIT_CRITICAL(&s_tx_mux);
     if (!ok || send_elapsed_ms >= 250 || send_started_ms - wait_started_ms >= 250) {
-      Serial.printf("[WS] TX %s kind=%u len=%u lock=%lums write=%lums heap=%u largest=%u\n",
+      Serial.printf("[WS] TX %s kind=%u len=%u lock=%lums write=%lums heap=%u->%u largest=%u->%u\n",
                     ok ? "slow" : "FAILED", frame.kind, frame.len,
                     static_cast<unsigned long>(send_started_ms - wait_started_ms),
-                    static_cast<unsigned long>(send_elapsed_ms), ESP.getFreeHeap(),
+                    static_cast<unsigned long>(send_elapsed_ms), heap_before, ESP.getFreeHeap(),
+                    largest_before,
                     heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     }
     if (ok && send_elapsed_ms >= WS_TX_SLOW_SEND_MS) {

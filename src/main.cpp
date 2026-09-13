@@ -25,6 +25,7 @@
 #include "sensor/sensor_manager.h"
 #include "secure_telemetry.h"
 #include "speech.h"
+#include "tls_memory.h"
 #include "turn_detector.h"
 #include "vad.h"
 #include "wake_ack_data.h"
@@ -1308,6 +1309,9 @@ static void print_hardware_banner(bool sensors_ok, bool audio_ok) {
 void setup() {
   Serial.begin(115200);
   delay(200);
+  Serial.printf("[TLS] 大块缓冲分配: %s\n",
+                tls_memory_init() ? "PSRAM 优先（保留内部 RAM 给 WiFi/音频）"
+                                  : "默认内部 RAM（PSRAM 不可用）");
 
   // 传感器（板载 SHTC3 / 可选 BH1750 / 外接土壤湿度）
   const bool sensors_ok = g_sensor.begin();
