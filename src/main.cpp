@@ -52,6 +52,7 @@ static const WakeAckGateConfig kWakeAckGateConfig = {
 };
 
 static ConvState s_state = ST_IDLE;
+static bool s_upload_pending = false;
 static ListenOrigin s_listen_origin = LISTEN_FROM_WAKE;
 static TurnDetector s_turn(kTurnConfig);
 static SpeechEvidenceGate s_listen_speech(kSpeechEvidenceConfig);
@@ -633,6 +634,7 @@ static void ota_screen_loop() {
 
 static void set_state(ConvState state) {
   s_state = state;
+  s_upload_pending = false;
   s_state_since_ms = millis();
   if (state == ST_IDLE) {
     g_display.setVisualState(DisplayVisualState::kIdle);
@@ -1007,17 +1009,12 @@ static void commit_turn(uint32_t now_ms) {
     Serial.println(">>> 本轮提交取消：服务器连接已失效");
     return;
   }
-  // net_send_json() 在实时模式下只是入队。必须确认 PCM 和 audio_end
-  // 都已由 TLS 实际写出，否则服务端会一直等待 audio_end，最终被代理
-  // 挂起几十秒后回收，设备看起来就像“永久断线”。
-  if (!net_audio_wait_idle(WS_TX_DRAIN_TIMEOUT_MS) || !net_connected()) {
-    Serial.printf(">>> 本轮提交取消：上行队列未排空（入队=%luB 实发=%luB），重置连接\n",
-                  static_cast<unsigned long>(s_uploaded_bytes),
-                  static_cast<unsigned long>(net_audio_sent_bytes()));
-    net_abort_connection("audio_end 上行超时");
-    return;
-  }
+  // Enter the reply-accepting state before pumping RX: a fast response may
+  // arrive in the same loop as completion of audio_end. Upload has its own
+  // deadline; ASR/LLM timeout starts only after that frame is actually written.
+  net_audio_begin_drain();
   set_state(ST_PROCESSING);
+  s_upload_pending = true;
   // 不在“说完→服务端首包”的关键窗口同步刷整屏。
   // set_state() 已切换 Thinking 视觉状态；整屏刷新会阻塞
   // WebSocket 收包，实测会把已经生成的回答再推迟约 1–2s。
@@ -1113,7 +1110,7 @@ static void retry_listening_after_failure() {
 
 static bool handle_state_watchdog() {
   const uint32_t now = millis();
-  if (s_state == ST_PROCESSING &&
+  if (s_state == ST_PROCESSING && !s_upload_pending &&
       elapsed_at_least(now, s_state_since_ms, PROCESSING_TIMEOUT_MS)) {
     Serial.printf("[STATE] PROCESSING 超时 %lums，取消并恢复聆听\n",
                   static_cast<unsigned long>(now - s_state_since_ms));
@@ -1504,6 +1501,18 @@ static void handle_presence_logic() {
 
 void loop() {
   net_loop();
+  if (s_upload_pending && s_state == ST_PROCESSING) {
+    const NetDrainStatus upload = net_audio_poll_drain();
+    if (upload == NetDrainStatus::Complete) {
+      s_upload_pending = false;
+      s_state_since_ms = millis();
+      Serial.println("[WS] audio_end 已写出，等待识别与回复");
+    } else if (upload == NetDrainStatus::Failed) {
+      s_upload_pending = false;
+      // Preserve the transport fault; next net_loop dispatches its reason.
+      set_state(ST_IDLE);
+    }
+  }
   service_listen_keepalive();
   handle_presence_logic();
   ota_loop(s_state == ST_IDLE && !s_rearm_pending && !s_exit_pending &&

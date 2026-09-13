@@ -21,6 +21,20 @@ class RecoverableWebSocket : public WebSocketsClient {
   // Called only with the transport mutex held. A failed transport must not
   // attempt another blocking Close-frame write before releasing TLS memory.
   void abortTransport(const char *reason) { clientDisconnect(&_client, reason); }
+  // Queue storage reserves header space: one TLS write, no per-frame malloc.
+  bool sendQueued(uint8_t *storage, size_t length, bool binary) {
+    if (!clientIsConnected(&_client) || _client.status != WSC_CONNECTED) return false;
+    uint8_t mask[4];
+    const uint32_t random_mask = esp_random();
+    memcpy(mask, &random_mask, sizeof(mask));
+    uint8_t header[WEBSOCKETS_MAX_HEADER_SIZE];
+    const uint8_t n = createHeader(header, binary ? WSop_binary : WSop_text,
+                                   length, true, mask, true);
+    uint8_t *payload = storage + WEBSOCKETS_MAX_HEADER_SIZE;
+    for (size_t i = 0; i < length; ++i) payload[i] ^= mask[i % 4];
+    memcpy(payload - n, header, n);
+    return write(&_client, payload - n, length + n) == length + n;
+  }
   void loop() {
     const bool retry = _port != 0 && !clientIsConnected(&_client) &&
                       millis() - _lastConnectionFail >= _reconnectInterval;
@@ -86,7 +100,7 @@ static uint32_t s_wifi_down_since = 0;
 struct TxFrame {
   uint8_t kind;     // 0=音频 1=JSON
   uint16_t len;
-  uint8_t data[4096];
+  uint8_t data[WEBSOCKETS_MAX_HEADER_SIZE + 4096];
 };
 static constexpr int kTxQueueFrames = 160;  // ≈640KB PSRAM，覆盖最长整句录音
 static TxFrame *s_tx_queue = nullptr;
@@ -94,6 +108,8 @@ static portMUX_TYPE s_tx_mux = portMUX_INITIALIZER_UNLOCKED;
 static NetTxQueue<TxFrame, kTxQueueFrames, 8> s_tx_frames;
 static TaskHandle_t s_tx_task = nullptr;
 static uint32_t s_tx_sent_bytes = 0;
+static uint32_t s_tx_enqueued_frames = 0;
+static uint32_t s_tx_completed_frames = 0; // 包括 audio_end 等控制帧
 static uint32_t s_tx_dropped_bytes = 0;
 static NetTxEpoch s_tx_epoch;
 static bool s_tx_in_flight = false;
@@ -119,7 +135,7 @@ static bool tx_failure_reason(char *out, size_t out_size) {
 
 static bool tx_push(uint8_t kind, const uint8_t *data, size_t len) {
   if (s_tx_queue == nullptr || data == nullptr ||
-      len == 0 || len > sizeof(s_tx_queue[0].data)) {
+      len == 0 || len > 4096) {
     return false;
   }
   portENTER_CRITICAL(&s_tx_mux);
@@ -141,8 +157,9 @@ static bool tx_push(uint8_t kind, const uint8_t *data, size_t len) {
   }
   f->kind = kind;
   f->len = static_cast<uint16_t>(len);
-  memcpy(f->data, data, len);
+  memcpy(f->data + WEBSOCKETS_MAX_HEADER_SIZE, data, len);
   s_tx_frames.commit();
+  ++s_tx_enqueued_frames;
   portEXIT_CRITICAL(&s_tx_mux);
   return true;
 }
@@ -176,7 +193,7 @@ static void ws_tx_worker(void *) {
         have_lock = true;
         break;
       }
-      if (millis() - wait_started_ms >= WS_TX_DRAIN_TIMEOUT_MS) {
+      if (millis() - wait_started_ms >= WS_TX_STALL_TIMEOUT_MS) {
         tx_mark_failure("TX lock stalled", generation);
         break;
       }
@@ -190,14 +207,13 @@ static void ws_tx_worker(void *) {
       continue;
     }
     const uint32_t send_started_ms = millis();
-    const bool ok = frame.kind == 0
-                        ? s_ws.sendBIN(frame.data, frame.len)
-                        : s_ws.sendTXT(frame.data, frame.len);
+    const bool ok = s_ws.sendQueued(frame.data, frame.len, frame.kind == 0);
     const uint32_t send_elapsed_ms = millis() - send_started_ms;
     portENTER_CRITICAL(&s_tx_mux);
     s_tx_in_flight = false;
     if (generation == s_tx_epoch.generation()) {
       if (ok) {
+        ++s_tx_completed_frames;
         if (frame.kind == 0) s_tx_sent_bytes += frame.len;
       } else {
         s_tx_dropped_bytes += frame.len;
@@ -205,6 +221,13 @@ static void ws_tx_worker(void *) {
       }
     }
     portEXIT_CRITICAL(&s_tx_mux);
+    if (!ok || send_elapsed_ms >= 250 || send_started_ms - wait_started_ms >= 250) {
+      Serial.printf("[WS] TX %s kind=%u len=%u lock=%lums write=%lums heap=%u largest=%u\n",
+                    ok ? "slow" : "FAILED", frame.kind, frame.len,
+                    static_cast<unsigned long>(send_started_ms - wait_started_ms),
+                    static_cast<unsigned long>(send_elapsed_ms), ESP.getFreeHeap(),
+                    heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
     if (ok && send_elapsed_ms >= WS_TX_SLOW_SEND_MS) {
       Serial.printf("[WS] 上行帧发送过慢：%lums kind=%u len=%u\n",
                     static_cast<unsigned long>(send_elapsed_ms),
@@ -354,7 +377,7 @@ static void start_websocket() {
                   resolved.toString().c_str(),
                   is_private_ip(resolved) ? "内网" : "公网");
     if (!is_private_ip(resolved)) {
-      Serial.println("[WS] 注意：解析到公网地址，连接可能不稳定（请检查局域网 DNS 配置）");
+      Serial.println("[WS] 使用公网链路（移动热点/外网访问时正常），上传将容忍网络抖动");
     }
   } else {
     Serial.printf("[WS] 域名 %s 解析失败，重连时会重试解析\n", SERVER_HOST);
@@ -695,32 +718,54 @@ uint32_t net_audio_dropped_bytes() {
   return v;
 }
 
-bool net_audio_wait_idle(uint32_t timeout_ms) {
-  if (s_tx_task == nullptr) return net_connected();
-  const uint32_t started_ms = millis();
-  for (;;) {
-    bool idle = false;
-    bool failed = false;
-    uint32_t generation = 0;
-    portENTER_CRITICAL(&s_tx_mux);
-    generation = s_tx_epoch.generation();
-    idle = s_tx_frames.size() == 0 && !s_tx_in_flight;
-    failed = s_tx_epoch.failed();
-    portEXIT_CRITICAL(&s_tx_mux);
-    if (failed || !net_connected()) return false;
-    if (idle) return true;
-    if (millis() - started_ms >= timeout_ms) {
-      tx_mark_failure("TX queue drain timeout", generation);
-      return false;
-    }
-    delay(1);
+static NetTxDrainDeadline s_drain_deadline(0, 0);
+static uint32_t s_drain_generation = 0;
+static uint32_t s_drain_target = 0;
+static uint32_t s_drain_started_ms = 0;
+static uint32_t s_drain_log_ms = 0;
+
+void net_audio_begin_drain() {
+  portENTER_CRITICAL(&s_tx_mux);
+  s_drain_generation = s_tx_epoch.generation();
+  s_drain_target = s_tx_enqueued_frames;
+  const uint32_t progress = s_tx_completed_frames;
+  portEXIT_CRITICAL(&s_tx_mux);
+  s_drain_started_ms = s_drain_log_ms = millis();
+  s_drain_deadline = NetTxDrainDeadline(s_drain_started_ms, progress);
+}
+
+NetDrainStatus net_audio_poll_drain() {
+  portENTER_CRITICAL(&s_tx_mux);
+  const uint32_t generation = s_tx_epoch.generation();
+  const uint32_t progress = s_tx_completed_frames;
+  const uint32_t sent = s_tx_sent_bytes;
+  const unsigned queued = s_tx_frames.size();
+  const bool failed = s_tx_epoch.failed();
+  portEXIT_CRITICAL(&s_tx_mux);
+  const NetDrainStatus status = net_tx_fence_status(
+      generation, s_drain_generation, progress, s_drain_target, failed, net_connected());
+  if (status != NetDrainStatus::Pending) return status;
+  const uint32_t now = millis();
+  if (s_drain_deadline.expired(now, progress, WS_TX_STALL_TIMEOUT_MS,
+                             WS_TX_DRAIN_TIMEOUT_MS)) {
+    tx_mark_failure("TX upload stalled or total deadline reached", generation);
+    return NetDrainStatus::Failed;
   }
+  if (now - s_drain_log_ms >= 5000) {
+    Serial.printf("[WS] 正在上传：句尾等待=%lums 实发=%luB 排队=%u帧\n",
+                  static_cast<unsigned long>(now - s_drain_started_ms),
+                  static_cast<unsigned long>(sent), queued);
+    s_drain_log_ms = now;
+  }
+  return NetDrainStatus::Pending;
 }
 
 void net_audio_flush() {
   portENTER_CRITICAL(&s_tx_mux);
   s_tx_frames.clear();
   s_tx_sent_bytes = 0;
+  s_tx_enqueued_frames = 0;
+  s_tx_completed_frames = 0;
   s_tx_dropped_bytes = 0;
   s_tx_epoch.reset();
   portEXIT_CRITICAL(&s_tx_mux);

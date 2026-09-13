@@ -250,7 +250,8 @@
 #define WS_LISTEN_KEEPALIVE_MS 1000
 // 实时上行队列必须在 audio_end 之前真正排空；否则 audio_end 可能只入队，
 // 随后被卡住的 TLS 音频写挡住，反向代理等几十秒后才回收连接。
-#define WS_TX_DRAIN_TIMEOUT_MS 5000UL
+#define WS_TX_DRAIN_TIMEOUT_MS 60000UL // 句尾上传总上限，覆盖热点慢速上行
+#define WS_TX_STALL_TIMEOUT_MS 15000UL // 连续无成功发送才判定停滞
 #define WS_TX_SLOW_SEND_MS     3500UL
 #define WS_PROBE_INTERVAL_MS   10000UL
 #define WS_RX_STALE_MS         45000UL

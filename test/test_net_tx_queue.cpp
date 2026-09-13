@@ -6,6 +6,31 @@
 
 struct Frame { unsigned sequence; bool control; };
 int main() {
+  // PCM done but audio_end in flight must remain pending. Controls queued
+  // after audio_end need not drain. Disconnect/reset/fault overrides success.
+  assert(net_tx_fence_status(1, 1, 10, 11, false, true) == NetDrainStatus::Pending);
+  assert(net_tx_fence_status(1, 1, 11, 11, false, true) == NetDrainStatus::Complete);
+  assert(net_tx_fence_status(1, 1, 12, 11, false, true) == NetDrainStatus::Complete);
+  assert(net_tx_fence_status(2, 1, 0, 11, false, true) == NetDrainStatus::Failed);
+  assert(net_tx_fence_status(1, 1, 11, 11, true, true) == NetDrainStatus::Failed);
+  assert(net_tx_fence_status(1, 1, 11, 11, false, false) == NetDrainStatus::Failed);
+  // Hotspot upload still advancing after the old five-second deadline.
+  NetTxDrainDeadline slow(100, 0);
+  for (uint32_t elapsed = 5000; elapsed < 60000; elapsed += 5000) {
+    assert(!slow.expired(100 + elapsed, elapsed / 5000, 15000, 60000));
+  }
+  assert(slow.expired(60100, 12, 15000, 60000)); // hard cap despite progress
+  NetTxDrainDeadline stalled(100, 7);
+  assert(!stalled.expired(15099, 7, 15000, 60000));
+  assert(stalled.expired(15100, 7, 15000, 60000));
+  NetTxDrainDeadline resumed(100, 7);
+  assert(!resumed.expired(14100, 8, 15000, 60000));
+  assert(!resumed.expired(28100, 9, 15000, 60000));
+  assert(resumed.expired(43100, 9, 15000, 60000));
+  NetTxDrainDeadline rollover(UINT32_MAX - 999, 0);
+  assert(!rollover.expired(13999, 0, 15000, 60000));
+  assert(rollover.expired(14000, 0, 15000, 60000));
+
   NetTxEpoch epoch;
   const auto first = epoch.generation();
   epoch.fail(first, "first failure");

@@ -3,6 +3,35 @@
 #include <stdint.h>
 #include <stdio.h>
 
+enum class NetDrainStatus { Pending, Complete, Failed };
+
+// A fence belongs to one queue epoch. Later controls do not extend it, and
+// clearing a queue must not be mistaken for successful delivery.
+inline NetDrainStatus net_tx_fence_status(uint32_t epoch, uint32_t expected_epoch,
+                                          uint32_t completed, uint32_t target,
+                                          bool failed, bool connected) {
+  if (epoch != expected_epoch || failed || !connected) return NetDrainStatus::Failed;
+  return completed >= target ? NetDrainStatus::Complete : NetDrainStatus::Pending;
+}
+
+// An advancing upload may exceed the idle limit, but never the total limit.
+// Unsigned subtraction also handles the millis() rollover.
+class NetTxDrainDeadline {
+ public:
+  NetTxDrainDeadline(uint32_t now, uint32_t progress)
+      : started_(now), advanced_(now), progress_(progress) {}
+  bool expired(uint32_t now, uint32_t progress, uint32_t idle_ms,
+               uint32_t total_ms) {
+    if (progress != progress_) {
+      progress_ = progress;
+      advanced_ = now;
+    }
+    return now - started_ >= total_ms || now - advanced_ >= idle_ms;
+  }
+ private:
+  uint32_t started_, advanced_, progress_;
+};
+
 // Caller supplies storage (PSRAM on device) and synchronization. Never moves
 // queued payloads or evicts accepted control frames when the queue is full.
 template <typename Frame, size_t Capacity, size_t ControlReserve>
