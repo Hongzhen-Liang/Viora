@@ -54,6 +54,8 @@ static const WakeAckGateConfig kWakeAckGateConfig = {
 
 static ConvState s_state = ST_IDLE;
 static bool s_upload_pending = false;
+static bool s_wait_hint_shown = false;
+static uint32_t s_reply_wait_started_ms = 0;
 static ListenOrigin s_listen_origin = LISTEN_FROM_WAKE;
 static TurnDetector s_turn(kTurnConfig);
 static SpeechEvidenceGate s_listen_speech(kSpeechEvidenceConfig);
@@ -636,6 +638,8 @@ static void ota_screen_loop() {
 static void set_state(ConvState state) {
   s_state = state;
   s_upload_pending = false;
+  s_wait_hint_shown = false;
+  s_reply_wait_started_ms = millis();
   s_state_since_ms = millis();
   if (state == ST_IDLE) {
     g_display.setVisualState(DisplayVisualState::kIdle);
@@ -737,6 +741,9 @@ static void enter_listening(ListenOrigin origin, bool force_preroll,
     set_state(ST_IDLE);
     g_audio.ringClear();
     Serial.println(">>> 服务器未连接，回到待唤醒");
+    if (!s_settings_menu_active && !s_manual_provisioning) {
+      show_temporary_message("网络还没连好\n等一会儿再叫我吧");
+    }
     return;
   }
 
@@ -1054,6 +1061,7 @@ static void on_net_connected() {
 }
 
 static void on_net_disconnected() {
+  const bool interrupted = s_state != ST_IDLE;
   set_state(ST_IDLE);
   s_rearm_pending = false;
   s_exit_pending = false;
@@ -1072,6 +1080,9 @@ static void on_net_disconnected() {
   g_audio.ringClear();
   g_audio.recordClear();
   g_audio.playDiscard();
+  if (interrupted && !s_settings_menu_active && !s_manual_provisioning) {
+    show_temporary_message("连接断了一下\n等连好后，再叫我吧");
+  }
 }
 
 // 服务器错误 / 未识别到有效语音后的共同回退：清播放、回聆听；
@@ -1505,6 +1516,12 @@ static void handle_presence_logic() {
 
 void loop() {
   net_loop();
+  if (s_state == ST_PROCESSING && !s_wait_hint_shown &&
+      millis() - s_reply_wait_started_ms >= 4000 &&
+      !s_settings_menu_active && !s_manual_provisioning) {
+    s_wait_hint_shown = true;
+    g_display.setSubtitle("还在等回复\n再给我一点时间");
+  }
   if (s_upload_pending && s_state == ST_PROCESSING) {
     const NetDrainStatus upload = net_audio_poll_drain();
     if (upload == NetDrainStatus::Complete) {
@@ -1515,6 +1532,9 @@ void loop() {
       s_upload_pending = false;
       // Preserve the transport fault; next net_loop dispatches its reason.
       set_state(ST_IDLE);
+      if (!s_settings_menu_active && !s_manual_provisioning) {
+        show_temporary_message("连接断了一下\n等连好后，再叫我吧");
+      }
     }
   }
   service_listen_keepalive();
@@ -1902,7 +1922,7 @@ void loop() {
       // 丢掉更早的唤醒词。后续上传使用 source=follow_up，不会误剥前缀。
       keep_latest_ring_audio(WAKE_ACK_BOUNDARY_PREROLL_MS);
       speech_async_reset();    // 使旧会话 AFE 结果失效，AEC 参考从零开始
-      g_audio.markTtsStart();
+      g_audio.markTtsStart(false);
       g_audio.playPush(wake_ack_pcm_data,
                        static_cast<uint32_t>(wake_ack_pcm_len));
       g_audio.markTtsEnd();

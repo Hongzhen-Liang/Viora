@@ -9,6 +9,7 @@
 #include <string.h>
 
 #include "audio/audio_manager.h"
+#include "audio/playback_buffer_policy.h"
 #include "config.h"
 #include "hardware/rlcd_codec.h"
 
@@ -36,6 +37,8 @@ static bool     s_play_write_in_flight = false;
 static uint32_t s_last_play_write_ms = 0;
 static uint32_t s_play_empty_since_ms = 0;
 static uint32_t s_play_underruns = 0;
+static PlaybackBufferPolicy s_buffer_policy;
+static uint32_t s_session_buffer_ms = 512;
 static uint32_t s_play_overflows = 0;
 static int64_t  s_play_last_write_us = 0;
 static uint32_t s_play_max_write_gap_us = 0;
@@ -307,24 +310,26 @@ void AudioManager::playDrain() {
   bool end_seen;
   bool started;
   bool rebuffering;
+  uint32_t buffer_ms;
   portENTER_CRITICAL(&s_play_mux);
   n = s_play_len;
   active = s_play_session_active;
   end_seen = s_tts_end_seen;
   started = s_play_started;
   rebuffering = s_play_rebuffering;
+  buffer_ms = s_session_buffer_ms;
   portEXIT_CRITICAL(&s_play_mux);
 
   if (!active) return;
 
   const uint32_t now = millis();
   const uint32_t prebuffer_bytes =
-      (SR_SAMPLE_RATE * 2U * PLAY_PREBUFFER_MS) / 1000U;
+      (SR_SAMPLE_RATE * 2U * buffer_ms) / 1000U;
   const uint32_t rebuffer_bytes =
-      (SR_SAMPLE_RATE * 2U * PLAY_REBUFFER_MS) / 1000U;
+      (SR_SAMPLE_RATE * 2U * (buffer_ms > PLAY_REBUFFER_MS ? buffer_ms : PLAY_REBUFFER_MS)) / 1000U;
 
   // 应用缓冲触底时，I2S DMA 仍可能保留约 192ms 的待播数据；
-  // 再给网络抖动留出余量，否则会把正常的 WS 到包间隙误判为欠载。
+  // 空缓冲超过 DMA 余量就重缓冲；不能再等到 400ms 才记录停顿。
   if (started && n == 0 && !end_seen) {
     bool underrun = false;
     uint32_t underrun_count = 0;
@@ -336,13 +341,15 @@ void AudioManager::playDrain() {
       s_play_rebuffering = true;
       s_play_empty_since_ms = 0;
       underrun_count = ++s_play_underruns;
+      s_buffer_policy.starved();
+      s_session_buffer_ms = s_buffer_policy.targetMs();
       underrun = true;
     }
     portEXIT_CRITICAL(&s_play_mux);
     if (underrun) {
       Serial.printf(
-          "[I2S] TTS 播放欠载 #%lu，等待重缓冲 %dms\n",
-          static_cast<unsigned long>(underrun_count), PLAY_REBUFFER_MS);
+          "[I2S] TTS 播放欠载 #%lu，启用自适应重缓冲\n",
+          static_cast<unsigned long>(underrun_count));
     }
     return;
   }
@@ -354,7 +361,7 @@ void AudioManager::playDrain() {
 
   const uint32_t start_bytes =
       rebuffering ? rebuffer_bytes : prebuffer_bytes;
-  if (!started && n > 0 && !end_seen && n < start_bytes) {
+  if (n > 0 && !playback_buffer_ready(n, end_seen, started, start_bytes)) {
     // 尚未达到首播/重缓冲水位，暂不把抖动直接传给 I2S。
     return;
   }
@@ -424,6 +431,10 @@ void AudioManager::playDrain() {
       if (gap_us > s_play_max_write_gap_us) s_play_max_write_gap_us = gap_us;
       if (gap_us > PLAY_I2S_LATE_WRITE_MS * 1000U) ++s_play_late_writes;
       portEXIT_CRITICAL(&s_play_mux);
+      if (gap_us >= 192000) {
+        Serial.printf("[I2S] 长播放间隔=%.1fms 本次取数前缓冲=%luB\n",
+                      gap_us / 1000.0f, static_cast<unsigned long>(n));
+      }
     }
     s_play_last_write_us = write_started_us;
 
@@ -528,8 +539,10 @@ void AudioManager::playDiscard() {
   if (s_play_write_mutex) xSemaphoreGive(s_play_write_mutex);
 }
 
-void AudioManager::markTtsStart() {
+void AudioManager::markTtsStart(bool network) {
   portENTER_CRITICAL(&s_play_mux);
+  s_buffer_policy.begin(network);
+  s_session_buffer_ms = network ? s_buffer_policy.targetMs() : 0;
   s_tts_end_seen = false;
   s_play_started = false;
   s_play_rebuffering = false;
@@ -603,6 +616,7 @@ bool AudioManager::playbackFinished() {
     late_writes = s_play_late_writes;
     underruns = s_play_underruns;
     overflows = s_play_overflows;
+    s_buffer_policy.finish();
     s_tts_end_seen = false;
     s_play_started = false;
     s_play_rebuffering = false;

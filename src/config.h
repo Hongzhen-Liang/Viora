@@ -267,9 +267,9 @@
 // ============================================================
 #define PCM_BUFFER_SIZE ((SR_SAMPLE_RATE * AUDIO_PREROLL_MS) / 1000) // 前置音频环形缓存
 #define PLAY_BUFFER_SIZE (1536 * 1024)           // 播放缓冲 1.5MB ≈ 48 秒音频
-#define PLAY_PREBUFFER_MS 256                     // 服务端已预缓冲约 256ms；首批 8KB 到齐即可低延迟开播
+// 首播由 PlaybackBufferPolicy 在 256–1024ms 间自适应，初始 512ms。
 #define PLAY_REBUFFER_MS 512                      // 真实欠载后多攒一点再续播，避免反复卡顿
-#define PLAY_UNDERRUN_GRACE_MS 400                // 覆盖约192ms DMA余量与网络抖动，避免误进入重缓冲
+#define PLAY_UNDERRUN_GRACE_MS 192                // 空缓冲超过 DMA 余量即进入重缓冲
 #define PLAY_I2S_LATE_WRITE_MS 48                 // 独立播放任务写入间隔诊断阈值
 #define PLAYBACK_DRAIN_MS 64                      // 等 I2S DMA 最后一块物理播完再重开麦
 #define NOISE_HIST_LEN  64                       // 噪声估计窗口 64 帧 × 32ms ≈ 2 秒

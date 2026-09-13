@@ -43,7 +43,7 @@ class AudioManager {
   uint32_t playBufferedBytes();  // 当前尚未播放的 PCM 字节数
   // 取上一轮送入扬声器的 PCM，供 AFE AEC 作为参考信号；不足部分补零。
   void playReference(int16_t *dst, int frames);
-  void markTtsStart();  // 收到 tts_start 时调用
+  void markTtsStart(bool network = true);  // 本地确认音不参与网络缓冲学习
   void markTtsEnd();    // 收到 tts_end 时调用
   // 估算已经真正送到扬声器的单声道 PCM 字节数。
   // 扣除 I2S DMA 预填量，供字幕以音频字节边界精确换页。
