@@ -28,10 +28,21 @@ EXPRESSIONS = (
 )
 
 
-def pack_bitmap(source_path: Path) -> list[int]:
-    source = Image.open(source_path).convert("L")
-    ink = ImageChops.invert(source)
+def reference_geometry(assets_dir: Path):
+    """Use one camera/crop for the entire animation, including the sleep marks."""
+    reference = Image.open(assets_dir / EXPRESSIONS[0][1]).convert("L")
+    ink = ImageChops.invert(reference)
     bounds = ink.point(lambda value: 255 if value > 12 else 0).getbbox()
+    return reference.size, bounds
+
+
+def pack_bitmap(source_path: Path, geometry=None) -> list[int]:
+    source = Image.open(source_path).convert("L")
+    if geometry is None:
+        geometry = reference_geometry(source_path.parent)
+    size, bounds = geometry
+    if source.size != size:
+        raise ValueError(f"{source_path}: expected reference canvas {size}, got {source.size}")
     if bounds:
         source = source.crop(bounds)
     source = ImageOps.autocontrast(source)
@@ -62,6 +73,7 @@ def main() -> None:
         raise SystemExit("usage: gen_orchid_expressions.py ASSETS_DIR OUTPUT_HEADER")
 
     assets_dir = Path(sys.argv[1])
+    geometry = reference_geometry(assets_dir)
     output = Path(sys.argv[2])
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", encoding="utf-8") as stream:
@@ -70,7 +82,7 @@ def main() -> None:
         stream.write(f"constexpr uint16_t ORCHID_EXPRESSION_HEIGHT = {HEIGHT};\n\n")
         for name, filename in EXPRESSIONS:
             stream.write(f"const uint8_t PROGMEM {name}[] = {{\n")
-            packed = pack_bitmap(assets_dir / filename)
+            packed = pack_bitmap(assets_dir / filename, geometry)
             for index in range(0, len(packed), 16):
                 row = ", ".join(
                     f"0x{value:02x}" for value in packed[index:index + 16]

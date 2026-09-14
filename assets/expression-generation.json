@@ -1,0 +1,78 @@
+{
+  "mode": "built-in image_gen",
+  "reference": "1 idle_normal.png",
+  "variants": [
+    {
+      "id": 2,
+      "filename": "2 idle_blink.png",
+      "source": "/Users/hongzhenliang/.codex/generated_images/01a0a025-06fe-7a72-9221-7d9ae951849b/exec-58dd9e59-cc2a-4e3e-bc6d-ace55d70d895.png",
+      "prompt": "Use case: precise-object-edit. Asset: single orchid character animation frame for monochrome LCD. Image 1 is the MASTER visual reference and base. Create idle_blink variant by changing ONLY both eyes to naturally fully closed curved eyelids with the same eyelashes. Preserve EXACTLY the master's simple smiling single petal mouth, tiny heart nose, five petal silhouette, faint veins, line weights, stem and two buds at right, white background, scale, position and landscape canvas. The simple mouth is essential: never add realistic orchid reproductive structures or extra mouth petals. No text, no symbols, no border. Pixel-aligned animation frame; no movement of flower or stem. Save a single PNG."
+    },
+    {
+      "id": 3,
+      "filename": "3 idle_look.png",
+      "source": "/Users/hongzhenliang/.codex/generated_images/01a0a025-06fe-7a72-9221-7d9ae951849b/exec-7dfb65bf-eb6a-49dd-a688-86b93b55de94.png",
+      "prompt": "Use case: precise-object-edit. Asset: single monochrome LCD orchid animation frame. Input image 1 is the MASTER style reference and base edit target. Change ONLY the specified facial expression. Preserve EXACTLY master's simple smiling SINGLE petal mouth (never realistic complex orchid flower center), tiny heart nose, five petal silhouette, faint veins, black line weights, stem and two buds at right, white background, original landscape canvas, scale and position. All non-face pixels should be unchanged. No color, border or extra objects, no text except if specifically requested for sleep. No head tilting or zoom. Output single PNG, same dimensions as master. Expression: Keep eyelids half lowered, shift both pupils gently toward viewer's right, quietly curious."
+    },
+    {
+      "id": 4,
+      "filename": "4 sense_01.png",
+      "source": "/Users/hongzhenliang/.codex/generated_images/01a0a025-06fe-7a72-9221-7d9ae951849b/exec-d55d2fa5-e03c-4557-aeca-9287d52ed7cb.png",
+      "prompt": "Use case: precise-object-edit. Asset: single monochrome LCD orchid animation frame. Input image 1 is the MASTER style reference and base edit target. Change ONLY the specified facial expression. Preserve EXACTLY master's simple smiling SINGLE petal mouth (never realistic complex orchid flower center), tiny heart nose, five petal silhouette, faint veins, black line weights, stem and two buds at right, white background, original landscape canvas, scale and position. All non-face pixels should be unchanged. No color, border or extra objects, no text except if specifically requested for sleep. No head tilting or zoom. Output single PNG, same dimensions as master. Expression: First noticing someone: open both eyes slightly more than the master, attentive pupils centered."
+    },
+    {
+      "id": 5,
+      "filename": "5 sense_02.png",
+      "source": "/Users/hongzhenliang/.codex/generated_images/01a0a025-06fe-7a72-9221-7d9ae951849b/exec-0ae24c77-e55d-4eba-a784-049897a79a5b.png",
+      "prompt": "Use case: precise-object-edit. Asset: single monochrome LCD orchid animation frame. Input image 1 is the MASTER style reference and base edit target. Change ONLY the specified facial expression. Preserve EXACTLY master's simple smiling SINGLE petal mouth (never realistic complex orchid flower center), tiny heart nose, five petal silhouette, faint veins, black line weights, stem and two buds at right, white background, original landscape canvas, scale and position. All non-face pixels should be unchanged. No color, border or extra objects, no text except if specifically requested for sleep. No head tilting or zoom. Output single PNG, same dimensions as master. Expression: Recognition: eyes more open and bright, calm alert expression, pupils centered; do not exaggerate."
+    },
+    {
+      "id": 6,
+      "filename": "6 sense_hold.png",
+      "source": "/Users/hongzhenliang/.codex/generated_images/01a0a025-06fe-7a72-9221-7d9ae951849b/exec-c682d4a3-6c81-42f2-bd9b-cf915b0041c7.png",
+      "prompt": "Use case: precise-object-edit. Asset: single monochrome LCD orchid animation frame. Input image 1 is the MASTER style reference and base edit target. Change ONLY the specified facial expression. Preserve EXACTLY master's simple smiling SINGLE petal mouth (never realistic complex orchid flower center), tiny heart nose, five petal silhouette, faint veins, black line weights, stem and two buds at right, white background, original landscape canvas, scale and position. All non-face pixels should be unchanged. No color, border or extra objects, no text except if specifically requested for sleep. No head tilting or zoom. Output single PNG, same dimensions as master. Expression: Settled attention: softly open eyes midway between alert and the master's sleepy gaze, warm steady eye contact."
+    },
+    {
+      "id": 7,
+      "filename": "7 listen_normal.png",
+      "source": "/Users/hongzhenliang/.codex/generated_images/01a0a025-06fe-7a72-9221-7d9ae951849b/exec-40a456c0-3c2f-40cd-bdec-51221f025199.png",
+      "prompt": "Use case: precise-object-edit. Asset: single monochrome LCD orchid animation frame. Input image 1 is the MASTER style reference and base edit target. Change ONLY the specified facial expression. Preserve EXACTLY master's simple smiling SINGLE petal mouth (never realistic complex orchid flower center), tiny heart nose, five petal silhouette, faint veins, black line weights, stem and two buds at right, white background, original landscape canvas, scale and position. All non-face pixels should be unchanged. No color, border or extra objects, no text except if specifically requested for sleep. No head tilting or zoom. Output single PNG, same dimensions as master. Expression: Attentive listening: eyes softly open, pupils slightly toward viewer's left. Keep head upright and perfectly fixed for animation stability."
+    },
+    {
+      "id": 8,
+      "filename": "8 listen_blink.png",
+      "source": "/Users/hongzhenliang/.codex/generated_images/01a0a025-06fe-7a72-9221-7d9ae951849b/exec-75a0b92a-bcdc-4d3e-8941-fa22ede522f7.png",
+      "prompt": "Use case: precise-object-edit. Asset: single monochrome LCD orchid animation frame. Input image 1 is the MASTER style reference and base edit target. Change ONLY the specified facial expression. Preserve EXACTLY master's simple smiling SINGLE petal mouth (never realistic complex orchid flower center), tiny heart nose, five petal silhouette, faint veins, black line weights, stem and two buds at right, white background, original landscape canvas, scale and position. All non-face pixels should be unchanged. No color, border or extra objects, no text except if specifically requested for sleep. No head tilting or zoom. Output single PNG, same dimensions as master. Expression: Listening blink: both eyes gently fully closed curved eyelids, eyelash tips slightly lifted. Keep head upright and perfectly fixed."
+    },
+    {
+      "id": 9,
+      "filename": "9 think_01.png",
+      "source": "/Users/hongzhenliang/.codex/generated_images/01a0a025-06fe-7a72-9221-7d9ae951849b/exec-51edd335-4985-48b3-afff-507e7d04096f.png",
+      "prompt": "Use case: precise-object-edit. Asset: single monochrome LCD orchid animation frame. Input image 1 is the MASTER style reference and base edit target. Change ONLY the specified facial expression. Preserve EXACTLY master's simple smiling SINGLE petal mouth (never realistic complex orchid flower center), tiny heart nose, five petal silhouette, faint veins, black line weights, stem and two buds at right, white background, original landscape canvas, scale and position. All non-face pixels should be unchanged. No color, border or extra objects, no text except if specifically requested for sleep. No head tilting or zoom. Output single PNG, same dimensions as master. Expression: Thinking: both pupils glance upward toward viewer's right, slightly asymmetric lifted upper eyelids, contemplative."
+    },
+    {
+      "id": 10,
+      "filename": "10 think_02.png",
+      "source": "/Users/hongzhenliang/.codex/generated_images/01a0a025-06fe-7a72-9221-7d9ae951849b/exec-3ea390cd-2ba2-4020-9003-db747d7f5f5b.png",
+      "prompt": "Use case: precise-object-edit. Asset: single monochrome LCD orchid animation frame. Input image 1 is the MASTER style reference and base edit target. Change ONLY the specified facial expression. Preserve EXACTLY master's simple smiling SINGLE petal mouth (never realistic complex orchid flower center), tiny heart nose, five petal silhouette, faint veins, black line weights, stem and two buds at right, white background, original landscape canvas, scale and position. All non-face pixels should be unchanged. No color, border or extra objects, no text except if specifically requested for sleep. No head tilting or zoom. Output single PNG, same dimensions as master. Expression: Thinking pause: narrow both eyes mildly, pupils up toward viewer's left, calm thoughtful rather than angry."
+    },
+    {
+      "id": 11,
+      "filename": "11 speak_neutral.png",
+      "source": "/Users/hongzhenliang/.codex/generated_images/01a0a025-06fe-7a72-9221-7d9ae951849b/exec-76628287-2ae7-4bc1-9776-7bf310cbd144.png",
+      "prompt": "Use case: precise-object-edit. Asset: single monochrome LCD orchid animation frame. Input image 1 is the MASTER style reference and base edit target. Change ONLY the specified facial expression. Preserve EXACTLY master's simple smiling SINGLE petal mouth (never realistic complex orchid flower center), tiny heart nose, five petal silhouette, faint veins, black line weights, stem and two buds at right, white background, original landscape canvas, scale and position. All non-face pixels should be unchanged. No color, border or extra objects, no text except if specifically requested for sleep. No head tilting or zoom. Output single PNG, same dimensions as master. Expression: Speaking: softly attentive open eyes. Keep the single simple lip-petal outer silhouette, change only its interior smile crease to a small narrow open curved mouth, white inside, no teeth or tongue."
+    },
+    {
+      "id": 12,
+      "filename": "12 speak_pleased.png",
+      "source": "/Users/hongzhenliang/.codex/generated_images/01a0a025-06fe-7a72-9221-7d9ae951849b/exec-332a3212-03ff-4aba-a499-73402e06b1a1.png",
+      "prompt": "Use case: precise-object-edit. Asset: single monochrome LCD orchid animation frame. Input image 1 is the MASTER style reference and base edit target. Change ONLY the specified facial expression. Preserve EXACTLY master's simple smiling SINGLE petal mouth (never realistic complex orchid flower center), tiny heart nose, five petal silhouette, faint veins, black line weights, stem and two buds at right, white background, original landscape canvas, scale and position. All non-face pixels should be unchanged. No color, border or extra objects, no text except if specifically requested for sleep. No head tilting or zoom. Output single PNG, same dimensions as master. Expression: Pleased speaking: gently smiling eyes with slightly raised lower lids, friendly but reserved. Keep the single simple lip-petal silhouette, slightly broader curved interior smile."
+    },
+    {
+      "id": 13,
+      "filename": "13 sleep.png",
+      "source": "/Users/hongzhenliang/.codex/generated_images/01a0a025-06fe-7a72-9221-7d9ae951849b/exec-30fa01f3-1a88-4fdd-b164-f0ee8da50abc.png",
+      "prompt": "Use case: precise-object-edit. Asset: single monochrome LCD orchid animation frame. Input image 1 is the MASTER style reference and base edit target. Change ONLY the specified facial expression. Preserve EXACTLY master's simple smiling SINGLE petal mouth (never realistic complex orchid flower center), tiny heart nose, five petal silhouette, faint veins, black line weights, stem and two buds at right, white background, original landscape canvas, scale and position. All non-face pixels should be unchanged. No color, border or extra objects, no text except if specifically requested for sleep. No head tilting or zoom. Output single PNG, same dimensions as master. Expression: Sleeping: both eyes gently fully closed relaxed curved eyelids. Preserve simple smiling lip-petal. Add three small unobtrusive handwritten Z marks in the blank space above the right buds without changing flower size."
+    }
+  ]
+}

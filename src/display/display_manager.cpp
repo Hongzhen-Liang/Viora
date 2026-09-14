@@ -20,11 +20,7 @@ constexpr uint32_t kSubtitlePageMinMs = 4800;
 constexpr uint32_t kSubtitlePageMaxMs = 12000;
 constexpr uint32_t kIdleRefreshMs = 60000;
 constexpr uint32_t kUnsyncedClockRefreshMs = 10000;
-constexpr uint32_t kIdleExpressionFrameMs = 2400;
-constexpr uint32_t kSensingExpressionFrameMs = 650;
-constexpr uint32_t kListeningExpressionFrameMs = 1800;
-constexpr uint32_t kThinkingExpressionFrameMs = 900;
-constexpr uint32_t kSpeakingExpressionFrameMs = 1500;
+constexpr uint32_t kExpressionPollMs = 40;
 // 状态文字在气泡头部做轻量刷新。降低刷新频率既保留“活着”的反馈，
 // 也避免软件 SPI 在收音关键路径里占用过多时间。
 constexpr uint32_t kLiveStatusFrameMs = 820;
@@ -222,7 +218,8 @@ void DisplayManager::setVisualState(DisplayVisualState state) {
   if (visual_state_ == state) return;
   const bool was_idle_screen = idle_mode_;
   visual_state_ = state;
-  last_expression_render_ms_ = millis();
+  expression_started_ms_ = millis();
+  last_expression_render_ms_ = expression_started_ms_;
   last_live_status_render_ms_ = 0;
   // 聆听与思考是新的交互阶段，不应继续展示上一轮字幕。清掉文本模型后，
   // 局部状态刷新会用整个气泡呈现明确的大状态；开始回答时再由字幕 cue
@@ -251,6 +248,7 @@ void DisplayManager::setVisualState(DisplayVisualState state) {
       renderPage();
     } else {
       renderLiveStatus();
+      renderExpression();
     }
   }
 }
@@ -546,30 +544,23 @@ void DisplayManager::loop(bool speaking, uint32_t playback_position_bytes) {
     return;
   }
 
-  // 对话阶段用气泡头部的局部状态提供持续反馈，不刷新整张角色画面。
-  // 唤醒/聆听/思考期间每次只发送很小的 tile 区域，避免为了动画阻塞
-  // 麦克风采样和 WebSocket 收包。
-  if (!speaking && visual_state_ != DisplayVisualState::kIdle &&
+  // Only changed bitmap pixels and their complete ST7305 tile rows are sent.
+  // Checking the timeline is cheap; unchanged frames cause no SPI transfer.
+  const uint32_t animation_now = millis();
+  if (animated_screen_ &&
+      animation_now - last_expression_render_ms_ >= kExpressionPollMs) {
+    last_expression_render_ms_ = animation_now;
+    renderExpression();
+  }
+  if (animated_screen_ && !speaking &&
+      visual_state_ != DisplayVisualState::kIdle &&
       visual_state_ != DisplayVisualState::kSpeaking) {
-    const uint32_t now = millis();
-    if (now - last_live_status_render_ms_ >= kLiveStatusFrameMs) {
+    if (animation_now - last_live_status_render_ms_ >= kLiveStatusFrameMs) {
       renderLiveStatus();
     }
     return;
   }
 
-  // 待机表情可以低频整屏更新；播放期间只允许字幕 cue 驱动刷新。
-  if (animated_screen_ && !speaking) {
-    const uint32_t now = millis();
-    if (now - last_expression_render_ms_ >= expressionFrameMs()) {
-      last_expression_render_ms_ = now;
-      if (idle_mode_) {
-        renderIdleDashboard();
-      } else {
-        renderPage();
-      }
-    }
-  }
   if (!speaking) return;
 
   if (timed_mode_) {
@@ -788,8 +779,7 @@ void DisplayManager::renderPage() {
   const uint16_t image_x =
       kScreenWidth - ORCHID_EXPRESSION_WIDTH -
       kConversationExpressionRightMargin;
-  s_lcd.drawXBMP(image_x, kExpressionTop, ORCHID_EXPRESSION_WIDTH,
-                 ORCHID_EXPRESSION_HEIGHT, expressionBitmap());
+  drawExpression(image_x);
 
   // A quiet frame and tiny brand label make the illustration feel like a
   // designed product surface instead of a debug screen. The live state lives
@@ -882,52 +872,94 @@ void DisplayManager::renderPage() {
   s_lcd.sendBuffer();
 }
 
-uint32_t DisplayManager::expressionFrameMs() const {
-  switch (visual_state_) {
-    case DisplayVisualState::kSensing:
-      return kSensingExpressionFrameMs;
-    case DisplayVisualState::kListening:
-      return kListeningExpressionFrameMs;
-    case DisplayVisualState::kThinking:
-      return kThinkingExpressionFrameMs;
-    case DisplayVisualState::kSpeaking:
-      return kSpeakingExpressionFrameMs;
-    case DisplayVisualState::kIdle:
-    default:
-      return kIdleExpressionFrameMs;
+const uint8_t *DisplayManager::expressionBitmap() const {
+  if (visual_state_ == DisplayVisualState::kIdle) {
+    const time_t now = time(nullptr);
+    if (now >= 1577836800) {
+      const time_t china_time = now + DEVICE_UTC_OFFSET_SECONDS;
+      struct tm china_tm;
+      gmtime_r(&china_time, &china_tm);
+      if (china_tm.tm_hour >= 23 || china_tm.tm_hour < 6) return ORCHID_SLEEP;
+    }
+  }
+  static const uint8_t *const images[] = {
+      ORCHID_IDLE_NORMAL, ORCHID_IDLE_BLINK, ORCHID_IDLE_LOOK,
+      ORCHID_SENSE_01, ORCHID_SENSE_02, ORCHID_SENSE_HOLD,
+      ORCHID_LISTEN_NORMAL, ORCHID_LISTEN_BLINK,
+      ORCHID_THINK_01, ORCHID_THINK_02,
+      ORCHID_SPEAK_NEUTRAL, ORCHID_SPEAK_PLEASED, ORCHID_SLEEP};
+  return images[orchid_animation::imageAt(
+      visual_state_, static_cast<uint32_t>(millis() - expression_started_ms_))];
+}
+
+void DisplayManager::drawExpression(uint16_t image_x) {
+  rendered_expression_ = expressionBitmap();
+  s_lcd.setDrawColor(1);
+  s_lcd.drawXBMP(image_x, kExpressionTop, ORCHID_EXPRESSION_WIDTH,
+                 ORCHID_EXPRESSION_HEIGHT, ORCHID_IDLE_NORMAL);
+  const uint16_t *regions[] = {orchid_animation::kFaceRegion,
+                               orchid_animation::kSleepRegion};
+  for (uint8_t i = 0; i < 2; ++i) {
+    if (i == 1 && rendered_expression_ != ORCHID_SLEEP) continue;
+    const uint16_t *r = regions[i];
+    s_lcd.setClipWindow(image_x + r[0], kExpressionTop + r[1],
+                        image_x + r[2], kExpressionTop + r[3]);
+    s_lcd.setDrawColor(0);
+    s_lcd.drawBox(image_x + r[0], kExpressionTop + r[1],
+                  r[2] - r[0], r[3] - r[1]);
+    s_lcd.setDrawColor(1);
+    s_lcd.drawXBMP(image_x, kExpressionTop, ORCHID_EXPRESSION_WIDTH,
+                   ORCHID_EXPRESSION_HEIGHT, rendered_expression_);
+    s_lcd.setMaxClipWindow();
   }
 }
 
-const uint8_t *DisplayManager::expressionBitmap() const {
-  const uint8_t frame = static_cast<uint8_t>(
-      (millis() / expressionFrameMs()) % 3U);
-  switch (visual_state_) {
-    case DisplayVisualState::kSensing:
-      if (frame == 0) return ORCHID_SENSE_01;
-      if (frame == 1) return ORCHID_SENSE_02;
-      return ORCHID_SENSE_HOLD;
-    case DisplayVisualState::kListening:
-      return frame == 1 ? ORCHID_LISTEN_BLINK : ORCHID_LISTEN_NORMAL;
-    case DisplayVisualState::kThinking:
-      return frame == 1 ? ORCHID_THINK_02 : ORCHID_THINK_01;
-    case DisplayVisualState::kSpeaking:
-      return frame == 2 ? ORCHID_SPEAK_PLEASED : ORCHID_SPEAK_NEUTRAL;
-    case DisplayVisualState::kIdle:
-    default: {
-      const time_t now = time(nullptr);
-      if (now >= 1577836800) {
-        const time_t china_time = now + DEVICE_UTC_OFFSET_SECONDS;
-        struct tm china_tm;
-        gmtime_r(&china_time, &china_tm);
-        if (china_tm.tm_hour >= 23 || china_tm.tm_hour < 6) {
-          return ORCHID_SLEEP;
-        }
+void DisplayManager::renderExpression() {
+  if (!ready_ || !animated_screen_ || binding_qr_active_) return;
+  const uint8_t *next = expressionBitmap();
+  if (next == rendered_expression_ || rendered_expression_ == nullptr) return;
+  const uint16_t image_x = kScreenWidth - ORCHID_EXPRESSION_WIDTH -
+      (idle_mode_ ? kExpressionRightMargin : kConversationExpressionRightMargin);
+  constexpr uint16_t stride = (ORCHID_EXPRESSION_WIDTH + 7) / 8;
+  bool dirty_rows[kScreenWidth / 8] = {};
+  for (uint16_t y = 0; y < ORCHID_EXPRESSION_HEIGHT; ++y) {
+    for (uint16_t byte_x = 0; byte_x < stride; ++byte_x) {
+      const size_t offset = y * stride + byte_x;
+      // Sleep symbols have their own layer; other states use the reference
+      // there, even if generation introduced faint texture differences.
+      const bool sleep_band = y >= orchid_animation::kSleepRegion[1] &&
+                              y < orchid_animation::kSleepRegion[3];
+      const uint8_t *new_layer = sleep_band && next != ORCHID_SLEEP
+                                    ? ORCHID_IDLE_NORMAL : next;
+      const uint8_t *old_layer = sleep_band && rendered_expression_ != ORCHID_SLEEP
+                                    ? ORCHID_IDLE_NORMAL : rendered_expression_;
+      const uint8_t value = pgm_read_byte(new_layer + offset);
+      const uint8_t changed = value ^ pgm_read_byte(old_layer + offset);
+      if (!changed) continue;
+      for (uint8_t bit = 0; bit < 8; ++bit) {
+        const uint16_t x = byte_x * 8 + bit;
+        if (x >= ORCHID_EXPRESSION_WIDTH || !(changed & (1U << bit))) continue;
+        if (!orchid_animation::inside(orchid_animation::kFaceRegion, x, y) &&
+            !orchid_animation::inside(orchid_animation::kSleepRegion, x, y)) continue;
+        s_lcd.setDrawColor((value >> bit) & 1U);
+        s_lcd.drawPixel(image_x + x, kExpressionTop + y);
+        dirty_rows[(image_x + x) / 8] = true;
       }
-      if (frame == 1) return ORCHID_IDLE_BLINK;
-      if (frame == 2) return ORCHID_IDLE_LOOK;
-      return ORCHID_IDLE_NORMAL;
     }
   }
+  s_lcd.setDrawColor(1);
+  // U8G2_R1 maps logical x to physical tile rows. The ST7305 driver must
+  // receive an entire 38-tile row, never a short updateDisplayArea buffer.
+  constexpr uint8_t tile_width = 38;
+  constexpr size_t row_bytes = tile_width * 8;
+  uint8_t *buffer = s_lcd.getBufferPtr();
+  for (uint8_t row = 0; row < kScreenWidth / 8; ++row) {
+    if (dirty_rows[row]) {
+      u8x8_DrawTile(s_lcd.getU8x8(), 0, row, tile_width,
+                    buffer + row * row_bytes);
+    }
+  }
+  rendered_expression_ = next;
 }
 
 void DisplayManager::renderSensorStrip() {
@@ -982,8 +1014,7 @@ void DisplayManager::renderIdleDashboard() {
 
   const uint16_t image_x =
       kScreenWidth - ORCHID_EXPRESSION_WIDTH - kExpressionRightMargin;
-  s_lcd.drawXBMP(image_x, kExpressionTop, ORCHID_EXPRESSION_WIDTH,
-                 ORCHID_EXPRESSION_HEIGHT, expressionBitmap());
+  drawExpression(image_x);
 
   s_lcd.drawRFrame(10, 8, 380, 216, 12);
   s_lcd.setFont(u8g2_font_helvB12_tf);
