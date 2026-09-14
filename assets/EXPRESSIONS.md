@@ -1,8 +1,8 @@
 # Viora 表情素材
 
-`1 idle_normal.png` 是造型参考原图；编号 2–13 使用内置 image_gen 分别生成，统一为单片笑嘴、黑白细线花瓣与右侧双花苞。`Overall.png` 是历史设计参考板，不参与动画。
+`1 idle_normal.png` 是造型参考图（已局部优化眼睑与瞳孔）；编号 2–13 使用内置 image_gen 分别生成，统一为单片笑嘴、黑白细线花瓣与右侧双花苞。`Overall.png` 是历史设计参考板，不参与动画。
 
-完整生成提示词与输出来源记录在 `expression-generation.json`。
+完整生成提示词与输出来源记录在 `expression-generation.json`；第 1 张后续眼睛修正记录在 `idle-eye-refinement.json`。
 
 ## 动画
 
@@ -26,4 +26,4 @@ python3 scripts/preview_orchid_expressions.py
 
 打开 `animation-preview.html` 可切换六种状态，查看与固件一致的点阵、区域叠加和时序，以及全部原始 PNG。浏览器预览不模拟硬件 SPI 传输延迟。
 
-本次验证：13 张点阵尺寸与唯一性检查、参考图点阵保留检查、动画时序边界测试、PlatformIO 固件编译、浏览器预览。未刷写设备，收音/播放期间的实际显示延迟仍需实机确认。
+本次验证：13 张点阵尺寸与唯一性检查、动画时序边界测试、PlatformIO 固件编译、浏览器预览。未刷写设备，收音/播放期间的实际显示延迟仍需实机确认。
