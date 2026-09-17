@@ -30,6 +30,26 @@ bool listen_starts_new_conversation(ListenOrigin origin);
 bool elapsed_at_least(uint32_t now_ms, uint32_t since_ms,
                       uint32_t duration_ms);
 
+// Thinking-time interruption requires sustained live speech after the old
+// utterance's settling guard. Disabling it must discard all prior evidence.
+class ProcessingBargeGate {
+ public:
+  void reset() { voice_frames_ = 0; }
+  bool update(uint32_t now, uint32_t since, bool enabled,
+              bool neural_speech, bool live_energy, uint32_t guard_ms,
+              uint16_t required_frames) {
+    if (!enabled || !elapsed_at_least(now, since, guard_ms) ||
+        !neural_speech || !live_energy) {
+      reset();
+      return false;
+    }
+    if (voice_frames_ < required_frames) ++voice_frames_;
+    return required_frames > 0 && voice_frames_ >= required_frames;
+  }
+ private:
+  uint16_t voice_frames_ = 0;
+};
+
 struct SpeechEvidenceConfig {
   // Bridge short scheduling gaps after a positive neural-VAD result.
   uint16_t neural_hold_frames;

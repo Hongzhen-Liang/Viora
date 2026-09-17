@@ -328,6 +328,8 @@ static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
       const char *t = doc["type"] | "";
       if (strcmp(t, "keepalive_ack") == 0) {
         s_keepalive_ack_supported = true;
+      } else if (strcmp(t, "transcript") == 0) {
+        if (s_cb.on_text) s_cb.on_text("transcript", doc["user"] | "", "", "", "", 0);
       } else if (strcmp(t, "text") == 0) {
         if (s_cb.on_text) s_cb.on_text(
             "text", doc["user"] | "", doc["reply"] | "", "",

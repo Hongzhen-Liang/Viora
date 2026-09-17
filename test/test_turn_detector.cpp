@@ -236,5 +236,26 @@ int main() {
     assert(elapsed_at_least(50, since, 150));
   }
 
+  // A correction during thinking interrupts only after sustained live speech;
+  // the original tail, a click, silence, and disabled upload/farewell never do.
+  {
+    ProcessingBargeGate gate;
+    for (uint32_t now = 0; now < 700; now += 32)
+      assert(!gate.update(now, 0, true, true, true, 700, 5));
+    for (int i = 0; i < 4; ++i)
+      assert(!gate.update(700 + i * 32, 0, true, true, true, 700, 5));
+    assert(!gate.update(828, 0, true, false, true, 700, 5));
+    for (int i = 0; i < 4; ++i)
+      assert(!gate.update(900 + i * 32, 0, true, true, true, 700, 5));
+    assert(gate.update(1028, 0, true, true, true, 700, 5));
+    assert(!gate.update(1060, 0, false, true, true, 700, 5));
+    assert(!gate.update(1092, 0, true, true, false, 700, 5));
+    assert(!gate.update(1124, 0, true, true, true, 700, 5));
+    gate.reset();
+    const uint32_t since = UINT32_MAX - 99;
+    assert(!gate.update(49, since, true, true, true, 150, 1));
+    assert(gate.update(50, since, true, true, true, 150, 1));
+  }
+
   return 0;
 }

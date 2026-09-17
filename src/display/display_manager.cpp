@@ -221,6 +221,7 @@ void DisplayManager::setVisualState(DisplayVisualState state) {
   expression_started_ms_ = millis();
   last_expression_render_ms_ = expression_started_ms_;
   last_live_status_render_ms_ = 0;
+  conversation_hint_ = false;
   // 聆听与思考是新的交互阶段，不应继续展示上一轮字幕。清掉文本模型后，
   // 局部状态刷新会用整个气泡呈现明确的大状态；开始回答时再由字幕 cue
   // 写入新内容。
@@ -456,6 +457,13 @@ void DisplayManager::wrapSubtitle(const char *text) {
   }
 }
 
+void DisplayManager::setConversationHint(const char *text) {
+  if (!ready_ || binding_qr_active_) return;
+  wrapSubtitle(text);
+  conversation_hint_ = true;
+  last_live_status_render_ms_ = 0;
+}
+
 void DisplayManager::setSubtitle(const char *text) {
   if (!ready_) return;
   binding_qr_active_ = false;
@@ -641,6 +649,16 @@ void DisplayManager::drawConversationStatusHero() {
   const uint16_t mode_w = s_lcd.getStrWidth(mode);
   s_lcd.drawStr(bubble_x + (bubble_w - mode_w) / 2, bubble_y + 18, mode);
   s_lcd.drawHLine(bubble_x + 18, bubble_y + 27, bubble_w - 36);
+
+  if (conversation_hint_) {
+    s_lcd.setFont(u8g2_font_wqy16_t_gb2312);
+    const uint8_t count = line_count_ < 6 ? line_count_ : 6;
+    for (uint8_t row = 0; row < count; ++row) {
+      s_lcd.drawUTF8(bubble_x + 15, bubble_y + 48 + row * 17,
+                    lines_[row].c_str());
+    }
+    return;
+  }
 
   const int16_t icon_cx = bubble_x + bubble_w / 2;
   const int16_t icon_cy = bubble_y + 56;

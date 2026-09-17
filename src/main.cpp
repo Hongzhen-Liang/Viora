@@ -55,6 +55,8 @@ static const WakeAckGateConfig kWakeAckGateConfig = {
 static ConvState s_state = ST_IDLE;
 static bool s_upload_pending = false;
 static bool s_wait_hint_shown = false;
+static String s_recovery_hint;
+static ProcessingBargeGate s_processing_barge;
 static uint32_t s_reply_wait_started_ms = 0;
 static ListenOrigin s_listen_origin = LISTEN_FROM_WAKE;
 static TurnDetector s_turn(kTurnConfig);
@@ -74,6 +76,7 @@ static uint32_t s_last_live_energy_ms = 0;
 static uint32_t s_uploaded_bytes = 0;
 static uint32_t s_upload_failed_bytes = 0;
 static bool s_rearm_pending = false;
+static bool s_rearm_preserve_tx = false;
 static bool s_exit_pending = false;
 static int s_consec_errors = 0;
 static bool s_followup_keep_preroll = false;  // ack_done 后重开麦需保留前置音频
@@ -639,6 +642,7 @@ static void set_state(ConvState state) {
   s_state = state;
   s_upload_pending = false;
   s_wait_hint_shown = false;
+  s_processing_barge.reset();
   s_reply_wait_started_ms = millis();
   s_state_since_ms = millis();
   if (state == ST_IDLE) {
@@ -1068,6 +1072,8 @@ static void on_net_disconnected() {
   s_accept_tts_audio = false;
   s_tts_end_received = false;
   s_consec_errors = 0;
+  s_recovery_hint = "";
+  s_rearm_preserve_tx = false;
   s_proactive_pending = false;
   s_farewell_pending = false;
   s_listen_audio_started = false;
@@ -1106,6 +1112,15 @@ static void retry_listening_after_failure() {
     Serial.println("[PRESENCE] 主动呼叫失败，安静回到待机");
     return;
   }
+  // Recovery is a protocol transition too: cancel must survive the next
+  // enter_listening() flush and precede its audio_start on the wire.
+  net_audio_flush();
+  if (!net_send_json("{\"type\":\"cancel\",\"reason\":\"recovery\"}")) {
+    s_rearm_pending = false;
+    net_abort_connection("recovery cancel failed");
+    set_state(ST_IDLE);
+    return;
+  }
   ++s_consec_errors;
   if (s_consec_errors >= MAX_CONSEC_ERRORS) {
     s_consec_errors = 0;
@@ -1116,6 +1131,7 @@ static void retry_listening_after_failure() {
     // 先让当前服务端轮次失效；同一批 WS 数据里紧随 error/no_speech
     // 到达的旧 tts_start/PCM 必须被状态门过滤，下一轮 loop 再重开麦。
     set_state(ST_IDLE);
+    s_rearm_preserve_tx = true;
     s_rearm_pending = true;
   }
 }
@@ -1126,7 +1142,7 @@ static bool handle_state_watchdog() {
       elapsed_at_least(now, s_state_since_ms, PROCESSING_TIMEOUT_MS)) {
     Serial.printf("[STATE] PROCESSING 超时 %lums，取消并恢复聆听\n",
                   static_cast<unsigned long>(now - s_state_since_ms));
-    net_send_json("{\"type\":\"cancel\",\"reason\":\"processing_timeout\"}");
+    s_recovery_hint = "刚才等得有点久\n请直接再说一次";
     retry_listening_after_failure();
     return true;
   }
@@ -1156,7 +1172,7 @@ static bool handle_state_watchdog() {
           static_cast<unsigned long>(now - s_tts_last_activity_ms),
           static_cast<unsigned long>(s_tts_end_pending_bytes),
           static_cast<unsigned long>(drain_budget_ms));
-      net_send_json("{\"type\":\"cancel\",\"reason\":\"playback_timeout\"}");
+      s_recovery_hint = "刚才声音断了\n请直接再说一次";
       retry_listening_after_failure();
       return true;
     }
@@ -1174,7 +1190,13 @@ static bool accept_server_event(const char *type, bool allowed) {
 static void on_server_text(const char *type, const char *user,
                            const char *reply, const char *msg,
                            const char *op, uint32_t pcm_offset) {
-  if (strcmp(type, "text") == 0) {
+  if (strcmp(type, "transcript") == 0) {
+    if (!accept_server_event(type, s_state == ST_PROCESSING)) return;
+    s_wait_hint_shown = true;
+    String hint = "听到你说：\n";
+    hint += user;
+    g_display.setConversationHint(hint.c_str());
+  } else if (strcmp(type, "text") == 0) {
     if (!accept_server_event(type, s_state == ST_PROCESSING ||
                                       s_state == ST_PLAYING)) {
       return;
@@ -1262,6 +1284,7 @@ static void on_server_text(const char *type, const char *user,
       return;
     }
     Serial.printf("[WS] 服务器错误: %s\n", msg);
+    s_recovery_hint = "刚才没能答上来\n请直接再说一次";
     retry_listening_after_failure();
   } else if (strcmp(type, "no_speech") == 0) {
     if (!accept_server_event(type, s_state == ST_PROCESSING)) return;
@@ -1520,7 +1543,8 @@ void loop() {
       millis() - s_reply_wait_started_ms >= 4000 &&
       !s_settings_menu_active && !s_manual_provisioning) {
     s_wait_hint_shown = true;
-    g_display.setSubtitle("还在等回复\n再给我一点时间");
+    g_display.setConversationHint(s_upload_pending
+        ? "正在传送你的话…" : "还在想怎么回答你…");
   }
   if (s_upload_pending && s_state == ST_PROCESSING) {
     const NetDrainStatus upload = net_audio_poll_drain();
@@ -1604,7 +1628,13 @@ void loop() {
     s_rearm_pending = false;
     const bool keep_preroll = s_followup_keep_preroll;
     s_followup_keep_preroll = false;
-    enter_listening(LISTEN_FROM_FOLLOWUP, keep_preroll);
+    const bool preserve_tx = s_rearm_preserve_tx;
+    s_rearm_preserve_tx = false;
+    enter_listening(LISTEN_FROM_FOLLOWUP, keep_preroll, preserve_tx);
+    if (s_state == ST_LISTENING && s_recovery_hint.length()) {
+      g_display.setConversationHint(s_recovery_hint.c_str());
+    }
+    s_recovery_hint = "";
   }
 
   if (handle_state_watchdog()) return;
@@ -1697,7 +1727,7 @@ void loop() {
   static int16_t afe_out[512];
   bool is_speech = false;
   bool have_afe = false;
-  const bool listening_afe = s_state == ST_LISTENING;
+  const bool listening_afe = s_state == ST_LISTENING || s_state == ST_PROCESSING;
   const bool idle_afe = s_state == ST_IDLE;
   const bool wake_decision_afe =
       s_state == ST_WAKE_ACK && !s_ack_playing;
@@ -1883,6 +1913,25 @@ void loop() {
                                    neural_speech_for_turn,
                                    fallback_energy)
           : false;
+#if ENABLE_BARGE_IN
+  // The speaker is silent while thinking. Require fresh neural speech plus
+  // sustained live energy, and ignore the just-submitted utterance's tail.
+  if (s_processing_barge.update(
+          millis(), s_state_since_ms,
+          s_state == ST_PROCESSING && !s_upload_pending &&
+              !s_farewell_pending && !s_proactive_pending,
+          neural_speech,
+          vol_l >= BARGE_IN_PEAK_MIN && g_audio.captureRms() >= BARGE_IN_RMS_MIN,
+          BARGE_IN_GUARD_MS, BARGE_IN_VOICE_FRAMES)) {
+    net_audio_flush();
+    if (!net_send_json("{\"type\":\"cancel\",\"reason\":\"processing_barge_in\"}")) {
+      net_abort_connection("processing cancel failed");
+      return;
+    }
+    enter_listening(LISTEN_FROM_BARGE_IN, true, true);
+    return;
+  }
+#endif
   const bool ack_speech =
       s_state == ST_WAKE_ACK && !s_ack_playing
           ? s_ack_speech.update(any_vad_available, neural_speech,

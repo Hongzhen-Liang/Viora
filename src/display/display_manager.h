@@ -25,6 +25,8 @@ class DisplayManager {
                         bool online);
   void showOtaScreen(const char *line1, const char *line2);
   void setSubtitle(const char *text);
+  // Deferred local bubble update; safe from a network callback.
+  void setConversationHint(const char *text);
   void startSpeaking();
   void beginTimedSubtitles(const char *text);
   void queueTimedSubtitle(const char *text, uint32_t pcm_offset_bytes);
@@ -83,6 +85,7 @@ class DisplayManager {
   uint8_t page_count_ = 1;
   uint32_t last_page_ms_ = 0;
   bool timed_mode_ = false;
+  bool conversation_hint_ = false;
   bool binding_qr_active_ = false;
   uint32_t binding_qr_deadline_ms_ = 0;
   TimedCue timed_cues_[kMaxTimedCues];
