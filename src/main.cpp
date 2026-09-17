@@ -92,6 +92,32 @@ static uint32_t s_proactive_return_since_ms = 0;  // 返回候选只在短窗口
 static uint32_t s_proactive_near_since_ms = 0;    // 连续处于社交距离的起点
 static uint64_t s_last_proactive_call_epoch = 0;  // NVS 持久化，重启不重置冷却
 
+static bool s_volume_dirty = false;
+
+static void load_volume_preference() {
+  Preferences prefs;
+  if (!prefs.begin("viora-audio", true)) return;
+  const float volume = prefs.getFloat("volume", VOLUME_DEFAULT);
+  prefs.end();
+  if (std::isfinite(volume)) g_audio.setVolume(volume);
+}
+
+static void save_volume_when_idle() {
+  // NVS writes can stall flash access; keep them out of capture/playback and
+  // coalesce all volume steps in a conversation into one write.
+  if (!s_volume_dirty || s_state != ST_IDLE || ota_busy()) return;
+  static uint32_t last_attempt_ms = 0;
+  const uint32_t now = millis();
+  if (now - last_attempt_ms < 5000) return;
+  last_attempt_ms = now;
+  Preferences prefs;
+  if (!prefs.begin("viora-audio", false)) return;
+  if (prefs.putFloat("volume", g_audio.getVolume()) == sizeof(float)) {
+    s_volume_dirty = false;
+  }
+  prefs.end();
+}
+
 static void load_proactive_cooldown() {
   Preferences prefs;
   if (!prefs.begin("presence", true)) return;
@@ -1094,11 +1120,13 @@ static void on_net_disconnected() {
 // 服务器错误 / 未识别到有效语音后的共同回退：清播放、回聆听；
 // 连续多次（如背景音乐反复被当语音）则回到待唤醒。
 static void retry_listening_after_failure() {
+  const bool ending_conversation = s_exit_pending || s_farewell_pending;
   s_exit_pending = false;
   s_accept_tts_audio = false;
   s_tts_end_received = false;
   g_audio.playDiscard();
-  if (s_farewell_pending) {
+  if (ending_conversation) {
+    s_recovery_hint = "";
     s_farewell_pending = false;
     s_rearm_pending = false;
     set_state(ST_IDLE);
@@ -1106,6 +1134,7 @@ static void retry_listening_after_failure() {
     return;
   }
   if (s_proactive_pending) {
+    s_recovery_hint = "";
     s_proactive_pending = false;
     s_rearm_pending = false;
     set_state(ST_IDLE);
@@ -1221,10 +1250,14 @@ static void on_server_text(const char *type, const char *user,
       s_exit_pending = true;
       Serial.println(">>> [OP] exit：道别后回待唤醒");
     } else if (strcmp(op, "volume_up") == 0) {
-      g_audio.setVolume(g_audio.getVolume() + VOLUME_STEP);
+      const float previous_volume = g_audio.getVolume();
+      g_audio.setVolume(previous_volume + VOLUME_STEP);
+      s_volume_dirty |= g_audio.getVolume() != previous_volume;
       Serial.printf(">>> [OP] 音量调大 → %.0f%%\n", g_audio.getVolume() * 100);
     } else if (strcmp(op, "volume_down") == 0) {
-      g_audio.setVolume(g_audio.getVolume() - VOLUME_STEP);
+      const float previous_volume = g_audio.getVolume();
+      g_audio.setVolume(previous_volume - VOLUME_STEP);
+      s_volume_dirty |= g_audio.getVolume() != previous_volume;
       Serial.printf(">>> [OP] 音量调小 → %.0f%%\n", g_audio.getVolume() * 100);
     } else if (op[0] != '\0' && strcmp(op, "none") != 0) {
       Serial.printf(">>> [OP] 未知操作: %s（已忽略）\n", op);
@@ -1353,6 +1386,7 @@ void setup() {
   load_proactive_cooldown();
   // 音频（板载 ES7210 + ES8311 共享 I2S 全双工总线）
   const bool audio_ok = g_audio.begin();
+  load_volume_preference();
   // 4.2 英寸 ST7305 反射屏：蝴蝶兰角色 + 动态中文字幕。
   g_display.begin();
   buttons_init();
@@ -1539,6 +1573,7 @@ static void handle_presence_logic() {
 
 void loop() {
   net_loop();
+  save_volume_when_idle();
   if (s_state == ST_PROCESSING && !s_wait_hint_shown &&
       millis() - s_reply_wait_started_ms >= 4000 &&
       !s_settings_menu_active && !s_manual_provisioning) {
