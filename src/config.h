@@ -73,6 +73,12 @@
 #endif
 #define SERVER_TLS_ENABLED SECRET_SERVER_TLS_ENABLED
 #define SERVER_PATH "/ws"
+#ifndef SECRET_SERVER_LAN_HOST
+#define SECRET_SERVER_LAN_HOST ""
+#endif
+#ifndef SECRET_SERVER_LAN_PORT
+#define SECRET_SERVER_LAN_PORT SERVER_PORT
+#endif
 
 // OTA 凭据单独存放，便于为每台赠送设备分配独立 token，且不改动 WiFi 凭据。
 #if __has_include("ota_secrets.h")
@@ -237,11 +243,11 @@
 #define ASR_UPLOAD_AFE_OUTPUT  0
 
 // 音频上传策略：确认人声后通过有序发送队列边录边传。实时速率只有
-// 32KB/s，可避免句尾把 100KB 左右整句瞬时灌进 TLS、在约 32KB socket
-// 缓冲处失败；audio_end 与 PCM 共用同一队列，线序仍严格有序。
+// 32KB/s，可避免句尾把 100KB 左右整句瞬时灌进 TLS；audio_end 与 PCM
+// 共用同一队列，线序仍严格有序。TCP 缓冲大小由实际 SDK 配置决定。
 #define ASR_STREAM_AUDIO       1
-// 群晖反向代理链路对较大的连续 TLS 写较敏感。4KB 与服务端音频帧粒度
-// 对齐，并让每块之间都有机会处理 Pong，避免整句末尾上传到一半断线。
+// 整句上传分块；实时上行在 worker 中合并已排队的连续 PCM 到同样大小，
+// 不等待凑包、不跨越 JSON 控制帧，以减少积压时的 TLS 小包开销。
 #define ASR_UPLOAD_CHUNK_BYTES 4096
 
 // 群晖反向代理可能把“只有控制帧、没有应用数据”的 WebSocket 提前回收。
@@ -252,6 +258,7 @@
 // 随后被卡住的 TLS 音频写挡住，反向代理等几十秒后才回收连接。
 #define WS_TX_DRAIN_TIMEOUT_MS 60000UL // 句尾上传总上限，覆盖热点慢速上行
 #define WS_TX_STALL_TIMEOUT_MS 15000UL // 连续无成功发送才判定停滞
+#define WS_TLS_WRITE_TIMEOUT_MS 15000UL // 独立于连接/收包的 5s 超时
 #define WS_TX_SLOW_SEND_MS     3500UL
 #define WS_PROBE_INTERVAL_MS   10000UL
 #define WS_RX_STALE_MS         45000UL

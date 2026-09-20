@@ -41,6 +41,9 @@ class NetTxQueue {
   void attach(Frame *storage) { storage_ = storage; clear(); }
   void clear() { head_ = tail_ = count_ = 0; }
   size_t size() const { return count_; }
+  Frame *back() {
+    return count_ ? &storage_[(head_ + Capacity - 1) % Capacity] : nullptr;
+  }
   Frame *reserve(bool control) {
     if (!storage_ || count_ >= (control ? Capacity : Capacity - ControlReserve))
       return nullptr;
@@ -53,6 +56,19 @@ class NetTxQueue {
     tail_ = (tail_ + 1) % Capacity;
     --count_;
     return true;
+  }
+  // Merge only adjacent frames approved by the caller. Return the number of
+  // ORIGINAL queue entries consumed, so audio_end fences remain meaningful.
+  template <typename Merge>
+  size_t popMerged(Frame &frame, Merge merge) {
+    if (!pop(frame)) return 0;
+    size_t consumed = 1;
+    while (count_ && merge(frame, storage_[tail_])) {
+      tail_ = (tail_ + 1) % Capacity;
+      --count_;
+      ++consumed;
+    }
+    return consumed;
   }
  private:
   Frame *storage_ = nullptr;

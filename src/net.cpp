@@ -13,11 +13,14 @@
 #include "config.h"
 #include "net.h"
 #include "net_tx_queue.h"
+#include "net_secure_client.h"
 #include "provisioning.h"
 #include "ota_manager.h"
 
 class RecoverableWebSocket : public WebSocketsClient {
+  bool lan_failed_ = false;
  public:
+  void connected() { lan_failed_ = false; }
   // Called only with the transport mutex held. A failed transport must not
   // attempt another blocking Close-frame write before releasing TLS memory.
   void abortTransport(const char *reason) { clientDisconnect(&_client, reason); }
@@ -35,6 +38,15 @@ class RecoverableWebSocket : public WebSocketsClient {
     memcpy(payload - n, header, n);
     return write(&_client, payload - n, length + n) == length + n;
   }
+  void logWriteFailure() {
+    if (!_client.isSSL || !_client.ssl) return;
+    const auto *tls = static_cast<const VioraSecureClient *>(_client.ssl);
+    Serial.printf("[WS] TLS write error=%d errno=%d elapsed=%lums budget=%lums rssi=%ddBm channel=%d\n",
+                  tls->write_error, tls->write_errno,
+                  static_cast<unsigned long>(tls->write_ms),
+                  static_cast<unsigned long>(WS_TLS_WRITE_TIMEOUT_MS),
+                  WiFi.RSSI(), WiFi.channel());
+  }
   void loop() {
     const bool retry = _port != 0 && !clientIsConnected(&_client) &&
                       millis() - _lastConnectionFail >= _reconnectInterval;
@@ -44,7 +56,58 @@ class RecoverableWebSocket : public WebSocketsClient {
                     heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     }
     const uint32_t started = millis();
-    WebSocketsClient::loop();
+    if (retry && _client.isSSL) {
+      // Use the library's handshake/parser/recovery with our write-budget
+      // client. All WSS connections in this object are created here, including
+      // reconnects; neither certificate verification nor SNI is bypassed.
+      delete _client.ssl;
+      _client.ssl = new VioraSecureClient(WS_TLS_WRITE_TIMEOUT_MS);
+      _client.tcp = _client.ssl;
+      if (_CA_cert == nullptr || _CA_cert[0] == '\0') {
+        connectFailedCb();
+        _lastConnectionFail = millis();
+        return;
+      }
+      _client.ssl->setCACert(_CA_cert);
+      if (_client_cert && _client_key) {
+        _client.ssl->setCertificate(_client_cert);
+        _client.ssl->setPrivateKey(_client_key);
+      }
+      IPAddress lan_address;
+      String lan_host(SECRET_SERVER_LAN_HOST);
+      if (!lan_failed_ && !lan_host.isEmpty()) {
+        if (!lan_address.fromString(lan_host)) {
+          if (lan_host.endsWith(".local")) lan_host.remove(lan_host.length() - 6);
+          lan_address = MDNS.queryHost(lan_host, 1200);
+        }
+      }
+      int connected = 0;
+      if (uint32_t(lan_address) != 0) {
+        lan_failed_ = true; // a failed TLS/WS handshake falls back next attempt
+        Serial.printf("[WS] 内网直连 %s:%u（证书域名仍为 %s）\n",
+                      lan_address.toString().c_str(), SECRET_SERVER_LAN_PORT, _host.c_str());
+        connected = static_cast<VioraSecureClient *>(_client.ssl)->connectToAddress(
+            lan_address, SECRET_SERVER_LAN_PORT, _host.c_str(), WEBSOCKETS_TCP_TIMEOUT);
+      } else {
+        connected = _client.tcp->connect(_host.c_str(), _port, WEBSOCKETS_TCP_TIMEOUT);
+      }
+      if (connected) {
+        connectedCb();
+        _lastConnectionFail = 0;
+      } else {
+        connectFailedCb();
+        _lastConnectionFail = millis();
+      }
+    } else if (!_client.isSSL) {
+      WebSocketsClient::loop();
+    } else if (clientIsConnected(&_client)) {
+      handleClientData();
+      WEBSOCKETS_YIELD();
+      if (_client.status == WSC_CONNECTED) {
+        handleHBPing();
+        handleHBTimeout(&_client);
+      }
+    }
     if (retry || millis() - started >= 1000) {
       Serial.printf("[WS] 网络处理耗时=%lums transport_state=%d\n",
                     static_cast<unsigned long>(millis() - started),
@@ -93,15 +156,17 @@ static uint32_t s_wifi_down_since = 0;
 // 上行发送队列：实时音频与 JSON 控制帧统一按序发送。
 // 实测（2026-08-18 早上）：sendBIN 直接写 TCP，NAS→Mac 链路抖时阻塞
 // 主循环（聆听态循环只有 32-44% 负荷，时钟差 2-3s，指令整段丢），
-// 还会在句尾批量上传时填满约 32KB socket 缓冲。发送移入独立任务后，
+// 还会在句尾批量上传时填满 socket 缓冲。发送移入独立任务后，
 // 主循环只做非阻塞入队；
 // 为控制帧预留空间；满时拒绝新音频，不破坏已接受帧的顺序。
 // ------------------------------------------------------------
 struct TxFrame {
-  uint8_t kind;     // 0=音频 1=JSON
+  uint8_t kind;     // 0=音频 1=控制 JSON 2=可合并的应用保活
   uint16_t len;
   uint8_t data[WEBSOCKETS_MAX_HEADER_SIZE + 4096];
 };
+static_assert(ASR_UPLOAD_CHUNK_BYTES > 0 && ASR_UPLOAD_CHUNK_BYTES <= 4096,
+              "PCM batch must fit the queue frame payload");
 static constexpr int kTxQueueFrames = 160;  // ≈640KB PSRAM，覆盖最长整句录音
 static TxFrame *s_tx_queue = nullptr;
 static portMUX_TYPE s_tx_mux = portMUX_INITIALIZER_UNLOCKED;
@@ -113,6 +178,7 @@ static uint32_t s_tx_completed_frames = 0; // 包括 audio_end 等控制帧
 static uint32_t s_tx_dropped_bytes = 0;
 static NetTxEpoch s_tx_epoch;
 static bool s_tx_in_flight = false;
+static bool s_keepalive_queued = false;  // guarded by s_tx_mux
 
 // 发送任务不能让一个卡住的 TLS 写把 audio_end 永久挡在队列后面。
 static void tx_mark_failure(const char *reason, uint32_t generation) {
@@ -143,11 +209,27 @@ static bool tx_push(uint8_t kind, const uint8_t *data, size_t len) {
     portEXIT_CRITICAL(&s_tx_mux);
     return false;
   }
-  TxFrame *f = s_tx_frames.reserve(kind != 0);
+  if (kind == 2 && s_keepalive_queued) {
+    portEXIT_CRITICAL(&s_tx_mux);
+    return true;
+  }
+  // Use the allocated 4KB slots fully during stalls. A popped/in-flight frame
+  // is no longer in the queue, and a control boundary can never be appended to.
+  TxFrame *tail = s_tx_frames.back();
+  if (kind == 0 && tail && tail->kind == 0 &&
+      tail->len + len <= ASR_UPLOAD_CHUNK_BYTES) {
+    memcpy(tail->data + WEBSOCKETS_MAX_HEADER_SIZE + tail->len, data, len);
+    tail->len += len;
+    portEXIT_CRITICAL(&s_tx_mux);
+    return true;
+  }
+  // Keep all reserved slots available for audio_end/cancel. Repeated optional
+  // heartbeats must not turn a slow upload into a control-queue fault.
+  TxFrame *f = s_tx_frames.reserve(kind == 1);
   if (!f) {
     if (kind == 0) {
       s_tx_dropped_bytes += len;
-    } else {
+    } else if (kind == 1) {
       // Losing audio_start/audio_end/cancel silently desynchronizes the
       // session. Recover the connection if even the control reserve is full.
       s_tx_epoch.fail(s_tx_epoch.generation(), "TX control queue full");
@@ -159,6 +241,7 @@ static bool tx_push(uint8_t kind, const uint8_t *data, size_t len) {
   f->len = static_cast<uint16_t>(len);
   memcpy(f->data + WEBSOCKETS_MAX_HEADER_SIZE, data, len);
   s_tx_frames.commit();
+  if (kind == 2) s_keepalive_queued = true;
   ++s_tx_enqueued_frames;
   portEXIT_CRITICAL(&s_tx_mux);
   return true;
@@ -168,9 +251,21 @@ static void ws_tx_worker(void *) {
   for (;;) {
     bool got = false;
     TxFrame frame;
+    size_t merged_frames = 0;
     uint32_t generation = 0;
     portENTER_CRITICAL(&s_tx_mux);
-    if (!s_tx_epoch.failed() && s_tx_frames.pop(frame)) {
+    if (!s_tx_epoch.failed()) {
+      merged_frames = s_tx_frames.popMerged(frame, [](TxFrame &batch, const TxFrame &next) {
+        if (batch.kind != 0 || next.kind != 0 ||
+            batch.len + next.len > ASR_UPLOAD_CHUNK_BYTES) return false;
+        memcpy(batch.data + WEBSOCKETS_MAX_HEADER_SIZE + batch.len,
+               next.data + WEBSOCKETS_MAX_HEADER_SIZE, next.len);
+        batch.len += next.len;
+        return true;
+      });
+    }
+    if (merged_frames) {
+      if (frame.kind == 2) s_keepalive_queued = false;
       generation = s_tx_epoch.generation();
       s_tx_in_flight = true;
       got = true;
@@ -216,7 +311,7 @@ static void ws_tx_worker(void *) {
     s_tx_in_flight = false;
     if (generation == s_tx_epoch.generation()) {
       if (ok) {
-        ++s_tx_completed_frames;
+        s_tx_completed_frames += merged_frames;
         if (frame.kind == 0) s_tx_sent_bytes += frame.len;
       } else {
         s_tx_dropped_bytes += frame.len;
@@ -225,12 +320,13 @@ static void ws_tx_worker(void *) {
     }
     portEXIT_CRITICAL(&s_tx_mux);
     if (!ok || send_elapsed_ms >= 250 || send_started_ms - wait_started_ms >= 250) {
-      Serial.printf("[WS] TX %s kind=%u len=%u lock=%lums write=%lums heap=%u->%u largest=%u->%u\n",
-                    ok ? "slow" : "FAILED", frame.kind, frame.len,
+      Serial.printf("[WS] TX %s kind=%u len=%u merged=%u lock=%lums write=%lums heap=%u->%u largest=%u->%u rssi=%ddBm\n",
+                    ok ? "slow" : "FAILED", frame.kind, frame.len, static_cast<unsigned>(merged_frames),
                     static_cast<unsigned long>(send_started_ms - wait_started_ms),
                     static_cast<unsigned long>(send_elapsed_ms), heap_before, ESP.getFreeHeap(),
                     largest_before,
-                    heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                    heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT), WiFi.RSSI());
+      if (!ok) s_ws.logWriteFailure();
     }
     if (ok && send_elapsed_ms >= WS_TX_SLOW_SEND_MS) {
       Serial.printf("[WS] 上行帧发送过慢：%lums kind=%u len=%u\n",
@@ -265,6 +361,10 @@ static void wifi_connect() {
   // 配网模式下保持 AP+STA 共存：SoftAP 继续服务配网页，STA 后台尝试连接。
   // 不能切纯 STA（会杀掉配网热点），disconnect 也不能带 eraseap 参数。
   WiFi.mode(prov_active() ? WIFI_AP_STA : WIFI_STA);
+  // FAST_SCAN stops at the first BSSID with this SSID, even if a much stronger
+  // mesh/AP exists on another channel. Only scan while (re)connecting.
+  WiFi.setScanMethod(WIFI_ALL_CHANNEL_SCAN);
+  WiFi.setSortMethod(WIFI_CONNECT_AP_BY_SIGNAL);
   WiFi.begin(cands[s_wifi_cand].ssid, cands[s_wifi_cand].pass);
   Serial.printf("[WiFi] 尝试 %d/%d: %s ...\n", s_wifi_cand + 1,
                 static_cast<int>(cands.size()), cands[s_wifi_cand].ssid);
@@ -276,6 +376,7 @@ static void wifi_connect() {
 static void on_ws_event(WStype_t type, uint8_t *payload, size_t length) {
   switch (type) {
     case WStype_CONNECTED:
+      s_ws.connected();
       net_audio_flush();
       portENTER_CRITICAL(&s_event_mux);
       ++s_connection_generation;
@@ -550,9 +651,10 @@ void net_loop() {
       // 周期性的收包停顿，表现为播放欠载甚至心跳误判断连。
       esp_wifi_set_ps(WIFI_PS_NONE);
       s_idle_power_save = false;
-      Serial.printf("[WiFi] 已连接! IP: %s DNS: %s\n",
+      Serial.printf("[WiFi] 已连接! IP: %s DNS: %s rssi=%ddBm channel=%d bssid=%s\n",
                     WiFi.localIP().toString().c_str(),
-                    WiFi.dnsIP(0).toString().c_str());
+                    WiFi.dnsIP(0).toString().c_str(), WiFi.RSSI(), WiFi.channel(),
+                    WiFi.BSSIDstr().c_str());
       prov_web_refresh();  // 重建网页监听，WiFi 管理页经设备 IP 可达
       // mDNS：iPhone Safari 直接访问 http://viora.local/，无需查 IP；
       // 也保证浏览器记住的登录凭据不随 DHCP 换 IP 失效。
@@ -705,7 +807,8 @@ bool net_send_json(const char *json) {
     if (s_ws_mutex) xSemaphoreGiveRecursive(s_ws_mutex);
     return ok;
   }
-  return tx_push(1, reinterpret_cast<const uint8_t *>(json), len);
+  const uint8_t kind = strcmp(json, "{\"type\":\"audio_keepalive\"}") == 0 ? 2 : 1;
+  return tx_push(kind, reinterpret_cast<const uint8_t *>(json), len);
 }
 
 uint32_t net_audio_sent_bytes() {
@@ -769,6 +872,7 @@ NetDrainStatus net_audio_poll_drain() {
 void net_audio_flush() {
   portENTER_CRITICAL(&s_tx_mux);
   s_tx_frames.clear();
+  s_keepalive_queued = false;
   s_tx_sent_bytes = 0;
   s_tx_enqueued_frames = 0;
   s_tx_completed_frames = 0;

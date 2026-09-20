@@ -13,6 +13,10 @@
 // 若 ESP32 在局域网内使用，建议用局域网 DNS 将该域名解析到 Mac；不要随意改成 IP。
 #define SECRET_SERVER_HOST "your-server-host"
 #define SECRET_SERVER_PORT 11451
+// 可选：同一局域网内直连语音服务器，绕过 NAS；离开内网时自动回退。
+// 填 Mac 的“本地主机名.local”或固定内网 IP。TLS 仍校验上面的正式域名。
+#define SECRET_SERVER_LAN_HOST ""
+#define SECRET_SERVER_LAN_PORT 11451
 
 // 与 VioraServer/.env 里的 API_KEY 保持一致；服务端留空则鉴权关闭。
 #define SECRET_API_KEY "your-api-key"

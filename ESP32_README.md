@@ -309,8 +309,20 @@ cp src/secrets.example.h src/secrets.h   # 复制模板后填写
 #define SECRET_WIFI_PASS    "你的WiFi密码"
 #define SECRET_SERVER_HOST  "your-server-host"   // 证书域名需能解析
 #define SECRET_SERVER_PORT  11451
+#define SECRET_SERVER_LAN_HOST ""  // 可选：Mac 本地主机名.local 或内网 IP
+#define SECRET_SERVER_LAN_PORT 11451
 #define SECRET_API_KEY      "与 VioraServer/.env 的 API_KEY 一致"
 ```
+
+局域网语音上传经过 NAS 容易积压时，可填写 `SECRET_SERVER_LAN_HOST` 直连
+Mac；mDNS 会跟随 Mac 的 IP 变化。TLS 的 SNI 和证书校验仍使用
+`SECRET_SERVER_HOST`，不接受未验证的证书。内网地址无法解析或连接失败时，
+后续连接自动使用原有域名；该项留空则始终沿用原路径。
+
+实时 PCM 使用同一有序队列，积压时合并到最多 4 KB；保活不会占用
+`audio_end`/`cancel` 的预留槽位。连接/收包沿用 5 秒预算，TLS 写入有独立的
+15 秒预算。慢写日志包含 RSSI，服务端 `audio_upload` 日志记录收包量和最大
+间隔，便于区分录音时长与网络等待时间。
 
 固件握手时携带 `X-Api-Key` 请求头，服务端校验失败会拒绝连接（close 1008）。
 服务端 `.env` 里 `API_KEY` 留空则鉴权关闭（开发模式）。其余公开参数（引脚、

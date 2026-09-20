@@ -6,6 +6,42 @@
 
 struct Frame { unsigned sequence; bool control; };
 int main() {
+  // Batching preserves every PCM byte and never swallows/reorders a control.
+  // Completion counts original entries, not the number of physical writes.
+  struct Packet { bool control; unsigned len; uint8_t data[4]; };
+  Packet packets[8];
+  NetTxQueue<Packet, 8, 1> batched;
+  batched.attach(packets);
+  assert(batched.back() == nullptr);
+  const Packet input[] = {
+      {false, 2, {1, 2}}, {false, 2, {3, 4}}, {false, 1, {5}},
+      {true, 1, {99}}, {false, 2, {6, 7}}};
+  for (const auto &p : input) { *batched.reserve(p.control) = p; batched.commit(); }
+  const auto merge = [](Packet &a, const Packet &b) {
+    if (a.control || b.control || a.len + b.len > sizeof(a.data)) return false;
+    memcpy(a.data + a.len, b.data, b.len); a.len += b.len; return true;
+  };
+  Packet combined;
+  assert(batched.popMerged(combined, merge) == 2);
+  const uint8_t first_bytes[] = {1, 2, 3, 4};
+  assert(combined.len == 4 && memcmp(combined.data, first_bytes, 4) == 0);
+  assert(batched.popMerged(combined, merge) == 1 && combined.data[0] == 5);
+  assert(batched.popMerged(combined, merge) == 1 && combined.control && combined.data[0] == 99);
+  assert(batched.popMerged(combined, merge) == 1 && combined.len == 2 && combined.data[1] == 7);
+  assert(batched.popMerged(combined, merge) == 0);
+  assert(batched.back() == nullptr);
+  // Repeat over the ring boundary and after cancellation/reset.
+  for (unsigned pass = 0; pass < 20; ++pass) {
+    for (const auto &p : input) { *batched.reserve(p.control) = p; batched.commit(); }
+    // Appending to the last unread PCM entry must not change the entry count.
+    const auto entries = batched.size();
+    assert(merge(*batched.back(), Packet{false, 1, {8}}));
+    assert(batched.size() == entries && batched.back()->len == 3);
+    assert(batched.popMerged(combined, merge) == 2);
+    batched.clear();
+    assert(batched.back() == nullptr);
+    assert(batched.popMerged(combined, merge) == 0);
+  }
   // PCM done but audio_end in flight must remain pending. Controls queued
   // after audio_end need not drain. Disconnect/reset/fault overrides success.
   assert(net_tx_fence_status(1, 1, 10, 11, false, true) == NetDrainStatus::Pending);
