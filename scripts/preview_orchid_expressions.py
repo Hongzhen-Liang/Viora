@@ -39,7 +39,7 @@ img{width:100%;display:block}figcaption{padding:12px 16px;font-size:14px}h2{marg
 <section class="stage"><canvas id="screen" width="230" height="210"></canvas><div>
 <h2 style="margin-top:0">动画预览</h2><p>这里播放的是固件使用的黑白点阵与时序；实机刷新延迟需在设备上确认。</p>
 <div id="states"></div><p id="frame"></p><button id="pause">暂停</button><button id="restart">重新播放</button>
-<p>眨眼闭合 160 毫秒。感知只播放一次后保持关注；夜间安静休息。</p></div></section>
+<p>眨眼闭合 160 毫秒。说话时短暂张开弧形笑嘴，再回到浅笑；感知后保持关注，夜间安静休息。</p></div></section>
 <h2>完整表情 · 13 张</h2><p>第 1 张已优化眼睑与瞳孔，其余 12 张沿用相同造型。</p><div id="gallery"></div></main>
 <script>
 const data = __DATA__;

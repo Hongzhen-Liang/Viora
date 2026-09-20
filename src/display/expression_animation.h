@@ -30,7 +30,10 @@ static constexpr Frame kIdle[] = {
 static constexpr Frame kSensing[] = {{3, 260}, {4, 420}, {5, 1600}};
 static constexpr Frame kListening[] = {{6, 4200}, {7, 160}, {6, 2300}};
 static constexpr Frame kThinking[] = {{8, 1400}, {9, 850}, {8, 1900}};
-static constexpr Frame kSpeaking[] = {{10, 520}, {11, 340}, {10, 700}, {11, 420}};
+// Brief, lightly open smiles between longer closed smiles keep speech gentle.
+// This is an expression rhythm, not phoneme-synchronized lip movement.
+static constexpr Frame kSpeaking[] = {
+    {11, 560}, {10, 220}, {11, 420}, {10, 280}, {11, 760}};
 
 template <size_t N>
 inline uint8_t frameAt(const Frame (&frames)[N], uint32_t elapsed,

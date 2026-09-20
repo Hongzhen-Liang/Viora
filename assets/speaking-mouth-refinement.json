@@ -1,0 +1,6 @@
+{
+  "mode": "built-in image_gen",
+  "target": "11 speak_neutral.png",
+  "source": "/Users/hongzhenliang/.codex/generated_images/01a0afcc-5713-7241-ae55-db6341e3cebb/exec-f87745aa-e1b5-4b5f-b5c0-740f55c4f40a.png",
+  "prompt": "Use case: precise-object-edit. Edit this exact Viora orchid speaking animation frame. Change ONLY the small inner mouth inside the central lip-shaped petal below the tiny heart nose. Remove the current triangular black mouth and white tongue. Replace with a SMALL, elegant, slightly open curved smile: narrow crescent outline with WHITE interior, no black fill, no tongue and no teeth. The opening should be only about 8 pixels high and 42 pixels wide on the original 1448x1086 canvas, a subtle upward-curving smile toward the right, never a round O or a wide grin. Preserve the outer lip-shaped petal outline EXACTLY. Preserve eyes, nose, petals, stem, buds, positions, linework, white background and composition EXACTLY. Original canvas 1448x1086. This will become a tiny monochrome LCD sprite so the mouth must be restrained and clean. Single image, no text."
+}
